@@ -1,0 +1,88 @@
+{
+  "name": "@antasphere/chassis-server",
+  "version": "0.1.0",
+  "license": "SEE LICENSE IN LICENSE",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./env": {
+      "types": "./dist/env.d.ts",
+      "default": "./dist/env.js"
+    },
+    "./logger": {
+      "types": "./dist/logger.d.ts",
+      "default": "./dist/logger.js"
+    },
+    "./util": {
+      "types": "./dist/util/index.d.ts",
+      "default": "./dist/util/index.js"
+    },
+    "./storage": {
+      "types": "./dist/storage/index.d.ts",
+      "default": "./dist/storage/index.js"
+    },
+    "./files": {
+      "types": "./dist/files/index.d.ts",
+      "default": "./dist/files/index.js"
+    },
+    "./email": {
+      "types": "./dist/email/index.d.ts",
+      "default": "./dist/email/index.js"
+    },
+    "./audit": {
+      "types": "./dist/audit/index.d.ts",
+      "default": "./dist/audit/index.js"
+    },
+    "./apikeys": {
+      "types": "./dist/apikeys/index.d.ts",
+      "default": "./dist/apikeys/index.js"
+    },
+    "./accounts": {
+      "types": "./dist/accounts/index.d.ts",
+      "default": "./dist/accounts/index.js"
+    },
+    "./observability": {
+      "types": "./dist/observability/index.d.ts",
+      "default": "./dist/observability/index.js"
+    },
+    "./platform": {
+      "types": "./dist/platform/index.d.ts",
+      "default": "./dist/platform/index.js"
+    },
+    "./invitations": {
+      "types": "./dist/invitations/index.d.ts",
+      "default": "./dist/invitations/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@antasphere/chassis-contract": "workspace:*",
+    "@antasphere/chassis-db": "workspace:*",
+    "@aws-sdk/client-s3": "^3.1079.0",
+    "@aws-sdk/lib-storage": "^3.1079.0",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.205.0",
+    "@opentelemetry/resources": "^2.9.0",
+    "@opentelemetry/sdk-trace-base": "^2.9.0",
+    "@opentelemetry/sdk-trace-node": "^2.9.0",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.9.0",
+    "nodemailer": "^9.1.1",
+    "pg": "^8.22.0",
+    "pino": "^9.7.0",
+    "resend": "^6.17.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/nodemailer": "^8.0.1",
+    "@types/pg": "^8.20.0",
+    "pino-pretty": "^13.0.0",
+    "vitest": "^3.2.0"
+  }
+}
