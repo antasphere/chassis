@@ -4,6 +4,10 @@
   "license": "SEE LICENSE IN LICENSE",
   "private": true,
   "type": "module",
+  "files": [
+    "dist",
+    "!dist/testing"
+  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
