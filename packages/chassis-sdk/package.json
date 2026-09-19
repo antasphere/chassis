@@ -1,0 +1,28 @@
+{
+  "name": "@antasphere/chassis-sdk",
+  "version": "0.1.0",
+  "license": "SEE LICENSE IN LICENSE",
+  "private": true,
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src test",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@antasphere/chassis-contract": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.0"
+  }
+}
