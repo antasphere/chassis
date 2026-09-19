@@ -1,0 +1,30 @@
+{
+  "name": "@antasphere/chassis-contract",
+  "version": "0.1.0",
+  "license": "SEE LICENSE IN LICENSE",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./routes": {
+      "types": "./dist/routes/index.d.ts",
+      "default": "./dist/routes/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@hono/zod-openapi": "^1.4.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.0"
+  }
+}
