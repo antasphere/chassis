@@ -50,6 +50,17 @@ export class EventBus<TExtra = {}> {
     return () => set.delete(handler as Handler<EventMap<TExtra>, never>);
   }
 
+  /**
+   * The SAME bus as the chassis sees it: the generic events only. The
+   * composition code is generic over the tool's event map, and a bus is
+   * invariant in it (it both takes and hands out payloads), so the chassis
+   * modules, written against the generic map, read the bus through this view.
+   * Sound as long as a tool never re-declares a chassis event name.
+   */
+  chassisView(): EventBus {
+    return this as unknown as EventBus;
+  }
+
   emit<E extends keyof EventMap<TExtra>>(event: E, payload: EventMap<TExtra>[E]): void {
     for (const handler of this.handlers.get(event) ?? []) {
       Promise.resolve((handler as Handler<EventMap<TExtra>, E>)(payload)).catch((err) => {

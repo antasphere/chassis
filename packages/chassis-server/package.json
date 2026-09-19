@@ -5,6 +5,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
     "./env": {
       "types": "./dist/env.d.ts",
       "default": "./dist/env.js"
@@ -80,9 +84,10 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint src",
-    "test": "vitest run --passWithNoTests"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "lint": "eslint src test",
+    "test": "vitest run --dir test/unit --passWithNoTests",
+    "test:integration": "vitest run --dir test/integration"
   },
   "dependencies": {
     "@antasphere/chassis-contract": "workspace:*",
@@ -118,12 +123,14 @@
   "devDependencies": {
     "@better-auth/core": "1.6.22",
     "@better-fetch/fetch": "1.1.21",
+    "@testcontainers/postgresql": "^11.0.0",
     "@types/node": "^22.15.0",
     "@types/nodemailer": "^8.0.1",
     "@types/pg": "^8.20.0",
     "@types/yazl": "^3.3.1",
     "better-call": "1.1.8",
     "pino-pretty": "^13.0.0",
+    "testcontainers": "^11.14.0",
     "vitest": "^3.2.0"
   }
 }
