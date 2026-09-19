@@ -185,3 +185,42 @@ export function opaqueJsonChecks<T extends z.ZodType<Record<string, unknown>>>(s
 export function plainText(min: number, max: number) {
   return noControlChars(z.string().min(min).max(max));
 }
+
+/**
+ * RFC 7231 media type: `token "/" token`, optionally followed by
+ * `;`-separated `token=token|quoted-string` parameters. The manifest's
+ * `contentType` is copied VERBATIM into the response `Content-Type` header
+ * when the blob is served (`files/serve.ts`), including on the anonymous
+ * viewer — and versions are immutable, so a committed value that the
+ * `Headers` constructor refuses (a non-Latin-1 character, say) was a
+ * permanent anonymous 500 on that asset (PLT-5, PRDCT-1358). The grammar
+ * check at commit is the fix; the serve-time sanitizer is the backstop for
+ * rows committed before it.
+ */
+const MEDIA_TYPE_TOKEN = "[!#$%&'*+.^_`|~0-9A-Za-z-]+";
+export const MEDIA_TYPE_RE = new RegExp(
+  `^${MEDIA_TYPE_TOKEN}\\/${MEDIA_TYPE_TOKEN}` +
+    `(?:[ \\t]*;[ \\t]*${MEDIA_TYPE_TOKEN}=(?:${MEDIA_TYPE_TOKEN}|"[^"\\\\\\u0000-\\u001f\\u007f]*"))*$`
+);
+
+/**
+ * A response header VALUE is a ByteString: setting it converts each UTF-16
+ * code unit and throws a TypeError on any unit above 0xFF. The token grammar
+ * already excludes those in unquoted positions, but a quoted parameter value
+ * (`charset="€"`) can carry any character the regex's negated class does not
+ * name — U+20AC passes the pattern and then throws at the `Headers` set. So
+ * the Latin-1 ceiling is a SEPARATE, explicit check: every code unit ≤ 0xFF,
+ * which also rejects astral characters and lone surrogates (their code units
+ * are all ≥ 0xD800). Without it the grammar check is not the closure PLT-5
+ * needs.
+ */
+function isLatin1(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    if (value.charCodeAt(i) > 0xff) return false;
+  }
+  return true;
+}
+
+export function isValidMediaType(value: string): boolean {
+  return value.length >= 1 && value.length <= 255 && isLatin1(value) && MEDIA_TYPE_RE.test(value);
+}
