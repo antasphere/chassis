@@ -5,19 +5,24 @@
   "private": true,
   "type": "module",
   "files": [
-    "dist"
+    "dist",
+    "!dist/testing"
   ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "default": "./dist/testing/index.js"
     }
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint src",
-    "test": "vitest run --passWithNoTests"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "lint": "eslint src test",
+    "test": "vitest run"
   },
   "dependencies": {
     "@antasphere/chassis-contract": "workspace:*",

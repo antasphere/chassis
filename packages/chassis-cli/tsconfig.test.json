@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["ES2023", "DOM"],
+    "types": ["node"],
+    "paths": {
+      "@chassis-cli-test/host": ["./test/host/minimal-host.ts"],
+      "@antasphere/chassis-cli": ["./src/index.ts"],
+      "@antasphere/chassis-cli/testing": ["./src/testing/index.ts"]
+    }
+  },
+  "include": ["src", "test", "vitest.config.ts"]
+}
