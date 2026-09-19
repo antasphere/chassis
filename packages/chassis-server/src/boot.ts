@@ -663,6 +663,22 @@ export async function bootPlatform<
   // it from this line on). A tool subscribes to the event bus inside this
   // call (no request can arrive before boot returns, so a subscription made
   // here precedes every emission).
+  //
+  // ONE step swapped sides in the move, and this is it. At base
+  // (`apps/server/src/boot.ts@461db68`) the deck services STRADDLED
+  // `createRateLimiters`: the form and form-upload services were built before
+  // it (and the purge cell filled), the collaborator service after it. Here
+  // `createRateLimiters` runs after the whole `tool.services` slot. The one
+  // consequence: a Redis connect failure from the limiters now surfaces after
+  // the domain services exist rather than between them; what moved ahead of
+  // the connect is the collaborator service's constructor, pure field
+  // assignment with no I/O. The limiters are not put back first because the
+  // job pollers are live from `createJobs` above, well before this line (at
+  // base too): with the limiters first, the form-upload purge cell would be
+  // empty during the limiter connect, where at base it was already filled,
+  // and a purge job picked up in that window would run as a no-op and
+  // complete. One slot cannot sit on both sides of the limiters; this side is
+  // the unobservable one.
   const serviceCore: ServiceCore<TEnvShape, TEvents, TToolOverrides> = {
     db: db.db,
     env,
