@@ -1,6 +1,6 @@
 /**
  * The mail shell: the one layout every transactional email is set in, and the
- * few blocks a builder composes a body from. The hub and Slideless carry this
+ * few blocks a builder composes a body from. The hub and the chassis carry this
  * file BYTE-IDENTICAL (the twin rule, LESSONS.md): change one, copy it to the
  * other. What differs per product is the `MailBrand` its templates.ts passes.
  *
