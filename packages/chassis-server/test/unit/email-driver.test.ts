@@ -16,7 +16,7 @@ describe('createEmailDriver', () => {
   });
 
   it('builds each delivering driver when its credential and sender are present', () => {
-    const from = 'Slideless <noreply@example.com>';
+    const from = 'Things <noreply@example.com>';
     expect(
       createEmailDriver(env({ EMAIL_DRIVER: 'smtp', SMTP_URL: 'smtp://h:25', EMAIL_FROM: from }), logger).name
     ).toBe('smtp');
@@ -35,7 +35,7 @@ describe('createEmailDriver', () => {
   // A driver that boots without its credential would fail at the first send,
   // which is the flow a user is waiting on; it must fail at boot instead.
   it('refuses a delivering driver that is missing its credential or its sender', () => {
-    const from = 'Slideless <noreply@example.com>';
+    const from = 'Things <noreply@example.com>';
     expect(() => createEmailDriver(env({ EMAIL_DRIVER: 'brevo', EMAIL_FROM: from }), logger)).toThrow(
       'EMAIL_DRIVER=brevo requires BREVO_API_KEY'
     );
@@ -76,7 +76,7 @@ describe('the brevo driver on the wire', () => {
 
   it('posts the message to Brevo with the key in the api-key header', async () => {
     const { result, fetchMock } = await send(
-      'Slideless <noreply@example.com>',
+      'Things <noreply@example.com>',
       new Response('{}', { status: 201 })
     );
     expect(result).toBeNull();
@@ -87,7 +87,7 @@ describe('the brevo driver on the wire', () => {
     expect((init.headers as Record<string, string>)['api-key']).toBe('xkeysib-secret');
     const body = JSON.parse(init.body as string);
     // `Name <addr>` is split into Brevo's own sender shape.
-    expect(body.sender).toEqual({ name: 'Slideless', email: 'noreply@example.com' });
+    expect(body.sender).toEqual({ name: 'Things', email: 'noreply@example.com' });
     expect(body.to).toEqual([{ email: 'her@example.com' }]);
     expect(body.subject).toBe('Subject');
     expect(body.htmlContent).toBe('<p>Body</p>');

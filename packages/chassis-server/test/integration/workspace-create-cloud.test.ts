@@ -37,7 +37,7 @@ const expireTtl = () => sleep(DIALS.reconcileTtlMs + 60);
 const CLOUD_ENV = (hub: FakeHub) => ({
   EDITION: 'cloud',
   HUB_ISSUER_URL: hub.issuer,
-  HUB_CLIENT_ID: 'tool-slideless-cloud',
+  HUB_CLIENT_ID: host.hubClientId,
   HUB_CLIENT_SECRET: 'integration-test-hub-secret-0001'
 });
 
@@ -68,7 +68,7 @@ const me = async (target: TestApp, cookie: string) =>
   readJson(await target.app.request('/api/v1/me', { headers: { cookie } }));
 
 beforeAll(async () => {
-  [container, hub] = await Promise.all([startPostgres(), FakeHub.start()]);
+  [container, hub] = await Promise.all([startPostgres(), FakeHub.start({ clientId: host.hubClientId })]);
   app = await createTestApp(await createDatabase(container, 'ws_create_cloud'), CLOUD_ENV(hub), {
     hubDials: DIALS
   });

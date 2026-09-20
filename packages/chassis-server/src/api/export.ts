@@ -84,7 +84,7 @@ export function registerExportRoutes(api: OpenAPIHono, deps: ExportRouteDeps): v
 
   // Gates, in order: rate limit (IP AND user — exports are expensive) →
   // authenticated → admin+. Machine principals additionally passed the
-  // fail-closed data:export scope gate in authContext before landing here.
+  // fail-closed export-scope gate in authContext before landing here.
   api.use(
     '/workspace/export',
     rateLimit(limiters.workspaceExport, clientIp, async (c) => {

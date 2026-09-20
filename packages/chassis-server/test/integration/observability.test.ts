@@ -19,7 +19,7 @@ import {
  * end-to-end through pg-boss into the downstream sink.
  *
  * (The PRIV-1 pin on the viewer's `/v/:secret` metrics label is the tool's: the
- * Slideless app keeps it, `apps/server/test/integration/observability-viewer.test.ts`.)
+ * tool's app keeps it, `apps/server/test/integration/observability-viewer.test.ts`.)
  */
 
 const OWNER = { email: 'owner@obs.test', name: 'Obs Owner', password: 'obs-owner-password-123' };

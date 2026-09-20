@@ -30,7 +30,7 @@ import { jwks, type Db } from '@antasphere/chassis-db';
  * newest-key selection, and the /jwks publish filter on ANY bump.
  */
 
-/** The alg slideless pins in `jwks.keyPairConfig` (identity/better-auth.ts). */
+/** The alg the chassis pins in `jwks.keyPairConfig` (identity/better-auth.ts). */
 const SIGNING_ALG = 'RS256';
 
 export type SigningKeyPreflight =

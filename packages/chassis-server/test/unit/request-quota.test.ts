@@ -39,12 +39,12 @@ const memoryMake = (prefix: string, points: number, duration: number) =>
 
 describe('principalBucketKey', () => {
   it('keys API-key principals by the key id, not the user', () => {
-    const p = principal({ via: 'api_key', apiKeyId: 'key-abc', scopes: new Set(['presentations:read']) });
+    const p = principal({ via: 'api_key', apiKeyId: 'key-abc', scopes: new Set(['things:read']) });
     expect(principalBucketKey(p)).toBe('key:key-abc');
   });
 
   it('keys OAuth principals by the token subject (userId)', () => {
-    const p = principal({ via: 'oauth', scopes: new Set(['presentations:read']) });
+    const p = principal({ via: 'oauth', scopes: new Set(['things:read']) });
     expect(principalBucketKey(p)).toBe('oauth:user-1');
   });
 

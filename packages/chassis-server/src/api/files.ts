@@ -191,7 +191,7 @@ export function registerFileRoutes(api: OpenAPIHono, deps: FileRouteDeps): void 
     if (!isUuid(id)) return c.json(err('not_found', 'File not found'), 404);
     // The byte route carries the ADR 013 scope too (SL-B1) — this was the
     // whole-tenant read: `workspace_id` alone served ANY deck's content to
-    // any member and to any presentations:read key.
+    // any member and to any read-scope key.
     const file = await service.get(principal.workspaceId, id, deps.blobReadScope(principal));
     if (!file) return c.json(err('not_found', 'File not found'), 404);
 

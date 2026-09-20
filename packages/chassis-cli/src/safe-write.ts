@@ -7,7 +7,7 @@ import { pipeline } from 'node:stream/promises';
 /**
  * Writing SERVER-CHOSEN paths to a developer's disk, safely.
  *
- * `slideless pull` and `slideless files download` both materialize names the
+ * The tool's `pull` and the generic `files download` both materialize names the
  * instance picked (a manifest path, a stored filename). That makes the local
  * filesystem the last line of defence, and a lexical `resolve()` +
  * `startsWith()` is not one: it says nothing about symlinks. Three rules,

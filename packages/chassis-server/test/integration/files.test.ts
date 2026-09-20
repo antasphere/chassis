@@ -169,7 +169,7 @@ describe('local driver', () => {
     expect(res.status).toBe(413);
   });
 
-  it('scopes machine access: presentations:read key can stream, cannot upload', async () => {
+  it('scopes machine access: a read-scope key can stream, cannot upload', async () => {
     const mint = await app.app.request('/api/v1/api-keys', {
       ...json({ name: 'files-ro', scopes: [host.scopes.read] }),
       headers: { 'content-type': 'application/json', cookie }
@@ -275,11 +275,11 @@ describe('s3 driver (MinIO)', () => {
       forcePathStyle: true,
       credentials: { accessKeyId: 'minioadmin', secretAccessKey: 'minioadmin' }
     });
-    await client.send(new CreateBucketCommand({ Bucket: 'slideless' }));
+    await client.send(new CreateBucketCommand({ Bucket: 'chassis-test' }));
 
     app = await createTestApp(await createDatabase(container, 'files_s3'), {
       STORAGE_DRIVER: 's3',
-      S3_BUCKET: 'slideless',
+      S3_BUCKET: 'chassis-test',
       S3_REGION: 'us-east-1',
       S3_ENDPOINT: endpoint,
       S3_ACCESS_KEY_ID: 'minioadmin',

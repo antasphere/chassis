@@ -21,7 +21,7 @@ import type { ErasureLog } from './erasure-log.js';
  * never deadlock. The completion audit row lands in every workspace the
  * user belonged to.
  *
- * Projection exemption (D11, slideless-cloud-binding-plan): the guard
+ * Projection exemption (D11, the cloud-binding plan): the guard
  * applies ONLY to workspaces this instance owns (centralAccountId IS
  * NULL). A projected (hub-origin) workspace asserts ownership hub-side —
  * its local membership rows are a re-syncable projection, so a

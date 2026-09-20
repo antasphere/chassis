@@ -56,7 +56,7 @@ const ME = {
   workspace: { id: 'w1', name: 'Acme' },
   role: 'owner',
   via: 'api_key',
-  scopes: ['presentations:read']
+  scopes: ['items:read']
 };
 
 describe(`${bin} CLI`, () => {

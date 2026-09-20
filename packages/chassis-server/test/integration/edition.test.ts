@@ -31,7 +31,7 @@ const OWNER = { email: 'owner@edition.test', name: 'Ed Owner', password: 'ed-own
 const HUB_ENV = {
   EDITION: 'cloud',
   HUB_ISSUER_URL: 'http://hub.localhost:3300',
-  HUB_CLIENT_ID: 'tool-slideless-cloud',
+  HUB_CLIENT_ID: host.hubClientId,
   HUB_CLIENT_SECRET: 'integration-test-hub-secret-0001'
 };
 
@@ -164,7 +164,7 @@ describe('cloud edition on a fresh database', () => {
     expect(anon.status).toBe(401);
     // A syntactically valid but unknown API key still dies inside
     // authContext — the route-local session path never runs for bearers.
-    const fakeKey = 'slk_AAAAAAAA_' + 'a'.repeat(43);
+    const fakeKey = `${host.identity.apiKeyPrefix}_AAAAAAAA_` + 'a'.repeat(43);
     const withKey = await app.app.request('/api/v1/me', {
       headers: { authorization: `Bearer ${fakeKey}`, 'x-forwarded-for': '10.77.0.1' }
     });
@@ -473,7 +473,7 @@ describe('cloud edition closes the OTP entrances (D1 hub-only credentials)', () 
   // log is the complete access record). Both were hub-gated per request by
   // the P4 re-assertion already — posture, not a hole. The self-revoke
   // (DELETE /cli/auth/key) is the deliberate exception: revocation narrows
-  // access, and `slideless logout --org` needs it.
+  // access, and the CLI's `logout --org` needs it.
   let app: TestApp;
   let email: RecordingEmailDriver;
 
@@ -733,7 +733,7 @@ describe('oss stays dark: zero hub-shaped calls across boot + a request matrix (
       // them completely unread (hubConfig() is the single switch).
       const app = await createTestApp(await createDatabase(container, 'edition_oss_dark'), {
         HUB_ISSUER_URL: 'http://hub.localhost:3300',
-        HUB_CLIENT_ID: 'tool-slideless-cloud',
+        HUB_CLIENT_ID: host.hubClientId,
         HUB_CLIENT_SECRET: 'integration-test-hub-secret-0001'
       });
       try {

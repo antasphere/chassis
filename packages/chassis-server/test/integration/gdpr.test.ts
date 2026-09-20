@@ -19,14 +19,14 @@ import {
  * GDPR export + delete (M5):
  *  - GET /workspace/export streams a complete zip (sections, no secrets,
  *    blobs byte-identical, soft-deleted blobs skipped with a reason);
- *  - the dedicated opt-in data:export scope (presentations:read must NOT reach it),
+ *  - the dedicated opt-in export scope (the read scope must NOT reach it),
  *    the admin role gate, the ws-export rate limit, and audit coverage for
  *    session AND machine principals;
  *  - self-service and admin account deletion: cascade semantics with files
  *    SURVIVING (created_by → NULL), audit anonymization + completion rows,
  *    the guard ladder, and the last-owner rule;
  *  - (the CLI export command against a real listening server is the tool's:
- *    the Slideless app keeps it, `apps/server/test/integration/gdpr-cli.test.ts`).
+ *    the tool's app keeps it, `apps/server/test/integration/gdpr-cli.test.ts`).
  *
  * Every actor gets its own x-forwarded-for (TRUST_PROXY=true in the test
  * app) so the per-IP login and ws-export buckets never bleed across tests.
@@ -72,7 +72,7 @@ let adminUserId: string;
 
 let liveFileId: string;
 let trashedFileId: string;
-let exportKey: string; // owner-minted, data:export only
+let exportKey: string; // owner-minted, the export scope only
 let exportKeyId: string; // its row id (audit identity assertion)
 
 const json = (body: unknown, extraHeaders: Record<string, string> = {}) => ({
@@ -269,8 +269,8 @@ describe('GET /workspace/export', () => {
     expect(res.status).toBe(403);
   });
 
-  it('machine access: data:export required, role still enforced, audited with the key identity', async () => {
-    // An admin-minted key WITH data:export streams the zip.
+  it('machine access: the export scope required, role still enforced, audited with the key identity', async () => {
+    // An admin-minted key WITH the export scope streams the zip.
     const ok = await exportRequest({
       authorization: `Bearer ${exportKey}`,
       'x-forwarded-for': IPS.machine
@@ -279,7 +279,7 @@ describe('GET /workspace/export', () => {
     const zip = new AdmZip(Buffer.from(await ok.arrayBuffer()));
     expect(zip.getEntry('manifest.json')).toBeTruthy();
 
-    // presentations:read alone must NEVER reach the export (exfiltration guard).
+    // The read scope alone must NEVER reach the export (exfiltration guard).
     const readOnly = await mintKey(ownerCookie, 'read-only', [host.scopes.read]);
     const denied = await exportRequest({
       authorization: `Bearer ${readOnly.key}`,
@@ -288,7 +288,7 @@ describe('GET /workspace/export', () => {
     expect(denied.status).toBe(403);
     expect((await readJson(denied)).error.code).toBe('insufficient_scope');
 
-    // A member-minted key with data:export passes the scope gate but fails
+    // A member-minted key with the export scope passes the scope gate but fails
     // the role gate.
     const memberKey = await mintKey(memberCookie, 'member-export', [host.scopes.dataExport]);
     const roleDenied = await exportRequest({

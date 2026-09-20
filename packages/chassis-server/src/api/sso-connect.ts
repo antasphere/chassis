@@ -16,7 +16,7 @@ const err = (code: string, message: string) => ({ error: { code, message } });
  *
  *   POST /sso/cli-connect → verify a hub-minted 120 s exchange JWT (the H3
  *   counterpart), JIT-provision exactly like an SSO login, store the H3
- *   offline grant, reconcile fail-closed, mint a USER-scoped `slk_` key
+ *   offline grant, reconcile fail-closed, mint a USER-scoped API key
  *
  * PUBLIC path (the hub JWT IS the credential — the invitation-lookup /
  * cli-auth tier-2 pattern), rate-limited on the login wall (api/index.ts),
@@ -48,9 +48,9 @@ const err = (code: string, message: string) => ({ error: { code, message } });
  * encrypted on the account row (`acquireFromConnect` — the same row a
  * browser login writes), and the SAME fail-closed reconcile as a browser
  * login projects the user's orgs as-the-user. Only a definitive 'ok' pass
- * mints: the key is an ordinary USER-scoped `slk_` key (workspaceId null —
+ * mints: the key is an ordinary USER-scoped API key (workspaceId null —
  * the org is a per-request parameter, like every credential), scopes
- * presentations:read + presentations:write — NEVER data:export (the
+ * the tool's read + write — NEVER its export scope (the
  * CLI_KEY_SCOPES grant, same as /cli/auth/complete), named "Antasphere CLI
  * <date>", audited, returned once. A connect that can prove NO usable grant
  * (none carried, none stored, or the carried one is dead) refuses with

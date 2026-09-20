@@ -78,7 +78,7 @@ export interface CreateAuthOptions {
   /**
    * Origins that are NEVER trusted, serving origin or not (PRDCT-1352): each
    * is filtered out of `trustedOrigins` and refused outright by the sign-in
-   * Origin lock. Empty = nothing installed. Slideless passes its viewer
+   * Origin lock. Empty = nothing installed. A deck tool passes its viewer
    * origin (author-controlled deck script runs there).
    */
   untrustedOrigins: readonly string[];

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { symmetricDecrypt, symmetricEncrypt } from 'better-auth/crypto';
-import { createDatabase, createTestApp, startPostgres, type TestApp } from './helpers.js';
+import { createDatabase, createTestApp, host, startPostgres, type TestApp } from './helpers.js';
 import { FakeHub, type HubUserFixture } from '@antasphere/chassis-server/testing';
 import * as sso from './sso-helpers.js';
 import {
@@ -67,7 +67,7 @@ function makeService(dials: Partial<typeof DEFAULT_GRANT_DIALS> = {}): HubGrantS
   return new HubGrantService({
     db: app.db.db,
     issuerUrl: hub.issuer,
-    clientId: 'tool-slideless-cloud',
+    clientId: host.hubClientId,
     clientSecret: 'integration-test-hub-secret-0001',
     tokenResource: `${hub.issuer}/mcp`,
     key: async () => AUTH_SECRET,
@@ -107,12 +107,12 @@ async function staleStoredAccess(): Promise<void> {
 }
 
 beforeAll(async () => {
-  [container, hub] = await Promise.all([startPostgres(), FakeHub.start()]);
+  [container, hub] = await Promise.all([startPostgres(), FakeHub.start({ clientId: host.hubClientId })]);
   connectionString = await createDatabase(container, 'hub_grant');
   app = await createTestApp(connectionString, {
     EDITION: 'cloud',
     HUB_ISSUER_URL: hub.issuer,
-    HUB_CLIENT_ID: 'tool-slideless-cloud',
+    HUB_CLIENT_ID: host.hubClientId,
     HUB_CLIENT_SECRET: 'integration-test-hub-secret-0001'
   });
   const res = await app.app.request(

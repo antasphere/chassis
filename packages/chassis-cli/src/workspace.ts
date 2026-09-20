@@ -10,10 +10,10 @@ import type { CliIdentity } from './identity.js';
  * per-request `X-Workspace-Id`, and the SDK sends it once told which. This
  * module decides which, in its documented order:
  *
- *   workspace: --workspace → SLIDELESS_WORKSPACE → profile activeWorkspaceId
+ *   workspace: --workspace → <PREFIX>_WORKSPACE → profile activeWorkspaceId
  *              → nothing sent (the server's default membership)
  *
- * A value is a Slideless workspace id (the LOCAL id `/me` lists, never a hub
+ * A value is a workspace id of the instance (the LOCAL id `/me` lists, never a hub
  * org id) or a workspace name. An id is sent as it is; a name is looked up
  * in `/me`'s `workspaces[]` first. Pure functions only: the wiring (the
  * client, the profile write) lives in context.ts and commands/workspaces.ts.
@@ -107,7 +107,7 @@ export function createWorkspace(identity: CliIdentity): CliWorkspace {
    * The selection of this invocation, or undefined when nothing selects one.
    *
    * An empty `--workspace` is a usage error (somebody meant to name one); an
-   * empty SLIDELESS_WORKSPACE is an unset one (a CI variable that expanded to
+   * empty <PREFIX>_WORKSPACE is an unset one (a CI variable that expanded to
    * nothing) and falls through. The profile field counts only when the profile
    * names the instance this request goes to: a workspace id means nothing on
    * another instance — the same rule that scopes the cached hub-connect key.

@@ -18,7 +18,7 @@ import { THINGS_COPY, THINGS_IDENTITY, THINGS_ROUTES_COPY } from '../host/identi
  * deck slots.
  *
  * The migrations are a FIXTURE read by path, not an import: the only
- * migration history that exists today is Slideless's (`packages/db/drizzle`,
+ * migration history that exists today is the tool's (`packages/db/drizzle`,
  * which also creates the deck tables — unused here). That is the honest state
  * of the repository until the template wave squashes a history of its own.
  */
@@ -155,7 +155,7 @@ describe('the chassis with an empty tool', () => {
     // A scope of another vocabulary is not mintable here.
     const foreign = await booted.app.request(
       '/api/v1/api-keys',
-      json({ name: 'foreign', scopes: ['presentations:read'] }, { cookie })
+      json({ name: 'foreign', scopes: ['gadgets:read'] }, { cookie })
     );
     expect(foreign.status).toBe(400);
 

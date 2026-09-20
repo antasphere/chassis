@@ -47,7 +47,7 @@ let container: StartedPostgreSqlContainer;
 let hub: FakeHub;
 
 beforeAll(async () => {
-  [container, hub] = await Promise.all([startPostgres(), FakeHub.start()]);
+  [container, hub] = await Promise.all([startPostgres(), FakeHub.start({ clientId: host.hubClientId })]);
 });
 
 afterAll(async () => {
@@ -58,7 +58,7 @@ function cloudEnv() {
   return {
     EDITION: 'cloud',
     HUB_ISSUER_URL: hub.issuer,
-    HUB_CLIENT_ID: 'tool-slideless-cloud',
+    HUB_CLIENT_ID: host.hubClientId,
     HUB_CLIENT_SECRET: 'integration-test-hub-secret-0001'
   };
 }

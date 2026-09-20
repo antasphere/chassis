@@ -43,7 +43,7 @@ let container: StartedPostgreSqlContainer;
 let hub: FakeHub;
 
 beforeAll(async () => {
-  [container, hub] = await Promise.all([startPostgres(), FakeHub.start()]);
+  [container, hub] = await Promise.all([startPostgres(), FakeHub.start({ clientId: host.hubClientId })]);
 });
 
 afterAll(async () => {
@@ -54,16 +54,16 @@ function cloudEnv(issuer = hub.issuer) {
   return {
     EDITION: 'cloud',
     HUB_ISSUER_URL: issuer,
-    HUB_CLIENT_ID: 'tool-slideless-cloud',
+    HUB_CLIENT_ID: host.hubClientId,
     HUB_CLIENT_SECRET: 'integration-test-hub-secret-0001',
     // Pin the hint domain explicitly: the FakeHub issuer is an IP, so the
     // derived default is meaningless here (the derivation rule itself is
     // unit-pinned in env.test.ts).
-    HUB_HINT_COOKIE_DOMAIN: 'slideless.test'
+    HUB_HINT_COOKIE_DOMAIN: 'tool.test'
   };
 }
 
-const HINT_CLEAR = 'ant_sso_hint=; Max-Age=0; Domain=slideless.test; Path=/; SameSite=Lax';
+const HINT_CLEAR = 'ant_sso_hint=; Max-Age=0; Domain=tool.test; Path=/; SameSite=Lax';
 
 /** The set-cookie list of a response (Node 20 Headers). */
 const setCookies = (res: Response) => res.headers.getSetCookie();
@@ -235,7 +235,7 @@ describe('cloud: logout degrades to local-only when hub discovery is down', () =
   it('a sid-carrying session still logs out — url null, session revoked, hint cleared', async () => {
     // A dedicated hub so this suite can kill discovery without touching the
     // shared FakeHub: log in while it lives, stop it, THEN log out.
-    const hub2 = await FakeHub.start();
+    const hub2 = await FakeHub.start({ clientId: host.hubClientId });
     const app2 = await createTestApp(
       await createDatabase(container, 'sso_logout_down'),
       cloudEnv(hub2.issuer)

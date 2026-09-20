@@ -25,7 +25,7 @@ import type { LoginAccessToken } from './hub-user-client.js';
  *    projection) — a cloud login whose reconcile pass fails must not exist.
  *
  * Identity comes from the ID TOKEN ONLY (aud = HUB_CLIENT_ID). The access
- * token is never claim-bearing for Slideless: the SSO code exchange sends
+ * token is never claim-bearing for the tool: the SSO code exchange sends
  * RFC 8707 `resource = <hub>/mcp` (the `tokenResource` seam constant shared
  * with hub-grant.ts), so the callback access token is HUB-audienced — a
  * bearer for the hub's own `/api/v1`, which the login-time reconcile uses
@@ -34,7 +34,7 @@ import type { LoginAccessToken } from './hub-user-client.js';
  * source of org/membership truth. Refresh + between-logins reads live in
  * hub-grant.ts / hub-user-client.ts; SSO scopes carry `offline_access
  * account:read` so the grant persists on the account row, plus
- * `orgs:create` (HUB_SSO_SCOPES below) for the one write Slideless makes at
+ * `orgs:create` (HUB_SSO_SCOPES below) for the one write the tool makes at
  * the hub as the user.
  */
 
@@ -62,7 +62,7 @@ export interface HubSsoAssertion {
 /**
  * What one VERIFIED hub exchange JWT asserts (`POST /sso/cli-connect`,
  * internal/federation.md P5): the USER only. The H3 token still carries ONE
- * org's transitional claims through the hub's compat window, but Slideless
+ * org's transitional claims through the hub's compat window, but the tool
  * reads none of them — org truth comes from the connect-time reconcile
  * (as-the-user `GET /orgs` with the grant the SAME H3 response delivered),
  * exactly like the browser login path.
@@ -152,7 +152,7 @@ interface LoginScope {
 const loginScope = new AsyncLocalStorage<LoginScope>();
 
 /**
- * The scopes Slideless requests at hub sign-in — the ONE statement of the
+ * The scopes the tool requests at hub sign-in — the ONE statement of the
  * list (the provider entry below spreads it; tests import it).
  *
  *  - `openid profile email`: the id_token identity.
@@ -168,7 +168,7 @@ const loginScope = new AsyncLocalStorage<LoginScope>();
  * CLIENT's registered scopes (its tool registry seeds them) and answers
  * `error=invalid_scope` for an unknown one — the WHOLE sign-in fails, for
  * every user, not just workspace creation. A hub that does not yet list
- * `orgs:create` for this client must never meet a Slideless that requests
+ * `orgs:create` for this client must never meet a tool that requests
  * it. A grant minted BEFORE this shipped simply lacks the scope: the hub
  * answers 403 `insufficient_scope` on create, which the route maps to 401
  * `hub_reauth_required` — one sign-in heals it.
@@ -405,7 +405,7 @@ export class HubSsoService {
    *
    *  1. `HubJwtVerifier.verify` — hub JWKS signature, `iss` pinned to the
    *     hub, `aud` pinned to OUR resource URL (a token minted for another
-   *     tool dies here; a Slideless-minted MCP token dies on `iss`),
+   *     tool dies here; a tool-minted MCP token dies on `iss`),
    *     RS256 allowlist, expiry (5 s tolerance).
    *  2. `exp` REQUIRED — jose only validates expiry when the claim exists,
    *     and the replay ledger needs a bound; a token without one is a

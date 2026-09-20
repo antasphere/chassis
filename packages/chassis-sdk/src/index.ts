@@ -322,8 +322,8 @@ export class ChassisClient<TScope extends string> {
   }
 
   /**
-   * Public: verify the code and mint an `slk_` API key (presentations:read +
-   * presentations:write). The returned `key` appears only here.
+   * Public: verify the code and mint an API key (the tool's read + write
+   * scopes). The returned `key` appears only here.
    */
   cliAuthComplete(req: CliAuthComplete): Promise<CliAuthCompleted<TScope>> {
     return this.request('POST', '/cli/auth/complete', req);
@@ -332,7 +332,7 @@ export class ChassisClient<TScope extends string> {
   /**
    * Revoke the PRESENTING API key (CLI logout). Self-revocation only: the
    * route names no key, so the credential can kill exactly itself. Requires
-   * an API-key credential with presentations:write (sessions and OAuth
+   * an API-key credential with the tool's write scope (sessions and OAuth
    * bearers are refused — the dashboard is their key-management surface).
    */
   cliAuthRevoke(): Promise<CliAuthRevoked> {
@@ -341,7 +341,7 @@ export class ChassisClient<TScope extends string> {
 
   /**
    * Public, CLOUD EDITION only (404 on oss): exchange a hub-minted 120 s
-   * connect JWT (the hub's /sso/tool-token response) for an `slk_` API key
+   * connect JWT (the hub's /sso/tool-token response) for an API key
    * bound to the projected workspace — same grant and one-shot response
    * shape as cliAuthComplete. Each token works exactly once (jti).
    */
@@ -565,7 +565,7 @@ export class ChassisClient<TScope extends string> {
 
   // ── Workspace export ──────────────────────────────────────────────────────
 
-  /** URL of the workspace export endpoint (admin+; keys need data:export). */
+  /** URL of the workspace export endpoint (admin+; keys need the tool's export scope). */
   workspaceExportUrl(): string {
     return `${this.baseUrl}/api/v1/workspace/export`;
   }

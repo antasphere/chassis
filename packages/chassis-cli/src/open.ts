@@ -3,8 +3,8 @@ import type { CliIo } from './context.js';
 
 /**
  * Opening a URL in the person's default browser (PRDCT-2280): the first push
- * of a folder opens the deck's master page, `slideless open` opens it on
- * demand, `slideless dev` opens the local preview.
+ * of a folder opens the pushed resource's page, the tool's `open` command opens
+ * it on demand, its `dev` command opens the local preview.
  *
  * The URL is always ONE argv item handed to the platform's opener binary,
  * never a string a shell interprets: a deck title or an instance URL is

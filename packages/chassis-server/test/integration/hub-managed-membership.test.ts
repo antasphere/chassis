@@ -40,7 +40,7 @@ import * as sso from './sso-helpers.js';
  *    new /me fields, and per-deck reads work on the projected workspace.
  *
  * The MCP leg (three `it`s that call the deck MCP tools) is the tool's: the
- * Slideless app keeps it, `apps/server/test/integration/hub-managed-membership-mcp.test.ts`.
+ * tool's app keeps it, `apps/server/test/integration/hub-managed-membership-mcp.test.ts`.
  */
 
 const OPERATOR = { email: 'operator@p7.test', name: 'Operator', password: 'operator-pass-p7-1' };
@@ -105,11 +105,11 @@ async function expectHubManaged(res: Response): Promise<void> {
 }
 
 beforeAll(async () => {
-  [container, hub] = await Promise.all([startPostgres(), FakeHub.start()]);
+  [container, hub] = await Promise.all([startPostgres(), FakeHub.start({ clientId: host.hubClientId })]);
   app = await createTestApp(await createDatabase(container, 'p7_hub_managed'), {
     EDITION: 'cloud',
     HUB_ISSUER_URL: hub.issuer,
-    HUB_CLIENT_ID: 'tool-slideless-cloud',
+    HUB_CLIENT_ID: host.hubClientId,
     HUB_CLIENT_SECRET: 'integration-test-hub-secret-p7'
   });
 

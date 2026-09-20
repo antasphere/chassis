@@ -32,7 +32,7 @@ import type { HubOrgReconciler } from './hub-reconcile.js';
  * round-trip on a borrowed grant. ACCEPTED BOUND (documented): a guest's
  * own `/orgs` never includes the deck's org, so that column refreshes only
  * when a MEMBER's reconcile runs — a guest may keep deck access in a
- * hub-suspended org until a member next touches Slideless. Every cheap fix
+ * hub-suspended org until a member next touches the tool. Every cheap fix
  * leaks (a public status probe = suspension oracle) or borrows credentials
  * (acting on a grant its holder didn't present). Same accepted-bound class
  * as ungated share-link viewing; suspension still cuts all MEMBERS within

@@ -258,7 +258,7 @@ class SetupAlreadyDone extends Error {}
 
 /**
  * The versioned API, mounted at /api/v1. Every route is defined by a contract
- * in @slideless/contract/routes; the OpenAPI document is generated from those
+ * in the tool's contract package (`<tool contract>/routes`); the OpenAPI document is generated from those
  * contracts and served at /api/v1/openapi.json.
  */
 export function createApiApp<
@@ -345,7 +345,7 @@ export function createApiApp<
     '*',
     crossSiteGuard({
       publicBaseUrl: env.PUBLIC_BASE_URL,
-      // The tool's never-trusted origins (for Slideless the viewer origin,
+      // The tool's never-trusted origins (for a deck tool the viewer origin,
       // PRDCT-1352: author-controlled deck script's origin): never a trust
       // grant here, even if it is the serving origin.
       deniedOrigins: deps.untrustedOrigins,
@@ -377,7 +377,7 @@ export function createApiApp<
   //  - /presentations/assets: multipart deck-asset uploads — capped at
   //    MAX_FILE_SIZE_MB (+1 MiB multipart framing headroom) so an unbounded
   //    body can never balloon the buffering parse;
-  //  - the rest of /presentations: JSON, but commit manifests are legal up to
+  //  - the rest of the deck routes, which are JSON, but commit manifests are legal up to
   //    5000 entries × 1 KiB paths — a 16 MiB cap fits any contract-valid
   //    manifest while still bounding abuse.
   const jsonBodyLimit = bodyLimit({
@@ -971,7 +971,7 @@ export function createApiApp<
   // CLI email-OTP → API-key mint: PUBLIC pre-auth routes (listed in
   // PUBLIC_API_PATHS) riding the emailOTP plugin; rate-limited above. Also
   // registers DELETE /cli/auth/key — the authenticated self-revoke (CLI
-  // logout), NOT public, open to machines under presentations:write. On
+  // logout), NOT public, open to machines under the tool's write scope. On
   // cloud (hubSso present) the mint pair refuses 403 cli_otp_disabled — the
   // D1 hub-only entrance closure; the self-revoke stays open.
   registerCliAuthRoutes(api, {
@@ -987,7 +987,7 @@ export function createApiApp<
     displayName: tool.identity.displayName
   });
   // CLI cross-tool connect (internal/federation.md P5): PUBLIC exchange of a
-  // hub-minted 120 s JWT (+ its H3 offline grant) for a USER-scoped `slk_`
+  // hub-minted 120 s JWT (+ its H3 offline grant) for a USER-scoped API
   // key. Registered ONLY on cloud — an oss boot leaves the path to the JSON
   // 404 terminator below, so the self-host edition provably carries zero
   // hub surface here.
@@ -1069,7 +1069,7 @@ export function createApiApp<
     env,
     logger,
     instanceId,
-    // The tool's blob policy. For Slideless — ADR 011 sharp edge closed: a
+    // The tool's blob policy. For a deck tool — ADR 011 sharp edge closed: a
     // blob referenced by a live deck version manifest is not deletable
     // through the generic files surface; SL-B1: the generic files surface
     // authorizes per DECK, not per workspace — the ADR 013 policy expressed

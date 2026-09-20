@@ -22,7 +22,7 @@ let hub: FakeHub;
 let verifier: HubJwtVerifier;
 
 beforeAll(async () => {
-  hub = await FakeHub.start();
+  hub = await FakeHub.start({ clientId: 'tool-things-cloud' });
   verifier = new HubJwtVerifier(hub.issuer);
 });
 

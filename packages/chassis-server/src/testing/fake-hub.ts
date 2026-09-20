@@ -34,7 +34,7 @@ import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
  *    slow-but-alive hub of PRDCT-1370), `introspectMode`, plus delays.
  *
  * Access tokens still carry the TRANSITIONAL advisory org claims the real
- * hub emits through the compat window ({role, workspace_id, …}) — Slideless
+ * hub emits through the compat window ({role, workspace_id, …}) — the tool
  * must ignore them, and the suites prove nothing reads them.
  */
 
@@ -176,18 +176,36 @@ export class FakeHub {
   private constructor(
     private readonly server: Server,
     readonly issuer: string,
-    private keys: HubKey[]
+    private keys: HubKey[],
+    private readonly configuredClientId: string | undefined
   ) {}
 
-  static async start(): Promise<FakeHub> {
+  /**
+   * `clientId` is the TOOL's OAuth client id at the hub (its `HUB_CLIENT_ID`):
+   * the client the fake mints a connect grant for, stamps as `azp`, and keys a
+   * grant family on when the request names none. The fake spells no tool's id:
+   * a suite that reaches one of those paths passes it, one that only needs an
+   * issuer may omit it.
+   */
+  static async start(options: { clientId?: string | undefined } = {}): Promise<FakeHub> {
     const key = await newKey();
     const server = createServer();
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('fake hub failed to bind');
-    const hub = new FakeHub(server, `http://127.0.0.1:${address.port}`, [key]);
+    const hub = new FakeHub(server, `http://127.0.0.1:${address.port}`, [key], options.clientId);
     server.on('request', (req, res) => void hub.handle(req, res));
     return hub;
+  }
+
+  /** The tool's client id, for the paths that need one the request did not carry. */
+  private get clientId(): string {
+    if (!this.configuredClientId) {
+      throw new Error(
+        'FakeHub: this path needs the tool client id — start it with FakeHub.start({ clientId })'
+      );
+    }
+    return this.configuredClientId;
   }
 
   async stop(): Promise<void> {
@@ -239,7 +257,7 @@ export class FakeHub {
 
   /** Number of refresh-grant presentations seen so far (single-flight pins). */
   /** Whether reuse detection (or `revokeGrants`) tore this (sub, client) family down. */
-  isFamilyDead(sub: string, clientId = 'tool-slideless-cloud'): boolean {
+  isFamilyDead(sub: string, clientId = this.clientId): boolean {
     return this.deadFamilies.has(`${sub}:${clientId}`);
   }
 
@@ -269,10 +287,10 @@ export class FakeHub {
 
   /**
    * Sign an H3 exchange token — what the real hub's `POST /sso/tool-token`
-   * mints for `slideless /sso/cli-connect` (the P5 pinned contract): a
+   * mints for the tool's `/sso/cli-connect` (the P5 pinned contract): a
    * 120 s RS256 JWT, `aud` = the TOOL's resource URL (single string, no
    * userinfo entry — this is not an OIDC access token), the transitional
-   * org-claims payload (Slideless must IGNORE it — suites prove nothing
+   * org-claims payload (the tool must IGNORE it — suites prove nothing
    * reads it), `purpose: 'sso-connect'`, and a unique `jti`. Like the real
    * H3 response, a `hubRefreshToken` rides along: a RAW one-time
    * offline-grant refresh token in the ordinary (sub, client) rotation
@@ -327,12 +345,12 @@ export class FakeHub {
     });
     // A fresh H3 exchange is a FRESH grant, like a fresh consent: a past
     // reuse-detection teardown must not shadow a new connect.
-    this.deadFamilies.delete(`${fixture.sub}:tool-slideless-cloud`);
+    this.deadFamilies.delete(`${fixture.sub}:${this.clientId}`);
     // The hub mints the H3 grant itself: the tool requests nothing here, so
     // it carries the legacy scopes — never orgs:create.
     const hubRefreshToken = this.mintRefreshToken(
       fixture.sub,
-      'tool-slideless-cloud',
+      this.clientId,
       fixture.overrides?.scope ?? LEGACY_GRANT_SCOPE
     );
     return { token, jti, hubRefreshToken };
@@ -509,7 +527,7 @@ export class FakeHub {
       ...(previous?.status !== undefined ? { status: previous.status } : {}),
       ...(previous?.isDefault !== undefined ? { isDefault: previous.isDefault } : {})
     });
-    const clientId = body.get('client_id') ?? 'tool-slideless-cloud';
+    const clientId = body.get('client_id') ?? this.clientId;
     // A fresh code exchange is a FRESH grant: the real hub's new consent
     // mints a new family — a past reuse-detection teardown does not shadow
     // a re-login (the hub_grant_expired → browser-re-login heal path).
@@ -658,7 +676,7 @@ export class FakeHub {
       ...(fixture.workspaceId ? { workspace_id: fixture.workspaceId } : {}),
       ...(fixture.workspaceName === null ? {} : { workspace_name: fixture.workspaceName ?? 'Fake Org' }),
       email: fixture.email,
-      azp: 'tool-slideless-cloud',
+      azp: this.clientId,
       scope,
       aud
     })

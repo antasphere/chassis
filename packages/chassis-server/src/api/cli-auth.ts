@@ -14,10 +14,10 @@ import type { Logger } from '../logger.js';
 const err = (code: string, message: string) => ({ error: { code, message } });
 
 /**
- * Browserless CLI/agent auth (the `slideless auth login-*` flow):
+ * Browserless CLI/agent auth (the tool CLI's `auth login-*` flow):
  *
  *   POST /cli/auth/request  → email a 6-digit sign-in OTP
- *   POST /cli/auth/complete → verify the OTP, mint an `slk_` API key
+ *   POST /cli/auth/complete → verify the OTP, mint an API key
  *
  * Built ENTIRELY on the existing email-OTP primitive — no new credential
  * machinery. `request` delegates to the emailOTP plugin's
@@ -32,8 +32,8 @@ const err = (code: string, message: string) => ({ error: { code, message } });
  * invitation, collaborator claim).
  *
  * On success the sign-in's throwaway session is used server-side only: mint
- * the key (presentations:read + presentations:write — the agent surface,
- * never data:export), DELETE the session, and return the key once. The
+ * the key (the tool's read + write scopes — the agent surface, never its
+ * export scope), DELETE the session, and return the key once. The
  * "sessions only mint keys" rule holds in spirit: the mint is bound to a
  * fresh, fully verified interactive sign-in, not to a machine credential
  * (machine principals can't even reach these paths — they are unlisted in
@@ -46,7 +46,7 @@ const err = (code: string, message: string) => ({ error: { code, message } });
  *
  * Without a delivering email driver both endpoints answer 400
  * otp_unavailable (the emailOTP plugin is not even registered then) —
- * self-hosters without SMTP paste a dashboard-minted key (`slideless login`).
+ * self-hosters without SMTP paste a dashboard-minted key (the CLI's `login`).
  *
  * On EDITION=cloud (hubSso present) BOTH mint endpoints refuse outright —
  * 403 cli_otp_disabled, checked BEFORE the mailer/plugin checks so a
@@ -58,7 +58,7 @@ const err = (code: string, message: string) => ({ error: { code, message } });
  * by `antasphere login` + /sso/cli-connect (api/sso-connect.ts) instead.
  * oss keeps this flow unchanged.
  *
- * DELETE /cli/auth/key (`slideless logout`) stays OPEN on both editions: it
+ * DELETE /cli/auth/key (the CLI's `logout`) stays OPEN on both editions: it
  * revokes exactly the PRESENTING key — revocation narrows access and is the
  * cleanup path every mint above needs.
  *
@@ -273,13 +273,13 @@ export function registerCliAuthRoutes(api: OpenAPIHono, deps: CliAuthRouteDeps):
 
   // CLI logout: revoke exactly the PRESENTING key — possession is the
   // authority to kill itself. The ONE /cli/auth route open to machine
-  // principals (scope allowlist, presentations:write — every CLI-minted key
+  // principals (scope allowlist, the tool's write scope — every CLI-minted key
   // carries it); there is no id parameter, so no OTHER key is nameable, and
   // the handler acts only on principal.apiKeyId, which the credential
   // resolver derived from the presented secret. Sessions are refused — the
   // dashboard (DELETE /api-keys/{id}) is their key-management surface — and
   // so are OAuth bearers (no apiKeyId). Deliberately edition-independent:
-  // on cloud, `slideless logout --org` must be able to kill the
+  // on cloud, the CLI's `logout --org` must be able to kill the
   // /sso/cli-connect-minted key server-side (revocation narrows access; the
   // D1 closure is about MINTING).
   api.openapi(cliAuthRevokeRoute, async (c) => {

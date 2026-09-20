@@ -25,7 +25,7 @@ export interface AppDeps {
   /** Root-level OAuth discovery documents (/.well-known/*, M6). */
   wellKnown?: Hono;
   /**
-   * The tool's public routes (for Slideless the public share-link viewer,
+   * The tool's public routes (for a deck tool the public share-link viewer,
    * /v/{secret}, Phase 4 / ADR 012). Mounted in the public-route slot:
    * OUTSIDE /api/v1, outside the auth/scope middleware — token recipients
    * are anonymous, the path secret is the whole credential, and every
@@ -46,14 +46,14 @@ export interface AppDeps {
   hsts?: string | null;
   /**
    * The tool's root middleware, installed after the metrics middleware and
-   * BEFORE every mount. For Slideless, VIEWER_BASE_URL (PRDCT-1352): when
+   * BEFORE every mount. For a deck tool, VIEWER_BASE_URL (PRDCT-1352): when
    * present, the host gate (middleware/host-gate.ts in the app) — the viewer
    * hostname answers only `/v/*`, `/api/v1/viewer/*` and the probes, every
    * other hostname redirects `/v/*` there. Absent = single-origin behaviour,
    * gate not installed.
    */
   rootMiddleware?: MiddlewareHandler | undefined;
-  /** Extra `frame-src` origins of the dashboard CSP (for Slideless the viewer origin, for the preview). */
+  /** Extra `frame-src` origins of the dashboard CSP (for a deck tool the viewer origin, for the preview). */
   cspFrameSrc?: readonly string[] | undefined;
 }
 

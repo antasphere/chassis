@@ -8,12 +8,12 @@ import { HUB_SSO_PROVIDER_ID } from './hub-sso.js';
 
 /**
  * The per-user hub grant (internal/federation.md, live user-scoped federation):
- * cloud Slideless holds each user's OWN `offline_access account:read` grant
+ * a cloud tool holds each user's OWN `offline_access account:read` grant
  * (plus `orgs:create` since PRDCT-2443 — hub-sso.ts HUB_SSO_SCOPES)
  * — obtained at SSO login, persisted by Better Auth on the `account` row —
  * and refreshes it against the hub's token endpoint to mint HUB-audienced
  * access tokens (`resource=<hub>/mcp`, RFC 8707) that the hub's own
- * `/api/v1` accepts. Everything Slideless reads from the hub between logins
+ * `/api/v1` accepts. Everything the tool reads from the hub between logins
  * is read AS THE USER with this grant; no service key exists anywhere in
  * the user-facing path.
  *

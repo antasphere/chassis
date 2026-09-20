@@ -199,10 +199,10 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
   /**
    * Backend + credential resolution, in its documented order:
    *
-   *   base URL:  --api-url (or --url) → SLIDELESS_URL → profile baseUrl → error
-   *   API key:   --api-key            → SLIDELESS_API_KEY → profile apiKey
+   *   base URL:  --api-url (or --url) → <PREFIX>_URL → profile baseUrl → error
+   *   API key:   --api-key            → <PREFIX>_API_KEY → profile apiKey
    *              → cached hub-connect key (cloud instances)
-   *   workspace: --workspace          → SLIDELESS_WORKSPACE → profile
+   *   workspace: --workspace          → <PREFIX>_WORKSPACE → profile
    *              activeWorkspaceId → none (the server's default; workspace.ts)
    *
    * There is deliberately NO hard-coded default URL: a self-hosted CLI must
@@ -217,7 +217,7 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
    * selection, never part of the credential) and is only replayed against
    * the instance it was minted on — the profile's baseUrl scopes the cache,
    * so a key minted for the cloud can never be sent to some other instance
-   * named by --api-url / SLIDELESS_URL.
+   * named by --api-url / <PREFIX>_URL.
    */
   function resolveContext(cmd: Command, io: CliIo): CliContext<TClient> {
     const opts = cmd.optsWithGlobals() as GlobalOpts;
@@ -269,8 +269,8 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
     `An API key is required. Sign in (\`${identity.bin} auth login-request --email <you>\`), paste one ` +
     `(\`${identity.bin} login\`), pass --api-key, or set ${identity.envPrefix}_API_KEY.`;
 
-  /** Slideless-branded copy for the cli-core seam (byte-identical to the
-   *  pre-extraction string — the default lacks the `<slk_…>` hint). */
+  /** The tool's own copy for the cli-core seam (byte-identical to the
+   *  pre-extraction string — the default lacks the `<prefix_…>` key hint). */
   const MISSING_HUB_LOGIN_MESSAGE =
     `This ${identity.displayName} instance signs in through the Antasphere hub. Run \`antasphere login\` once, ` +
     `then retry — or pass --api-key <${identity.keyPrefix}_…> / set ${identity.envPrefix}_API_KEY.`;
@@ -282,7 +282,7 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
    * patterns §7, gcloud model), owned by @antasphere/cli-core since 0.3.0:
    * if — and only if — discovery says the instance is an Antasphere-cloud
    * one, the stored `antasphere login` credential is exchanged (hub → tool)
-   * for a USER-scoped tool-local `slk_` key, which is cached per (tool, hub
+   * for a USER-scoped tool-local API key, which is cached per (tool, hub
    * profile) and used for this invocation — and served from that cache on
    * every subsequent run (no re-exchange, no fresh mint). Self-hosted
    * instances never take this branch: they get the classic error unchanged.

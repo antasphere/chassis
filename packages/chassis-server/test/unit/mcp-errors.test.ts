@@ -4,11 +4,7 @@ import { isPublicOauthPath } from '@antasphere/chassis-server/middleware';
 
 describe('mcp error → hint mapping', () => {
   it('attaches an actionable hint for known API codes', () => {
-    const err = new ApiToolError(
-      403,
-      'insufficient_scope',
-      'This credential was not granted "presentations:write"'
-    );
+    const err = new ApiToolError(403, 'insufficient_scope', 'This credential was not granted "things:write"');
     const text = err.toUserFacingText();
     expect(text).toContain('HTTP 403');
     expect(text).toContain('insufficient_scope');

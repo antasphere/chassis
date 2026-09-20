@@ -11,18 +11,18 @@ import {
 import type { CliIdentity } from './identity.js';
 
 /**
- * The Slideless CLI's profiles live in the `slideless` namespace of the
- * shared Antasphere config home owned by @antasphere/cli-core:
- * `$XDG_CONFIG_HOME/antasphere/tools/slideless.json` (default
- * `~/.config/antasphere/tools/slideless.json`), 0700 dirs / 0600 file, fully
+ * The tool CLI's profiles live in the tool's own namespace (`identity.tool`)
+ * of the shared Antasphere config home owned by @antasphere/cli-core:
+ * `$XDG_CONFIG_HOME/antasphere/tools/<tool>.json` (default
+ * `~/.config/antasphere/tools/<tool>.json`), 0700 dirs / 0600 file, fully
  * env-injected. The store's behavior (multi-profile, activeProfile, tolerant
  * parsing) is byte-for-byte the old local one — cli-core was extracted from
  * it.
  *
  * Migration: the pre-cli-core config lived at
- * `$XDG_CONFIG_HOME/slideless/config.json`. On any config read, if that file
+ * `$XDG_CONFIG_HOME/<legacyConfigDir>/config.json`. On any config read, if that file
  * still exists, holds at least one profile, and the shared home has no
- * slideless profiles yet, it is imported once, NON-destructively (the legacy
+ * profiles of the tool yet, it is imported once, NON-destructively (the legacy
  * file stays in place for older CLI builds; it just stops being read).
  */
 

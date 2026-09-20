@@ -240,7 +240,7 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
         throw new CliUsageError('No profile to log out of.');
       }
       // Hub-connect logout (the cross-tool connect counterpart): revoke the
-      // exchange-minted USER-scoped slk_ key(s) server-side, then evict them
+      // exchange-minted USER-scoped API key(s) server-side, then evict them
       // from the cache. The key is one per hub profile and serves every org
       // (there is no per-org key to pick). Taken when the profile holds ONLY
       // hub-connected keys; a classic single-key profile keeps today's path.

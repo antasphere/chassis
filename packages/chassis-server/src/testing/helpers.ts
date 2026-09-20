@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
 import type { Hono } from 'hono';
+import type { ToolIdentity } from '@antasphere/chassis-contract';
 import type { EmailDriver, EmailMessage } from '../email/driver.js';
 
 /**
@@ -64,6 +65,10 @@ export type TestApp<TResult extends BootResultLike = BootResultLike> = TResult &
  */
 export interface ChassisTestHost<TResult extends BootResultLike, TOverrides> {
   boot: BootFn<TResult, TOverrides>;
+  /** The host tool's identity: where the suite reads the key prefix a minted key must carry. */
+  identity: ToolIdentity;
+  /** The host tool's OAuth client id at the hub: the cloud boots' `HUB_CLIENT_ID`, and the fake hub's. */
+  hubClientId: string;
   scopes: {
     /** The scope behind the chassis read surfaces (`/me`, the files reads). */
     read: string;
@@ -91,7 +96,7 @@ export function makeCreateTestApp<TResult extends BootResultLike, TOverrides>(
   overrides?: TOverrides
 ) => Promise<TestApp<TResult>> {
   return async (connectionString, extraEnv = {}, overrides) => {
-    const dataDir = await mkdtemp(join(tmpdir(), 'slideless-test-'));
+    const dataDir = await mkdtemp(join(tmpdir(), 'chassis-test-'));
     const result = await boot(
       {
         DATABASE_URL: connectionString,

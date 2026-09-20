@@ -66,12 +66,12 @@ async function me(key: string) {
 }
 
 /**
- * The secret is everything after `slk_<keyId>_` — sliced by length, NEVER by
+ * The secret is everything after `<prefix>_<keyId>_` — sliced by length, NEVER by
  * splitting on `_` (base64url contains `_`; see LESSONS.md). keyId comes from
  * the mint response.
  */
 function secretOf(minted: { key: string; apiKey: { keyId: string } }): string {
-  return minted.key.slice(`slk_${minted.apiKey.keyId}_`.length);
+  return minted.key.slice(`${host.identity.apiKeyPrefix}_${minted.apiKey.keyId}_`.length);
 }
 
 /** Today's (pre-versioning) computation, reproduced independently. */

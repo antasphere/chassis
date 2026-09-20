@@ -4,6 +4,7 @@ import {
   createDatabase,
   createTestApp,
   extractCookie,
+  host,
   readJson,
   startPostgres,
   type TestApp
@@ -401,7 +402,7 @@ describe('the setup operator is never an orphan (CLOUD-3), and the allowlist she
     app = await createTestApp(await createDatabase(container, 'gc_operator'), {
       EDITION: 'cloud',
       HUB_ISSUER_URL: 'http://hub.localhost:3300',
-      HUB_CLIENT_ID: 'tool-slideless-cloud',
+      HUB_CLIENT_ID: host.hubClientId,
       HUB_CLIENT_SECRET: 'integration-test-hub-secret-0001',
       SUPERADMIN_EMAILS: '',
       ORPHAN_USER_RETENTION_HOURS: '1'

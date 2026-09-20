@@ -165,7 +165,7 @@ const chassisEnvShape = (version: string) => ({
   EDITION: z.preprocess(blankToUndefined, z.enum(['oss', 'cloud']).default('oss')),
   /** Hub OIDC issuer, e.g. https://account.antasphere.com — discovery, JWKS, and the authorize/token endpoints all derive from it. Required when EDITION=cloud; never read when EDITION=oss. */
   HUB_ISSUER_URL: z.preprocess(blankToUndefined, httpUrl().optional()),
-  /** OAuth client id from this tool's entry in the hub TOOL_REGISTRY (e.g. tool-slideless-cloud). Required when EDITION=cloud. */
+  /** OAuth client id from this tool's entry in the hub TOOL_REGISTRY (e.g. tool-acme-cloud). Required when EDITION=cloud. */
   HUB_CLIENT_ID: optionalString(z.string().min(4)),
   /** OAuth client secret matching the hub registry entry (confidential client; PKCE stays on regardless). Also authenticates the per-user refresh grant — there is NO service key: every hub read between logins presents the USER's own grant (internal/federation.md). Required when EDITION=cloud. */
   HUB_CLIENT_SECRET: optionalString(z.string().min(16)),
@@ -197,7 +197,7 @@ const chassisEnvShape = (version: string) => ({
   RESEND_API_KEY: optionalString(z.string().min(1)),
   /** Required when EMAIL_DRIVER=brevo. */
   BREVO_API_KEY: optionalString(z.string().min(1)),
-  /** Sender, e.g. `Slideless <noreply@slideless.app>`. Required when a driver delivers. */
+  /** Sender, e.g. `Acme <noreply@acme.example>`. Required when a driver delivers. */
   EMAIL_FROM: optionalString(z.string().min(3)),
   /** When set, rate limits (and later caches) are shared across replicas. */
   REDIS_URL: optionalString(z.string().min(1)),

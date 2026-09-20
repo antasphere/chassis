@@ -59,13 +59,13 @@ let hub: FakeHub;
 let app: TestApp;
 
 beforeAll(async () => {
-  [container, hub] = await Promise.all([startPostgres(), FakeHub.start()]);
+  [container, hub] = await Promise.all([startPostgres(), FakeHub.start({ clientId: host.hubClientId })]);
   app = await createTestApp(
     await createDatabase(container, 'hub_reconcile'),
     {
       EDITION: 'cloud',
       HUB_ISSUER_URL: hub.issuer,
-      HUB_CLIENT_ID: 'tool-slideless-cloud',
+      HUB_CLIENT_ID: host.hubClientId,
       HUB_CLIENT_SECRET: 'integration-test-hub-secret-0001',
       METRICS_TOKEN: 'reconcile-metrics-token',
       // The break-glass lifeboat suite below acts as the setup operator.
@@ -584,7 +584,7 @@ describe('a severed hub link fails CLOSED for a hub-origin principal (CLOUD-1, P
   };
   const SEV_ENV = {
     EDITION: 'cloud',
-    HUB_CLIENT_ID: 'tool-slideless-cloud',
+    HUB_CLIENT_ID: host.hubClientId,
     HUB_CLIENT_SECRET: 'integration-test-hub-secret-0001'
   };
 

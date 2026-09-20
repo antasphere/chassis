@@ -1,5 +1,6 @@
 import { createPlatform } from '@antasphere/chassis-server';
 import type { ChassisTestHost } from '@antasphere/chassis-server/testing';
+import { THINGS_IDENTITY } from './identity.js';
 import {
   minimalTool,
   THINGS_ROUTE,
@@ -21,6 +22,8 @@ const platform = createPlatform(minimalTool);
 
 export const host: ChassisTestHost<HostBootResult, HostBootOverrides> = {
   boot: (source, overrides) => platform.boot(source, overrides),
+  identity: THINGS_IDENTITY,
+  hubClientId: 'tool-things-cloud',
   scopes: THINGS_SCOPES,
   probeRoute: THINGS_ROUTE
 };

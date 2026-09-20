@@ -112,7 +112,7 @@ export type WorkspaceRole = (typeof workspaceRoles)[number];
 
 /**
  * Where a membership row came from — who its source of truth is (G2,
- * slideless-cloud-binding-plan §5). Pure data in Phase 1 (no enforcement):
+ * the cloud-binding plan §5). Pure data in Phase 1 (no enforcement):
  *
  *  - 'local': created by setup, workspace invitations, or admin surfaces —
  *    this instance owns it.

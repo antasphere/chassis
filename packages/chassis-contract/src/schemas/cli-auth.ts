@@ -6,7 +6,7 @@ import { plainText } from './common.js';
  * endpoints, mounted like /setup outside the principal machinery:
  *
  *   POST /cli/auth/request  — send a 6-digit sign-in code to the email
- *   POST /cli/auth/complete — verify the code, mint an `slk_` API key
+ *   POST /cli/auth/complete — verify the code, mint an API key
  *
  * Sign-up stays CLOSED: the flow rides the emailOTP plugin with
  * `disableSignUp: true`, so a code only ever signs in an EXISTING account
@@ -17,7 +17,7 @@ import { plainText } from './common.js';
  *
  * DELETE /cli/auth/key is the logout counterpart: it revokes exactly the
  * PRESENTING API key (self-revocation — possession is the authority to kill
- * itself), machine-allowed under presentations:write in the scope allowlist.
+ * itself), machine-allowed under the tool's write scope in the scope allowlist.
  */
 
 export const cliAuthRequestSchema = z.object({

@@ -16,7 +16,7 @@ import { THINGS_COPY, THINGS_IDENTITY, THINGS_ROUTES_COPY } from './identity.js'
  *
  * The migrations are a FIXTURE read by path, not an import (same stance as
  * `empty-tool.test.ts`): the only migration history that exists today is
- * Slideless's (`packages/db/drizzle`, which also creates the deck tables,
+ * the tool's (`packages/db/drizzle`, which also creates the deck tables,
  * unused here).
  */
 const here = dirname(fileURLToPath(import.meta.url));

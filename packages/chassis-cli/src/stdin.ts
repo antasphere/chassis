@@ -3,7 +3,7 @@ import { CliUsageError, type CliIo } from './context.js';
 /**
  * Secrets that arrive on stdin instead of the command line.
  *
- * A value passed as `--api-key slk_…` or `--password hunter2` is visible to
+ * A value passed as `--api-key <prefix>_…` or `--password hunter2` is visible to
  * every process on the box (`ps`, `/proc/<pid>/cmdline`) and lands verbatim
  * in the shell history file. The flags stay — they are what scripts already
  * use — but each one now has a `-stdin` sibling and, for the share

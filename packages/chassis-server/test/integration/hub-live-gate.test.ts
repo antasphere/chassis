@@ -59,13 +59,16 @@ let hub: FakeHub;
 let app: TestApp;
 
 beforeAll(async () => {
-  [container, hub] = await Promise.all([startPostgres(), FakeHub.start()]);
+  [container, hub] = await Promise.all([
+    startPostgres(),
+    FakeHub.start({ clientId: chassisHost.hubClientId })
+  ]);
   app = await createTestApp(
     await createDatabase(container, 'hub_live_gate'),
     {
       EDITION: 'cloud',
       HUB_ISSUER_URL: hub.issuer,
-      HUB_CLIENT_ID: 'tool-slideless-cloud',
+      HUB_CLIENT_ID: chassisHost.hubClientId,
       HUB_CLIENT_SECRET: 'integration-test-hub-secret-0001'
     },
     { hubDials: DIALS }
@@ -398,7 +401,7 @@ describe('the ACCEPTED BOUND: guest suspension staleness (documented, deliberate
     });
     expect(preMaterialize.status).toBe(200); // stale — accepted
 
-    // A MEMBER touches Slideless: their pass materializes the suspension…
+    // A MEMBER touches the tool: their pass materializes the suspension…
     await expireTtl();
     const memberBlocked = await app.app.request(chassisHost.probeRoute, {
       headers: { cookie: hostCookie }

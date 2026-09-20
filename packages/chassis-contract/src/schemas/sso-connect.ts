@@ -3,7 +3,7 @@ import { z } from 'zod';
 /**
  * CLI cross-tool connect (cloud edition only — internal/federation.md P5):
  *
- *   POST /sso/cli-connect — exchange a hub-minted 120 s JWT for an `slk_` key
+ *   POST /sso/cli-connect — exchange a hub-minted 120 s JWT for an API key
  *
  * The counterpart of the hub's H3 `POST /sso/tool-token`: `antasphere login`
  * mints a hub API key once; the hub exchanges it for a short-lived RS256 JWT
@@ -20,7 +20,7 @@ import { z } from 'zod';
  * instance answers 404 (the route does not exist there).
  *
  * The response reuses the CLI-auth completion shape (`CliAuthCompleted`) —
- * presentations:read + presentations:write, never data:export, full key
+ * the tool's read + write scopes, never its export scope, full key
  * shown exactly once; `workspaceId` is null (user-scoped, unpinned).
  */
 

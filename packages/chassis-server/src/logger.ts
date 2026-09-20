@@ -43,9 +43,9 @@ export const REDACT_PATHS = [
   // Optional social credential — read in env.ts, so any "here is the parsed
   // env" line would otherwise carry it.
   'GOOGLE_CLIENT_SECRET',
-  // Slideless: the hub-federation client credential (ADR 015 / user-scoped
+  // Cloud edition: the hub-federation client credential (ADR 015 / user-scoped
   // federation). It is THIS tool's identity at the Antasphere hub — leaking it
-  // lets anyone impersonate Slideless at the authorization server.
+  // lets anyone impersonate the tool at the authorization server.
   'HUB_CLIENT_SECRET'
 ];
 

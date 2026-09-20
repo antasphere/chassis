@@ -347,7 +347,7 @@ export const invitationAcceptRoute = createRoute({
 // (D1): CLI keys are minted via `antasphere login` + /sso/cli-connect there.
 // DELETE /cli/auth/key is the logout counterpart: an AUTHENTICATED route that
 // revokes exactly the PRESENTING key (self-revocation — possession is the
-// authority to kill itself), machine-allowed under presentations:write in the
+// authority to kill itself), machine-allowed under the tool's write scope in the
 // scope allowlist, and open on BOTH editions (revocation narrows access).
 
 export const cliAuthRequestRoute = createRoute({
@@ -644,7 +644,7 @@ export function defineChassisRoutes<TScope extends string>(
   // pinning, `purpose: 'sso-connect'` required, and the `jti` consumed
   // one-time-use (a replay inside the TTL mints nothing). On success the user
   // is JIT-provisioned through the SAME projection path as an SSO login and
-  // an ordinary `slk_` key is minted, bound to the projected workspace. The
+  // an ordinary API key is minted, bound to the projected workspace. The
   // route exists ONLY on EDITION=cloud; oss answers 404. Rate-limited (the
   // login wall, per IP).
 

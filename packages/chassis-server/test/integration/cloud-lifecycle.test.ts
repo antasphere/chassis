@@ -5,6 +5,7 @@ import {
   createTestApp,
   expectBootRefusal,
   extractCookie,
+  host,
   readJson,
   startPostgres,
   SETUP_TOKEN,
@@ -38,7 +39,7 @@ const OWNER = { email: 'operator@lifecycle.test', name: 'Operator', password: 'o
 const HUB_ENV = {
   EDITION: 'cloud',
   HUB_ISSUER_URL: 'http://hub.localhost:3300',
-  HUB_CLIENT_ID: 'tool-slideless-cloud',
+  HUB_CLIENT_ID: host.hubClientId,
   HUB_CLIENT_SECRET: 'integration-test-hub-secret-0001'
 };
 

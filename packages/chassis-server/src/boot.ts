@@ -315,7 +315,7 @@ export async function bootPlatform<
   // projection after-hook, and the login-scope wrap around the auth mount.
   const hub = hubConfig(env);
   // THE seam constant: the RFC 8707 `resource` for BOTH the SSO code
-  // exchange and every refresh — `<hub>/mcp`, so the tokens Slideless holds
+  // exchange and every refresh — `<hub>/mcp`, so the tokens the tool holds
   // are HUB-audienced and callable at hub /api/v1 as the user. Flipping it
   // to null (if the hub ever accepts opaque tokens) is this one line.
   const hubTokenResource = hub ? hubApiResource(hub.issuerUrl) : null;
@@ -348,7 +348,7 @@ export async function bootPlatform<
     authSecret,
     // The tool's values for the two generic-by-parameter points of the
     // identity module: the published OAuth scope list (order included) and
-    // the origins that are never trusted (for Slideless the viewer origin,
+    // the origins that are never trusted (for a deck tool the viewer origin,
     // where author-controlled deck script runs, PRDCT-1352). None = nothing installed.
     oauthScopes: tool.scopes.oauth,
     untrustedOrigins,
@@ -752,7 +752,7 @@ export async function bootPlatform<
         : undefined
   });
 
-  // The tool's public routes (for Slideless the share-link viewer, Phase 4,
+  // The tool's public routes (for a deck tool the share-link viewer, Phase 4,
   // ADR 012): anonymous, mounted in app.ts's public-route slot.
   const publicRoutes = tool.app?.publicRoutes?.({ ...core, overrides: undefined }, domain);
 

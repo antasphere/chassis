@@ -19,15 +19,15 @@ import {
  * from the verified credential, never from a tool parameter.
  *
  * Conventions (ported from the predecessor MCP template):
- *  - read tools: `readOnlyHint: true` + a presentations:read checkScope
- *  - write tools: confirm-first description + presentations:write (+ destructiveHint
- *    for deletes) — see the slideless_ write tools in tools.ts
+ *  - read tools: `readOnlyHint: true` + a checkScope on the tool's read scope
+ *  - write tools: confirm-first description + the tool's write scope (+ destructiveHint
+ *    for deletes) — see the write tools of the tool's own set (its tools.ts)
  *  - checkScope is UX only — the API's fail-closed allowlist is the
  *    enforcement point; this just gives the model a clean, actionable error.
  *
  * get_me and list_files below are the chassis' original example tools (the
  * end-to-end whoami proof + a cursor-paginated list); the product tool set
- * (slideless_*) lives in tools.ts.
+ * (`<toolPrefix>*`) lives in the tool's app (its tools.ts).
  */
 export type { McpToolContext } from './tool-kit.js';
 

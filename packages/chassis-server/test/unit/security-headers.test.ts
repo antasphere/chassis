@@ -48,7 +48,7 @@ describe('securityHeaders set-if-absent guards', () => {
 });
 
 /**
- * PLT-28. Slideless issues a session cookie for the dashboard AND a scoped
+ * PLT-28. The tool issues a session cookie for the dashboard AND a scoped
  * viewer cookie on share links; one plain-http navigation is one stolen
  * session or one stolen share unlock.
  */
