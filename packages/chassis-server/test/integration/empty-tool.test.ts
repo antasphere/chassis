@@ -195,6 +195,43 @@ describe('the chassis with an empty tool', () => {
     });
   });
 
+  it('a key WITHOUT the read scope gets the friendly scope sentence on both identity tools', async () => {
+    // Such a key exists: the mint takes any subset of the tool's vocabulary.
+    const minted = await booted.app.request(
+      '/api/v1/api-keys',
+      json({ name: 'things-wo', scopes: ['things:write'] }, { cookie })
+    );
+    expect(minted.status).toBe(201);
+    const { key } = (await minted.json()) as { key: string };
+    const authorization = `Bearer ${key}`;
+
+    // The enforcement point is the API's allowlist, and it holds by itself…
+    const me = await booted.app.request('/api/v1/me', { headers: { authorization } });
+    expect(me.status).toBe(403);
+
+    // …the MCP pre-check is what turns that raw 403 into a sentence the model can act on.
+    for (const name of ['things_whoami', 'get_me']) {
+      const called = await booted.app.request('/mcp', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+          authorization
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: {} } })
+      });
+      expect(called.status, name).toBe(200);
+      const answer = (await called.json()) as {
+        result: { isError?: boolean; content: Array<{ type: string; text: string }> };
+      };
+      expect(answer.result.isError, name).toBe(true);
+      expect(answer.result.content[0]!.text, name).toBe(
+        'Missing scope "things:read": this connection was not granted permission to read data. ' +
+          'Reconnect the MCP server and approve the permission on the consent screen.'
+      );
+    }
+  });
+
   it('the OpenAPI document carries no deck path and the root app no deck surface', async () => {
     const doc = (await (await booted.app.request('/api/v1/openapi.json')).json()) as {
       paths: Record<string, unknown>;
