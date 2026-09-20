@@ -86,6 +86,14 @@ export async function bootPlatform<
 
   state.reason = 'connecting to database';
   const db = tool.db(env.DATABASE_URL);
+  // createDb already survives an idle connection ended by the server (a
+  // Postgres restart); this listener is only what makes it visible in the log.
+  db.pool.on('error', (err) =>
+    logger.warn(
+      { err },
+      'postgres ended an idle pooled connection; the pool opens a new one on the next query'
+    )
+  );
   await db.pool.query('SELECT 1');
   logger.info('database reachable');
 

@@ -23,7 +23,20 @@ export interface DbHandle {
   pool: pg.Pool;
 }
 
-export function createDb(connectionString: string, schema: Record<string, unknown>): DbHandle {
+export interface CreateDbOptions {
+  /**
+   * Told when an IDLE pooled connection ends on the server's side (a Postgres
+   * restart, a failover, `pg_terminate_backend`): the place to log it. The
+   * pool has already dropped that client and opens a new one on the next query.
+   */
+  onIdleError?: (err: Error) => void;
+}
+
+export function createDb(
+  connectionString: string,
+  schema: Record<string, unknown>,
+  options: CreateDbOptions = {}
+): DbHandle {
   // Conservative pool defaults for a single-container instance. A runaway
   // query cannot hold a connection (or a transaction) forever, and the pool
   // cannot starve Postgres' default max_connections when replicas multiply.
@@ -36,6 +49,11 @@ export function createDb(connectionString: string, schema: Record<string, unknow
     statement_timeout: 30_000,
     idle_in_transaction_session_timeout: 30_000
   });
+  // ALWAYS listened to, whoever the caller is. node-postgres emits `error` on
+  // the pool when an idle client's connection ends server-side, and an `error`
+  // event nobody listens to is an uncaught exception: without this line a
+  // Postgres restart kills the process (57P01) instead of costing one reconnect.
+  pool.on('error', (err) => options.onIdleError?.(err));
   const db = drizzle(pool, { schema });
   return { db, pool };
 }
