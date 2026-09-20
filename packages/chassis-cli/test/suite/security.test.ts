@@ -151,6 +151,36 @@ describe('terminal-control sanitation', () => {
     expect(json.out()).toContain('\u009b');
     expect(JSON.parse(json.out())).toEqual({ files: [file], nextCursor: null });
   });
+
+  // The STDERR half of the same invariant (PRDCT-2530, verifier F-1): the
+  // runner prints `Error: <the server's message>`, and that message is
+  // somebody else's text as much as a stored name is. A 500 carries no hint,
+  // so the whole line is asserted.
+  it('sanitizes a control-character server error message on stderr, with and without --json', async () => {
+    const ESC = '\u001b';
+    const BEL = '\u0007';
+    // An OSC-8 hyperlink around "click", then a CSI line-erase.
+    const message = `deck ${ESC}]8;;http://evil.example${BEL}click${ESC}]8;;${BEL} ${ESC}[2K gone`;
+    const routes: Route[] = [
+      {
+        method: 'GET',
+        path: /\/api\/v1\/files$/,
+        reply: () => ({ status: 500, body: { error: { code: 'internal', message } } })
+      }
+    ];
+
+    const human = routedHarness(routes);
+    expect(await run(['files', 'list', ...KEY], human.io)).toBe(1);
+    expect(human.out()).toBe('');
+    expect(human.err()).toBe('Error: deck click  gone\n');
+
+    // `--json` shapes what a command PRINTS; a failure is reported the same way
+    // under it: nothing on stdout, and the same inert human line on stderr.
+    const json = routedHarness(routes);
+    expect(await run(['files', 'list', '--json', ...KEY], json.io)).toBe(1);
+    expect(json.out()).toBe('');
+    expect(json.err()).toBe('Error: deck click  gone\n');
+  });
 });
 
 // ── CLI-12: secrets no longer have to travel in argv ─────────────────────────
