@@ -69,6 +69,10 @@
       "types": "./dist/invitations/index.d.ts",
       "default": "./dist/invitations/index.js"
     },
+    "./projects": {
+      "types": "./dist/projects/index.d.ts",
+      "default": "./dist/projects/index.js"
+    },
     "./api": {
       "types": "./dist/api/index.d.ts",
       "default": "./dist/api/index.js"

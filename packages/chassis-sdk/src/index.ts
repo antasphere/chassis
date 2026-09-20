@@ -28,6 +28,15 @@ import type {
   MemberResetLink,
   MemberUpdate,
   OnboardingDismissed,
+  Project,
+  ProjectCreate,
+  ProjectMember,
+  ProjectMemberAdd,
+  ProjectMembersList,
+  ProjectRole,
+  ProjectsArchivedFilter,
+  ProjectsList,
+  ProjectUpdate,
   SetupRequest,
   SetupResponse,
   SsoCliConnect,
@@ -218,10 +227,15 @@ export class ChassisClient<TScope extends string> {
   }
 
   /** Append cursor-pagination params to a list path. */
-  protected pathWithQuery(base: string, params: ListParams): string {
+  protected pathWithQuery(
+    base: string,
+    params: ListParams,
+    extra: Record<string, string | undefined> = {}
+  ): string {
     const query = new URLSearchParams();
     if (params.cursor) query.set('cursor', params.cursor);
     if (params.limit !== undefined) query.set('limit', String(params.limit));
+    for (const [key, value] of Object.entries(extra)) if (value !== undefined) query.set(key, value);
     const qs = query.toString();
     return qs ? `${base}?${qs}` : base;
   }
@@ -410,6 +424,67 @@ export class ChassisClient<TScope extends string> {
       `/members/${encodeURIComponent(id)}/change-email-link`,
       req,
       idempotencyHeader(opts)
+    );
+  }
+
+  // ── Projects ──────────────────────────────────────────────────────────────
+  // A project is a subgroup of the workspace with its own members and three
+  // roles (viewer, editor, manager). A project the caller cannot read answers
+  // 404; an archived one answers 409 `project_archived` to every change but
+  // `unarchiveProject`. A project is never deleted.
+
+  /** The caller's projects (every project for a workspace owner or admin). `archived`: `false` by default. */
+  projects(params: ListParams & { archived?: ProjectsArchivedFilter } = {}): Promise<ProjectsList> {
+    return this.request('GET', this.pathWithQuery('/projects', params, { archived: params.archived }));
+  }
+
+  /** The caller becomes the project's first manager. */
+  createProject(req: ProjectCreate, opts: IdempotentRequestOptions = {}): Promise<Project> {
+    return this.request('POST', '/projects', req, idempotencyHeader(opts));
+  }
+
+  project(id: string): Promise<Project> {
+    return this.request('GET', `/projects/${encodeURIComponent(id)}`);
+  }
+
+  updateProject(id: string, patch: ProjectUpdate): Promise<Project> {
+    return this.request('PATCH', `/projects/${encodeURIComponent(id)}`, patch);
+  }
+
+  archiveProject(id: string): Promise<Project> {
+    return this.request('POST', `/projects/${encodeURIComponent(id)}/archive`);
+  }
+
+  unarchiveProject(id: string): Promise<Project> {
+    return this.request('POST', `/projects/${encodeURIComponent(id)}/unarchive`);
+  }
+
+  projectMembers(id: string, params: ListParams = {}): Promise<ProjectMembersList> {
+    return this.request('GET', this.pathWithQuery(`/projects/${encodeURIComponent(id)}/members`, params));
+  }
+
+  /** Adds one of the workspace's own active members, by user id or by email: exactly one of the two. */
+  addProjectMember(
+    id: string,
+    req: ProjectMemberAdd,
+    opts: IdempotentRequestOptions = {}
+  ): Promise<ProjectMember> {
+    return this.request('POST', `/projects/${encodeURIComponent(id)}/members`, req, idempotencyHeader(opts));
+  }
+
+  setProjectMemberRole(id: string, userId: string, role: ProjectRole): Promise<ProjectMember> {
+    return this.request(
+      'PATCH',
+      `/projects/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
+      { role }
+    );
+  }
+
+  /** A manager removes anyone; any member removes themselves. */
+  removeProjectMember(id: string, userId: string): Promise<ProjectMember> {
+    return this.request(
+      'DELETE',
+      `/projects/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`
     );
   }
 

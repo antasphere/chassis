@@ -58,6 +58,7 @@ import {
 import { registerSsoConnectRoutes } from './index.js';
 import { registerSsoLogoutRoutes } from './index.js';
 import { registerMemberRoutes } from './index.js';
+import { registerProjectRoutes } from './index.js';
 import { registerApiKeyRoutes } from './index.js';
 import { registerInvitationRoutes } from './index.js';
 import { registerAuditRoutes } from './index.js';
@@ -1043,6 +1044,10 @@ export function createApiApp<
     // CLOUD-5: no local-password accounts minted through invitations on cloud.
     ssoOnly: Boolean(deps.hubSso)
   });
+  // Projects: a subgroup of the workspace with its own members. Deliberately
+  // handed NO `hubManaged`: project membership is the tool's own on both
+  // editions, picked among the workspace's existing members.
+  registerProjectRoutes(api, { db });
   registerAuditRoutes(api, db);
   registerExportRoutes(api, {
     db,

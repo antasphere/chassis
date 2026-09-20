@@ -39,6 +39,28 @@ export interface ScopeAllowlistOptions<S extends string> {
  * rules in order, and `null` (the gate's 403 `endpoint_not_allowed`) when
  * nothing matched — fail-closed by construction.
  */
+/**
+ * The chassis project routes a machine principal may reach, EXACT shapes only:
+ * reads under the read scope, writes under the write scope. Anything else
+ * under `/projects` answers null HERE, so a tool's own route on a project (its
+ * link to the project, say) is the tool's rule to open, and an unknown shape
+ * stays closed.
+ */
+const PROJECT_ID = '[0-9a-fA-F-]{36}';
+const PROJECT_RE = new RegExp(`^/api/v1/projects/${PROJECT_ID}$`);
+const PROJECT_ARCHIVE_RE = new RegExp(`^/api/v1/projects/${PROJECT_ID}/(?:archive|unarchive)$`);
+const PROJECT_MEMBERS_RE = new RegExp(`^/api/v1/projects/${PROJECT_ID}/members$`);
+const PROJECT_MEMBER_RE = new RegExp(`^/api/v1/projects/${PROJECT_ID}/members/[^/]+$`);
+
+function projectAccess(path: string, method: string): 'read' | 'write' | null {
+  if (path === '/api/v1/projects') return method === 'GET' ? 'read' : method === 'POST' ? 'write' : null;
+  if (PROJECT_RE.test(path)) return method === 'GET' ? 'read' : method === 'PATCH' ? 'write' : null;
+  if (PROJECT_ARCHIVE_RE.test(path)) return method === 'POST' ? 'write' : null;
+  if (PROJECT_MEMBERS_RE.test(path)) return method === 'GET' ? 'read' : method === 'POST' ? 'write' : null;
+  if (PROJECT_MEMBER_RE.test(path)) return method === 'PATCH' || method === 'DELETE' ? 'write' : null;
+  return null;
+}
+
 export function createScopeAllowlist<S extends string>({
   read,
   write,
@@ -72,6 +94,9 @@ export function createScopeAllowlist<S extends string>({
     // superadmin recovery is a human session act — a key or token whose owner
     // is on SUPERADMIN_EMAILS still 403s here, fail-closed. Never list it.)
     if (path === '/api/v1/workspace/export' && isRead) return dataExport;
+    // Projects: each route listed by its exact shape and method (above).
+    const project = projectAccess(path, method);
+    if (project !== null) return project === 'read' ? read : write;
     for (const rule of rules) {
       const needed = rule(path, method, isRead);
       if (needed !== null) return needed;

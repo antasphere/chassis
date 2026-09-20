@@ -43,6 +43,18 @@ import {
   breakGlassResetTwoFactorSchema
 } from '../schemas/break-glass.js';
 import { fileSchema, filesListSchema, fileUploadedSchema, fileUploadQuerySchema } from '../schemas/files.js';
+import {
+  projectCreateSchema,
+  projectMemberAddSchema,
+  projectMemberParamsSchema,
+  projectMemberRoleSchema,
+  projectMemberSchema,
+  projectMembersListSchema,
+  projectSchema,
+  projectsListQuerySchema,
+  projectsListSchema,
+  projectUpdateSchema
+} from '../schemas/projects.js';
 
 /**
  * Server-only entry: route contracts for @hono/zod-openapi. Importing this
@@ -259,6 +271,156 @@ export const memberChangeEmailLinkRoute = createRoute({
     403: errorResponses[403],
     404: errorResponses[404],
     409: jsonBody(apiErrorSchema, 'Email already in use (email_taken) or idempotency conflict')
+  }
+});
+
+// ── Projects ─────────────────────────────────────────────────────────────────
+// A subgroup of a workspace with its own members and roles. The tiered answer
+// on every route: 404 to whoever cannot read the project (its existence is
+// not probeable), 403 to a proven reader who may not do the act, 409
+// `project_archived` on every mutation of an archived project but unarchive.
+// Project membership is LOCAL to the tool on both editions: these routes are
+// never under the hub-managed gate.
+
+const projectErrors = {
+  400: errorResponses[400],
+  401: errorResponses[401],
+  403: jsonBody(apiErrorSchema, 'guest_forbidden, or insufficient_project_role for a proven reader'),
+  404: errorResponses[404]
+} as const;
+const projectArchived409 = jsonBody(apiErrorSchema, 'The project is archived (project_archived)');
+
+export const projectsListRoute = createRoute({
+  method: 'get',
+  path: '/projects',
+  tags: ['projects'],
+  summary: 'List the projects the caller belongs to (every project for a workspace owner or admin)',
+  request: { query: projectsListQuerySchema },
+  responses: {
+    200: jsonBody(projectsListSchema, 'Projects, newest first'),
+    400: errorResponses[400],
+    401: errorResponses[401],
+    403: errorResponses[403]
+  }
+});
+
+export const projectCreateRoute = createRoute({
+  method: 'post',
+  path: '/projects',
+  tags: ['projects'],
+  summary: 'Create a project; the caller becomes its first manager',
+  request: { body: jsonRequestBody(projectCreateSchema, 'The new project'), headers: idempotencyHeaders },
+  responses: {
+    201: jsonBody(projectSchema, 'The created project'),
+    400: errorResponses[400],
+    401: errorResponses[401],
+    403: errorResponses[403],
+    409: jsonBody(apiErrorSchema, 'Idempotency conflict')
+  }
+});
+
+export const projectGetRoute = createRoute({
+  method: 'get',
+  path: '/projects/{id}',
+  tags: ['projects'],
+  summary: "Read a project, with the caller's own role on it",
+  request: { params: uuidParams },
+  responses: { 200: jsonBody(projectSchema, 'The project'), ...projectErrors }
+});
+
+export const projectUpdateRoute = createRoute({
+  method: 'patch',
+  path: '/projects/{id}',
+  tags: ['projects'],
+  summary: "Change a project's name, description or metadata (manager)",
+  request: { params: uuidParams, body: jsonRequestBody(projectUpdateSchema, 'Fields to change') },
+  responses: {
+    200: jsonBody(projectSchema, 'The project as it now is'),
+    ...projectErrors,
+    409: projectArchived409
+  }
+});
+
+export const projectArchiveRoute = createRoute({
+  method: 'post',
+  path: '/projects/{id}/archive',
+  tags: ['projects'],
+  summary: 'Archive a project: out of the default list and read-only (manager). A project is never deleted',
+  request: { params: uuidParams },
+  responses: {
+    200: jsonBody(projectSchema, 'The archived project'),
+    ...projectErrors,
+    409: projectArchived409
+  }
+});
+
+export const projectUnarchiveRoute = createRoute({
+  method: 'post',
+  path: '/projects/{id}/unarchive',
+  tags: ['projects'],
+  summary: 'Bring an archived project back (manager)',
+  request: { params: uuidParams },
+  responses: {
+    200: jsonBody(projectSchema, 'The project, live again'),
+    ...projectErrors,
+    409: jsonBody(apiErrorSchema, 'The project is not archived (project_not_archived)')
+  }
+});
+
+export const projectMembersListRoute = createRoute({
+  method: 'get',
+  path: '/projects/{id}/members',
+  tags: ['projects'],
+  summary: "List a project's members and their roles (cursor-paginated)",
+  request: { params: uuidParams, query: cursorPageQuerySchema },
+  responses: { 200: jsonBody(projectMembersListSchema, 'Members, newest first'), ...projectErrors }
+});
+
+export const projectMemberAddRoute = createRoute({
+  method: 'post',
+  path: '/projects/{id}/members',
+  tags: ['projects'],
+  summary: "Add one of the workspace's own active members to a project, by user id or email (manager)",
+  request: {
+    params: uuidParams,
+    body: jsonRequestBody(projectMemberAddSchema, 'Who, and with which role'),
+    headers: idempotencyHeaders
+  },
+  responses: {
+    201: jsonBody(projectMemberSchema, 'The new project member'),
+    ...projectErrors,
+    403: jsonBody(apiErrorSchema, 'guest_forbidden, insufficient_project_role, or guest_target'),
+    404: jsonBody(apiErrorSchema, 'Project not found, or member_not_found in this workspace'),
+    409: jsonBody(apiErrorSchema, 'project_archived, already_member, or idempotency conflict')
+  }
+});
+
+export const projectMemberRoleRoute = createRoute({
+  method: 'patch',
+  path: '/projects/{id}/members/{userId}',
+  tags: ['projects'],
+  summary: "Change a project member's role (manager)",
+  request: {
+    params: projectMemberParamsSchema,
+    body: jsonRequestBody(projectMemberRoleSchema, 'The new role')
+  },
+  responses: {
+    200: jsonBody(projectMemberSchema, 'The member as it now is'),
+    ...projectErrors,
+    409: projectArchived409
+  }
+});
+
+export const projectMemberRemoveRoute = createRoute({
+  method: 'delete',
+  path: '/projects/{id}/members/{userId}',
+  tags: ['projects'],
+  summary: 'Remove a member from a project (manager; a member may remove themselves)',
+  request: { params: projectMemberParamsSchema },
+  responses: {
+    200: jsonBody(projectMemberSchema, 'The removed member (final snapshot)'),
+    ...projectErrors,
+    409: projectArchived409
   }
 });
 

@@ -33,6 +33,9 @@ import { apiError } from '../api/errors.js';
  *     the cloud zero-membership session has no principal and runs unclaimed)
  *   the tool's upload reserve (a retried reserve must not leak a
  *     second session + reserved resource id)
+ *   POST /api/v1/projects (one click mints one project) and
+ *   POST /api/v1/projects/{id}/members (a retried add answers the first
+ *     add's 201, not 409 `already_member`)
  * Deliberate NON-targets:
  *   POST /api/v1/files and the tool's asset upload — content-addressed
  *     dedupe already makes them idempotent, and upload bodies must never be
@@ -62,12 +65,18 @@ const TTL_MS = 24 * 60 * 60 * 1000;
 
 const KEY_MAX_LENGTH = 200;
 
-const TARGET_PATHS = new Set(['/api/v1/api-keys', '/api/v1/invitations', '/api/v1/workspaces']);
+const TARGET_PATHS = new Set([
+  '/api/v1/api-keys',
+  '/api/v1/invitations',
+  '/api/v1/workspaces',
+  '/api/v1/projects'
+]);
 // The two member routes that MINT a credential for another user. Both are
 // covered (FUZZ-7): a replayed mint hands out a second live secret, and the
 // change-email JWT is stateless, so it cannot even be revoked afterwards.
 const RESET_LINK_RE = /^\/api\/v1\/members\/[^/]+\/reset-link$/;
 const CHANGE_EMAIL_LINK_RE = /^\/api\/v1\/members\/[^/]+\/change-email-link$/;
+const PROJECT_MEMBERS_RE = /^\/api\/v1\/projects\/[^/]+\/members$/;
 
 function isTarget(
   method: string,
@@ -79,6 +88,7 @@ function isTarget(
     (TARGET_PATHS.has(path) ||
       RESET_LINK_RE.test(path) ||
       CHANGE_EMAIL_LINK_RE.test(path) ||
+      PROJECT_MEMBERS_RE.test(path) ||
       (toolTargets?.(path) ?? false))
   );
 }

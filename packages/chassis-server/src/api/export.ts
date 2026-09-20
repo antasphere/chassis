@@ -9,6 +9,8 @@ import {
   files,
   instanceSettings,
   invitations,
+  projectMembers,
+  projects,
   user as userTable,
   workspaceMembers,
   workspaces,
@@ -72,6 +74,8 @@ export const RESERVED_EXPORT_ENTRY_NAMES = [
   'members',
   'invitations',
   'api-keys',
+  'projects',
+  'project_members',
   'audit-log',
   'files',
   'skipped-blobs'
@@ -303,6 +307,41 @@ export function registerExportRoutes(api: OpenAPIHono, deps: ExportRouteDeps): v
         .where(eq(apiKeys.workspaceId, workspaceId))
         .orderBy(asc(apiKeys.createdAt), asc(apiKeys.id));
       zip.addBuffer(jsonBuffer(apiKeyRows), 'api-keys.json');
+
+      // Projects and their members, archived projects included (a project is
+      // never deleted). What a tool links to a project is the tool's entry.
+      const projectRows = await db
+        .select({
+          id: projects.id,
+          name: projects.name,
+          description: projects.description,
+          metadata: projects.metadata,
+          archivedAt: projects.archivedAt,
+          createdBy: projects.createdBy,
+          createdAt: projects.createdAt,
+          updatedAt: projects.updatedAt
+        })
+        .from(projects)
+        .where(eq(projects.workspaceId, workspaceId))
+        .orderBy(asc(projects.createdAt), asc(projects.id));
+      zip.addBuffer(jsonBuffer(projectRows), 'projects.json');
+
+      const projectMemberRows = await db
+        .select({
+          id: projectMembers.id,
+          projectId: projectMembers.projectId,
+          memberId: projectMembers.memberId,
+          userId: workspaceMembers.userId,
+          role: projectMembers.role,
+          addedBy: projectMembers.addedBy,
+          createdAt: projectMembers.createdAt
+        })
+        .from(projectMembers)
+        .innerJoin(projects, eq(projectMembers.projectId, projects.id))
+        .innerJoin(workspaceMembers, eq(projectMembers.memberId, workspaceMembers.id))
+        .where(eq(projects.workspaceId, workspaceId))
+        .orderBy(asc(projectMembers.createdAt), asc(projectMembers.id));
+      zip.addBuffer(jsonBuffer(projectMemberRows), 'project_members.json');
 
       // 3. Audit log as NDJSON, keyset-batched (this table is unbounded).
       zip.addReadStream(Readable.from(auditNdjson(db, workspaceId)), 'audit-log.ndjson');

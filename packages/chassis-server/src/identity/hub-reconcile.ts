@@ -1,6 +1,6 @@
 import { Counter } from 'prom-client';
 import { and, eq, inArray, isNotNull, ne, notInArray } from 'drizzle-orm';
-import { workspaceMembers, workspaces, type Db } from '@antasphere/chassis-db';
+import { projectMembers, workspaceMembers, workspaces, type Db } from '@antasphere/chassis-db';
 import type { AuditService } from '../audit/service.js';
 import type { Logger } from '../logger.js';
 import { projectOrgMembership } from './hub-projection.js';
@@ -270,18 +270,36 @@ export class HubOrgReconciler {
             ? and(isNotNull(workspaces.centralAccountId), notInArray(workspaces.centralAccountId, keepIds))
             : isNotNull(workspaces.centralAccountId)
         );
-      const deactivated = await this.deps.db
-        .update(workspaceMembers)
-        .set({ isActive: false })
-        .where(
-          and(
-            eq(workspaceMembers.userId, localUserId),
-            eq(workspaceMembers.origin, 'hub'),
-            eq(workspaceMembers.isActive, true),
-            inArray(workspaceMembers.workspaceId, sweptWorkspaces)
+      // The project grants that rode on a swept membership go WITH it, in the
+      // same transaction. The sweep deactivates the row and never deletes it
+      // (a re-add at the hub reactivates the very same row), so the foreign
+      // key's cascade never fires here: without this delete, a person removed
+      // at the hub and added back later would find every old project grant
+      // waiting. A removal is a removal: a re-add starts with none. (A LOCAL
+      // deactivation by an admin is a pause, not a removal, and keeps them.)
+      const deactivated = await this.deps.db.transaction(async (tx) => {
+        const rows = await tx
+          .update(workspaceMembers)
+          .set({ isActive: false })
+          .where(
+            and(
+              eq(workspaceMembers.userId, localUserId),
+              eq(workspaceMembers.origin, 'hub'),
+              eq(workspaceMembers.isActive, true),
+              inArray(workspaceMembers.workspaceId, sweptWorkspaces)
+            )
           )
-        )
-        .returning({ workspaceId: workspaceMembers.workspaceId });
+          .returning({ id: workspaceMembers.id, workspaceId: workspaceMembers.workspaceId });
+        if (rows.length > 0) {
+          await tx.delete(projectMembers).where(
+            inArray(
+              projectMembers.memberId,
+              rows.map((row) => row.id)
+            )
+          );
+        }
+        return rows;
+      });
       for (const row of deactivated) {
         await this.deps.audit.write({
           workspaceId: row.workspaceId,

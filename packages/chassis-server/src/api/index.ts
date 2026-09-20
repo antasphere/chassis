@@ -15,6 +15,7 @@ export { registerInvitationRoutes } from './invitations.js';
 export { registerMemberRoutes } from './members.js';
 export { registerOnboardingRoutes } from './onboarding.js';
 export { registerOpenApiDoc } from './openapi-doc.js';
+export { registerProjectRoutes } from './projects.js';
 export { registerSsoConnectRoutes } from './sso-connect.js';
 export { registerSsoLogoutRoutes } from './sso-logout.js';
 export {

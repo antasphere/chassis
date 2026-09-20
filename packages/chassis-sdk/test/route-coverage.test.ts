@@ -29,6 +29,9 @@ const SAMPLE_ID = '11111111-1111-1111-1111-111111111111';
 const SAMPLE_TOKEN = 'x'.repeat(24);
 
 /** contract route → a client call. Keyed by `METHOD path` (contract shape). */
+/** A Better Auth user id: text, never a uuid. */
+const SAMPLE_USER_ID = 'usr_projects_coverage';
+
 const INVOKERS: Record<string, (c: Client) => Promise<unknown>> = {
   'GET /instance': (c) => c.instance(),
   'POST /setup': (c) =>
@@ -50,6 +53,16 @@ const INVOKERS: Record<string, (c: Client) => Promise<unknown>> = {
   'POST /members/{id}/reset-link': (c) => c.createMemberResetLink(SAMPLE_ID),
   'POST /members/{id}/change-email-link': (c) =>
     c.createMemberChangeEmailLink(SAMPLE_ID, { newEmail: 'a@b.co' }),
+  'GET /projects': (c) => c.projects(),
+  'POST /projects': (c) => c.createProject({ name: 'P' }),
+  'GET /projects/{id}': (c) => c.project(SAMPLE_ID),
+  'PATCH /projects/{id}': (c) => c.updateProject(SAMPLE_ID, { name: 'P' }),
+  'POST /projects/{id}/archive': (c) => c.archiveProject(SAMPLE_ID),
+  'POST /projects/{id}/unarchive': (c) => c.unarchiveProject(SAMPLE_ID),
+  'GET /projects/{id}/members': (c) => c.projectMembers(SAMPLE_ID),
+  'POST /projects/{id}/members': (c) => c.addProjectMember(SAMPLE_ID, { email: 'a@b.co', role: 'viewer' }),
+  'PATCH /projects/{id}/members/{userId}': (c) => c.setProjectMemberRole(SAMPLE_ID, SAMPLE_USER_ID, 'editor'),
+  'DELETE /projects/{id}/members/{userId}': (c) => c.removeProjectMember(SAMPLE_ID, SAMPLE_USER_ID),
   'GET /api-keys': (c) => c.apiKeys(),
   'POST /api-keys': (c) => c.createApiKey({ name: 'k', scopes: ['things:read'] }),
   'DELETE /api-keys/{id}': (c) => c.revokeApiKey(SAMPLE_ID),
@@ -105,7 +118,7 @@ function recordingClient(): { client: Client; calls: Array<{ method: string; pat
 
 /** The contract path with every param substituted, to compare against the client's real path. */
 function expectedPath(contractPath: string): string {
-  return `/api/v1${contractPath.replace('{id}', SAMPLE_ID)}`;
+  return `/api/v1${contractPath.replace('{id}', SAMPLE_ID).replace('{userId}', SAMPLE_USER_ID)}`;
 }
 
 describe('chassis client route coverage (contract drift guard)', () => {

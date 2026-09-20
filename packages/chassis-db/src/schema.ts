@@ -472,6 +472,81 @@ export const fileUploaders = pgTable(
   ]
 );
 
+/**
+ * A PROJECT is a subgroup of a workspace: a name, a description, members with
+ * a role, and whatever the tool links to it through a table of ITS OWN. The
+ * chassis owns the concept; it knows none of the tool's resources, and no
+ * tool ever needs a column here: `metadata` is the opaque, owner-defined seam
+ * (the same shape and size rules as the tool's own resource metadata).
+ *
+ * A project is ARCHIVED, never deleted: there is no delete route and no
+ * `deleted_at`. `archived_at` takes it out of the default list and makes it
+ * read-only; nothing cascades onto what is linked to it.
+ */
+export const projects = pgTable(
+  'projects',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    description: text('description'),
+    metadata: jsonb('metadata').$type<Record<string, unknown>>().notNull().default({}),
+    archivedAt: timestamp('archived_at', { withTimezone: true }),
+    createdBy: text('created_by').references(() => user.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => [
+    // Serves the keyset list (workspace_id, created_at DESC, id DESC).
+    index('projects_workspace_created_id_idx').on(t.workspaceId, t.createdAt, t.id)
+  ]
+);
+
+/**
+ * The three project roles. A SECURITY vocabulary read by SQL predicates
+ * (`projects/access.ts`), so a stray value must be impossible: text + CHECK,
+ * never a free string.
+ */
+export const projectRoles = ['manager', 'editor', 'viewer'] as const;
+export type ProjectRole = (typeof projectRoles)[number];
+
+/**
+ * One row per (project, person). **The grant rides on the workspace
+ * membership and dies with it**: `member_id` references the
+ * `workspace_members` row with ON DELETE CASCADE, so a removed member (a
+ * local delete, or the hub reconcile sweeping a membership) loses every
+ * project grant, and a later re-invite starts with none. The person and the
+ * workspace are READ THROUGH that row, never copied beside it: a copy could
+ * drift, and every predicate joins the membership anyway for its two live
+ * facts (`is_active`, `origin <> 'guest'`).
+ */
+export const projectMembers = pgTable(
+  'project_members',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    memberId: uuid('member_id')
+      .notNull()
+      .references(() => workspaceMembers.id, { onDelete: 'cascade' }),
+    role: text('role', { enum: projectRoles }).notNull(),
+    addedBy: text('added_by').references(() => user.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => [
+    uniqueIndex('project_members_project_member_uniq').on(t.projectId, t.memberId),
+    // The reverse direction: "every project of this membership" (the list's
+    // WHERE for a plain member, and the cascade's walk).
+    index('project_members_member_idx').on(t.memberId),
+    // Serves the members list's keyset pagination.
+    index('project_members_project_created_id_idx').on(t.projectId, t.createdAt, t.id),
+    check('project_members_role_check', sql`${t.role} IN ('manager', 'editor', 'viewer')`)
+  ]
+);
+
 export type InstanceSettings = typeof instanceSettings.$inferSelect;
 export type Workspace = typeof workspaces.$inferSelect;
 export type WorkspaceMember = typeof workspaceMembers.$inferSelect;
@@ -481,3 +556,5 @@ export type IdempotencyKey = typeof idempotencyKeys.$inferSelect;
 export type AuditEntry = typeof auditLog.$inferSelect;
 export type FileRow = typeof files.$inferSelect;
 export type FileUploaderRow = typeof fileUploaders.$inferSelect;
+export type ProjectRow = typeof projects.$inferSelect;
+export type ProjectMemberRow = typeof projectMembers.$inferSelect;
