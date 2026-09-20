@@ -54,6 +54,17 @@ export interface McpToolDefinition {
 /** The MCP half of the tool's identity (`ToolIdentity['mcp']`): the server's name and the tool names' prefix. */
 export type McpIdentity = ToolIdentity['mcp'];
 
+/**
+ * The ONE composition of an instance's hint table: the domain hints, then
+ * every chassis group (the projects today), then the tool's own last, so a
+ * tool may re-word a chassis code and never the reverse. A tool set that
+ * wraps its own errors reads the same composition (never a copy), so a
+ * chassis group added here reaches the tool's tools without a second edit.
+ */
+export function composeErrorHints(toolHints: ErrorHints): ErrorHints {
+  return mergeErrorHints({ ...PROJECT_ERROR_HINTS, ...toolHints });
+}
+
 export function buildMcpServer(
   ctx: McpToolContext,
   info: McpServerInfo,
@@ -63,8 +74,7 @@ export function buildMcpServer(
   // `<prefix>whoami` (the contract of `toolPrefix`), registered below: the other chassis tools point at it.
   const whoami = `${identity.toolPrefix}whoami`;
   const checkScope = createScopeCheck(tool.scopes);
-  // The tool's hints last: a tool may re-word a chassis code, never the reverse.
-  const hints = mergeErrorHints({ ...PROJECT_ERROR_HINTS, ...tool.errorHints });
+  const hints = composeErrorHints(tool.errorHints);
   const server = new McpServer(
     { name: identity.serverName, version: info.version },
     {

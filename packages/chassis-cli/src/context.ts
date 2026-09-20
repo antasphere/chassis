@@ -396,6 +396,27 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
 }
 
 /** Human-readable size (B / KB / MB) for the listing commands. */
+/**
+ * `--all` for a cursor-paginated list: the first page, then every next page
+ * while the server hands a cursor, the rows in order. The one loop behind
+ * every `--all`; a server that repeats a cursor is stopped here, once.
+ */
+export async function drainPages<T>(
+  first: { rows: T[]; nextCursor: string | null },
+  fetchPage: (cursor: string) => Promise<{ rows: T[]; nextCursor: string | null }>
+): Promise<T[]> {
+  const rows = [...first.rows];
+  const seen = new Set<string>();
+  let cursor = first.nextCursor;
+  while (cursor && !seen.has(cursor)) {
+    seen.add(cursor);
+    const page = await fetchPage(cursor);
+    rows.push(...page.rows);
+    cursor = page.nextCursor;
+  }
+  return rows;
+}
+
 export function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;

@@ -85,8 +85,10 @@ export const PROJECT_ERROR_HINTS: ErrorHints = {
     'archived set to false), then try again.',
   project_not_archived: 'This project is not archived, so there is nothing to bring back.',
   member_not_found:
-    'Nobody matches in this organization: a project member must already be an active member of the ' +
-    'organization, and is named by the exact user id or email address it joined with.',
+    'No such member. On add_project_member: nobody in the organization matches, and a project member ' +
+    'must already be an active organization member, named by the exact user id or email address ' +
+    'they joined with. On set_project_member_role or remove_project_member: this person is not on ' +
+    'the project (list_project_members shows who is).',
   already_member:
     'This person is already a member of the project — change their role instead of adding them again.',
   guest_target:
@@ -180,10 +182,11 @@ export function registerProjectTools(
         `${ARCHIVED_RULE}`,
       inputSchema: {
         workspace: workspaceInput,
-        archived: projectsArchivedFilterSchema
+        archived: z
+          .union([z.boolean(), projectsArchivedFilterSchema])
           .optional()
           .describe(
-            'Which projects to list: "false" (the default) the live ones, "true" the archived ones, ' +
+            'Which projects to list: false (the default) the live ones, true the archived ones, ' +
               '"all" both.'
           ),
         limit: limitInput,
@@ -193,7 +196,15 @@ export function registerProjectTools(
     },
     async ({ workspace, archived, limit, cursor }) =>
       run(scopes.read, workspace, (c) =>
-        callApi(c, pageQuery('/api/v1/projects', { cursor, limit }, { archived }))
+        // A model writes the natural boolean; the wire takes the enum.
+        callApi(
+          c,
+          pageQuery(
+            '/api/v1/projects',
+            { cursor, limit },
+            { archived: typeof archived === 'boolean' ? String(archived) : archived }
+          )
+        )
       )
   );
 
@@ -317,8 +328,9 @@ export function registerProjectTools(
           .boolean()
           .optional()
           .describe('true (the default) archives the project; false brings an archived one back.')
-      },
-      annotations: { destructiveHint: true }
+      }
+      // No destructiveHint: a reversible, read-only switch is not a delete,
+      // and a host that gates destructive tools must not block the restore.
     },
     async ({ workspace, projectId, archived }) => {
       const leg = archived === false ? 'unarchive' : 'archive';

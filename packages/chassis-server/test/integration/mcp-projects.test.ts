@@ -187,9 +187,11 @@ describe('the nine project tools are served under the host prefix', () => {
     for (const name of [TOOL.list, TOOL.get, TOOL.listMembers]) {
       expect(byName.get(name)!.annotations?.readOnlyHint, `${name} readOnlyHint`).toBe(true);
     }
-    for (const name of [TOOL.archive, TOOL.removeMember]) {
-      expect(byName.get(name)!.annotations?.destructiveHint, `${name} destructiveHint`).toBe(true);
-    }
+    expect(byName.get(TOOL.removeMember)!.annotations?.destructiveHint, 'remove destructiveHint').toBe(true);
+    // Archiving is a reversible switch (the same tool brings the project
+    // back), so it carries no destructive flag: a host that gates
+    // destructive tools must not block the restore.
+    expect(byName.get(TOOL.archive)!.annotations?.destructiveHint).toBeUndefined();
     // The writes describe themselves confirm-first, and the set explains what a
     // project IS to an agent that has never seen one.
     for (const name of [

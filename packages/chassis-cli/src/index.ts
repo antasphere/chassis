@@ -53,6 +53,7 @@ export { isInteractive, openInBrowser, platformOpener } from './open.js';
 
 export { safeDownloadName } from './commands/files.js';
 export { explainProjectRefusal, memberRef, type ProjectLookup } from './commands/projects.js';
+export { drainPages } from './context.js';
 export type { Cli, CliDefinition, CliKit, RegisterTool } from './kit.js';
 
 export function defineCli<TClient extends ChassisClient<string>>(

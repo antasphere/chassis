@@ -9,7 +9,7 @@ import type {
   ProjectsArchivedFilter,
   ProjectUpdate
 } from '@antasphere/chassis-contract';
-import { CliUsageError, printJson, table, type CliIo } from '../context.js';
+import { CliUsageError, drainPages, printJson, table, type CliIo } from '../context.js';
 import type { CliKit } from '../kit.js';
 
 /**
@@ -175,16 +175,12 @@ export function registerProjectCommands<TClient extends ChassisClient<string>>(
         if (opts.limit !== undefined) params.limit = opts.limit;
         if (opts.archived !== undefined) params.archived = parseArchivedFilter(opts.archived);
         const first = await explained('project', () => ctx.client.projects(params));
-        const rows = [...first.projects];
-        if (opts.all) {
-          let cursor = first.nextCursor;
-          while (cursor) {
-            const next = cursor;
-            const page = await explained('project', () => ctx.client.projects({ ...params, cursor: next }));
-            rows.push(...page.projects);
-            cursor = page.nextCursor;
-          }
-        }
+        const rows = opts.all
+          ? await drainPages({ rows: first.projects, nextCursor: first.nextCursor }, async (cursor) => {
+              const page = await explained('project', () => ctx.client.projects({ ...params, cursor }));
+              return { rows: page.projects, nextCursor: page.nextCursor };
+            })
+          : first.projects;
         const nextCursor = opts.all ? null : first.nextCursor;
         // The wire shape, so scripts can thread nextCursor (--all drains it to null).
         if (ctx.json) return printJson(io, { projects: rows, nextCursor });
@@ -325,18 +321,14 @@ export function registerProjectCommands<TClient extends ChassisClient<string>>(
         if (opts.cursor) params.cursor = opts.cursor;
         if (opts.limit !== undefined) params.limit = opts.limit;
         const first = await explained('project', () => ctx.client.projectMembers(project, params));
-        const rows = [...first.members];
-        if (opts.all) {
-          let cursor = first.nextCursor;
-          while (cursor) {
-            const next = cursor;
-            const page = await explained('project', () =>
-              ctx.client.projectMembers(project, { ...params, cursor: next })
-            );
-            rows.push(...page.members);
-            cursor = page.nextCursor;
-          }
-        }
+        const rows = opts.all
+          ? await drainPages({ rows: first.members, nextCursor: first.nextCursor }, async (cursor) => {
+              const page = await explained('project', () =>
+                ctx.client.projectMembers(project, { ...params, cursor })
+              );
+              return { rows: page.members, nextCursor: page.nextCursor };
+            })
+          : first.members;
         const nextCursor = opts.all ? null : first.nextCursor;
         if (ctx.json) return printJson(io, { members: rows, nextCursor });
         if (rows.length === 0) {
