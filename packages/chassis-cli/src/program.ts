@@ -1,7 +1,7 @@
 import { Command, CommanderError } from 'commander';
 import { CliAuthError } from '@antasphere/cli-core';
 import { PlatformApiError, type ChassisClient } from '@antasphere/chassis-sdk';
-import { CliUsageError, setStdinApiKey, ttySafeIo, type CliIo } from './context.js';
+import { CliApiRefusal, CliUsageError, setStdinApiKey, ttySafeIo, type CliIo } from './context.js';
 import type { Cli, CliDefinition, CliKit, RegisterTool } from './kit.js';
 import { readSecretFromStdin } from './stdin.js';
 import { registerAuthCommands } from './commands/auth.js';
@@ -116,7 +116,10 @@ export function createProgram<TClient extends ChassisClient<string>>(
         return 1;
       }
       if (e instanceof CliUsageError) {
-        io.err.write(`Error: ${e.message}\n`);
+        // A refusal a command already worded keeps the one thing the command
+        // cannot know: the workspace a 404 was asked of.
+        const hint = e instanceof CliApiRefusal && e.status === 404 ? workspaceNotFoundHint(io) : '';
+        io.err.write(`Error: ${e.message}${hint}\n`);
         return 1;
       }
       io.err.write(`Error: ${e instanceof Error ? e.message : String(e)}\n`);

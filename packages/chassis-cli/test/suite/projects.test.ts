@@ -493,6 +493,14 @@ describe(`${bin} projects`, () => {
     expect(h.err()).toContain('API key is required');
   });
 
+  it('a 404 under --workspace still says which workspace was asked, like every other command', async () => {
+    const h = harness([refusal(404, 'not_found')]);
+    const ws = 'aaaaaaaa-0000-4000-8000-000000000000';
+    expect(await run(['projects', 'get', 'p-1', '--workspace', ws, ...WIRED], h.io)).toBe(1);
+    expect(h.err()).toContain('No such project, or it is not yours to read.');
+    expect(h.err()).toContain(`looked in the workspace "${ws}"`);
+  });
+
   // ── the human sinks are sanitized, `--json` is not ─────────────────────────
 
   it('a project name carrying terminal control bytes is sanitized in the human output', async () => {

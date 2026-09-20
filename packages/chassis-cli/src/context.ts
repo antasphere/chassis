@@ -28,6 +28,21 @@ import {
 export { CliUsageError } from '@antasphere/cli-core';
 
 /**
+ * A refusal of the API that a command turned into a sentence (the project
+ * verbs do), thrown as the usage error it reads as, with the wire status
+ * kept: the runner adds what only it knows, the workspace a 404 was asked of.
+ */
+export class CliApiRefusal extends CliUsageError {
+  constructor(
+    message: string,
+    public readonly status: number
+  ) {
+    super(message);
+    this.name = 'CliApiRefusal';
+  }
+}
+
+/**
  * The tool's I/O seam: cli-core's, plus an injectable stdin reader so the
  * `--*-stdin` secret flags (stdin.ts) stay testable in-process. The bin
  * leaves it unset and the default reads `process.stdin`.
@@ -395,7 +410,6 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
   };
 }
 
-/** Human-readable size (B / KB / MB) for the listing commands. */
 /**
  * `--all` for a cursor-paginated list: the first page, then every next page
  * while the server hands a cursor, the rows in order. The one loop behind
@@ -417,6 +431,7 @@ export async function drainPages<T>(
   return rows;
 }
 
+/** Human-readable size (B / KB / MB) for the listing commands. */
 export function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;

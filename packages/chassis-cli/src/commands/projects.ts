@@ -9,7 +9,7 @@ import type {
   ProjectsArchivedFilter,
   ProjectUpdate
 } from '@antasphere/chassis-contract';
-import { CliUsageError, drainPages, printJson, table, type CliIo } from '../context.js';
+import { CliApiRefusal, CliUsageError, drainPages, printJson, table, type CliIo } from '../context.js';
 import type { CliKit } from '../kit.js';
 
 /**
@@ -121,7 +121,7 @@ async function explained<T>(what: ProjectLookup, run: () => Promise<T>): Promise
   } catch (e) {
     if (e instanceof PlatformApiError) {
       const line = explainProjectRefusal(e, what);
-      if (line) throw new CliUsageError(line);
+      if (line) throw new CliApiRefusal(line, e.status);
     }
     throw e;
   }

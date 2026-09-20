@@ -50,10 +50,11 @@ const WHAT_IS_A_PROJECT =
  * role is chosen or shown, because the whole authorization story of the
  * surface is in it.
  */
-const ROLE_LADDER =
-  'Roles, each containing the one before it: `viewer` reads the project and what is linked to it; ' +
-  '`editor` may also write what is linked to it; `manager` may also rename the project, archive it, ' +
-  'and manage its members. An organization owner or admin acts as a manager on every project.';
+const ROLE_LADDER_BODY =
+  '`viewer` reads the project and what is linked to it; `editor` may also write what is linked to ' +
+  'it; `manager` may also rename the project, archive it, and manage its members. An organization ' +
+  'owner or admin acts as a manager on every project.';
+const ROLE_LADDER = `Roles, each containing the one before it: ${ROLE_LADDER_BODY}`;
 
 /** How an archived project behaves, and the one way back. */
 const ARCHIVED_RULE =
@@ -62,10 +63,13 @@ const ARCHIVED_RULE =
 
 /**
  * The project codes, turned from an API code into a sentence a model can act
- * on. Merged into the instance's hint table (`mergeErrorHints`) so a refusal
- * reads as words rather than as a code. The role a refusal needs is the
- * message's, never assumed here: a tool's own route over a project may gate
- * on `editor` where every chassis route gates on `manager`.
+ * on, for the tool whose prefix is given: a hint that names a tool names it
+ * as it is registered (`<toolPrefix>list_project_members`), or the model
+ * follows it to a tool that does not exist. Merged into the instance's hint
+ * table (`mergeErrorHints`) so a refusal reads as words rather than as a
+ * code. The role a refusal needs is the message's, never assumed here: a
+ * tool's own route over a project may gate on `editor` where every chassis
+ * route gates on `manager`.
  *
  * Every key here is a code only the project routes answer. `not_found` is
  * DELIBERATELY absent: it is the whole instance's code, a tool already words
@@ -75,26 +79,32 @@ const ARCHIVED_RULE =
  * a project you cannot read answers not found, so being refused is not proof
  * that it exists.
  */
-export const PROJECT_ERROR_HINTS: ErrorHints = {
-  insufficient_project_role:
-    'Your role on this project is below what this needs (the message names the role; the chassis ' +
-    'routes need manager). Ask a project manager, or an owner or admin of the organization, to make ' +
-    'the change or to raise your role.',
-  project_archived:
-    'This project is archived, so it is read-only. Bring it back first (archive the project with ' +
-    'archived set to false), then try again.',
-  project_not_archived: 'This project is not archived, so there is nothing to bring back.',
-  member_not_found:
-    'No such member. On add_project_member: nobody in the organization matches, and a project member ' +
-    'must already be an active organization member, named by the exact user id or email address ' +
-    'they joined with. On set_project_member_role or remove_project_member: this person is not on ' +
-    'the project (list_project_members shows who is).',
-  already_member:
-    'This person is already a member of the project — change their role instead of adding them again.',
-  guest_target:
-    'This person is an external guest invited to one item: their account is not this organization’s ' +
-    'to put on a project.'
-};
+export function projectErrorHints(toolPrefix: string): ErrorHints {
+  const t = (name: string) => `${toolPrefix}${name}`;
+  return {
+    insufficient_project_role:
+      'Your role on this project is below what this needs (the message names the role; the chassis ' +
+      'routes need manager). Ask a project manager, or an owner or admin of the organization, to make ' +
+      'the change or to raise your role.',
+    project_archived:
+      'This project is archived, so it is read-only. Bring it back first (archive the project with ' +
+      'archived set to false), then try again.',
+    project_not_archived: 'This project is not archived, so there is nothing to bring back.',
+    member_not_found:
+      `No such member. On ${t('add_project_member')}: nobody in the organization matches, and a project ` +
+      'member must already be an active organization member, named by the exact user id or email ' +
+      `address they joined with. On ${t('set_project_member_role')} or ${t('remove_project_member')}: ` +
+      `this person is not on the project (${t('list_project_members')} shows who is).`,
+    already_member:
+      'This person is already a member of the project — change their role instead of adding them again.',
+    guest_target:
+      'This person is an external guest invited to one item: their account is not this organization’s ' +
+      'to put on a project.',
+    guest_forbidden:
+      'This credential is a guest of the organization, invited to one item only, and guests take no ' +
+      'part in projects: nothing under the project tools answers it. Use a member’s credential.'
+  };
+}
 
 /**
  * A project is named by an opaque id, never by its name: two projects may
@@ -110,9 +120,7 @@ const userIdInput = z
   .max(200)
   .describe('The member’s user id, as the member list reports it.');
 
-const roleInput = projectRoleSchema.describe(
-  `The role on this project. ${ROLE_LADDER.replace('Roles, each containing the one before it: ', '')}`
-);
+const roleInput = projectRoleSchema.describe(`The role on this project. ${ROLE_LADDER_BODY}`);
 
 const nameInput = z.string().min(1).max(200).describe('The project name, as people will read it.');
 

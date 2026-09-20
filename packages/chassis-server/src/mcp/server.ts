@@ -2,7 +2,7 @@ import type { ToolIdentity } from '@antasphere/chassis-contract';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { mcpInputs } from './inputs.js';
 import { jsonText, mergeErrorHints, wrapToolErrors, type ErrorHints } from './errors.js';
-import { PROJECT_ERROR_HINTS, registerProjectTools } from './projects.js';
+import { projectErrorHints, registerProjectTools } from './projects.js';
 import {
   callApi,
   createScopeCheck,
@@ -61,8 +61,8 @@ export type McpIdentity = ToolIdentity['mcp'];
  * wraps its own errors reads the same composition (never a copy), so a
  * chassis group added here reaches the tool's tools without a second edit.
  */
-export function composeErrorHints(toolHints: ErrorHints): ErrorHints {
-  return mergeErrorHints({ ...PROJECT_ERROR_HINTS, ...toolHints });
+export function composeErrorHints(toolHints: ErrorHints, toolPrefix: string): ErrorHints {
+  return mergeErrorHints({ ...projectErrorHints(toolPrefix), ...toolHints });
 }
 
 export function buildMcpServer(
@@ -74,7 +74,7 @@ export function buildMcpServer(
   // `<prefix>whoami` (the contract of `toolPrefix`), registered below: the other chassis tools point at it.
   const whoami = `${identity.toolPrefix}whoami`;
   const checkScope = createScopeCheck(tool.scopes);
-  const hints = composeErrorHints(tool.errorHints);
+  const hints = composeErrorHints(tool.errorHints, identity.toolPrefix);
   const server = new McpServer(
     { name: identity.serverName, version: info.version },
     {

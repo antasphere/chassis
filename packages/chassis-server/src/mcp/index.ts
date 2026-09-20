@@ -8,7 +8,7 @@ export {
   wrapToolErrors
 } from './errors.js';
 export { mcpRoutes } from './http.js';
-export { PROJECT_ERROR_HINTS, registerProjectTools } from './projects.js';
+export { projectErrorHints, registerProjectTools } from './projects.js';
 export { type McpInputs, mcpInputs } from './inputs.js';
 export {
   type McpIdentity,
