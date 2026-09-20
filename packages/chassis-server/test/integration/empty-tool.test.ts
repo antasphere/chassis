@@ -9,7 +9,7 @@ import { defineChassisContract } from '@antasphere/chassis-contract';
 import { defineChassisRoutes } from '@antasphere/chassis-contract/routes';
 import { createPlatform, type BootResult, type ToolDefinition } from '../../src/index.js';
 import { createScopeAllowlist } from '../../src/middleware/index.js';
-import { THINGS_COPY, THINGS_IDENTITY } from '../host/identity.js';
+import { THINGS_COPY, THINGS_IDENTITY, THINGS_ROUTES_COPY } from '../host/identity.js';
 
 /**
  * The chassis boots with a MINIMAL tool: no env extension, no services, no
@@ -52,7 +52,7 @@ const emptyTool: ToolDefinition<NoEnv, NoDomain> = {
       dataExport: 'things:export',
       rules: []
     }),
-    contractRoutes: defineChassisRoutes(contract, THINGS_IDENTITY)
+    contractRoutes: defineChassisRoutes(contract, THINGS_IDENTITY, THINGS_ROUTES_COPY)
   },
   services: () => ({}),
   api: {

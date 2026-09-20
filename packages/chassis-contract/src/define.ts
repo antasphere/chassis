@@ -19,7 +19,7 @@ import { defineScopeSchema, type ScopeSchema, type ScopeTuple } from './schemas/
  * more scopes than the three parts of its identity appends them here.
  *
  * The route contracts over these schemas come from
- * `defineChassisRoutes(contract, IDENTITY)` on the `./routes` entry (it pulls
+ * `defineChassisRoutes(contract, IDENTITY, copy)` on the `./routes` entry (it pulls
  * Hono; this one stays client-safe).
  */
 export function defineChassisContract<const TScopes extends ScopeTuple>(tool: {

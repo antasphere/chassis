@@ -3,16 +3,12 @@ import type { Context } from 'hono';
 import { Readable } from 'node:stream';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import type { SQL } from 'drizzle-orm';
-import {
-  defineFileDeleteRoute,
-  fileGetRoute,
-  filesListRoute,
-  fileUploadRoute
-} from '@antasphere/chassis-contract/routes';
+import { fileGetRoute, filesListRoute, fileUploadRoute } from '@antasphere/chassis-contract/routes';
 import type { Principal } from '@antasphere/chassis-contract';
 import type { DbConn, FileRow } from '@antasphere/chassis-db';
 import { ulid } from 'ulid';
 import type { Env } from '../env.js';
+import type { ScopeRoutes } from './scope-routes.js';
 import type { Logger } from '../logger.js';
 import type { PlatformRegistry } from '../platform/registry.js';
 import type { FileService } from '../files/service.js';
@@ -56,10 +52,12 @@ export interface FileRouteDeps {
    */
   blobReadScope: (principal: Principal) => SQL | undefined;
   /**
-   * The tool's wording of the 409 `file_in_use` (`copy.fileInUse` and
-   * `copy.fileInUseOpenApi`): what references a blob is the tool's to name.
+   * The delete route the tool instantiated (its OpenAPI 409 carries the tool's
+   * wording), and the tool's message of that 409 `file_in_use`
+   * (`copy.fileInUse`): what references a blob is the tool's to name.
    */
-  fileInUse: { message: string; openApi: string };
+  fileDeleteRoute: ScopeRoutes['fileDeleteRoute'];
+  fileInUse: string;
 }
 
 export function registerFileRoutes(api: OpenAPIHono, deps: FileRouteDeps): void {
@@ -165,7 +163,7 @@ export function registerFileRoutes(api: OpenAPIHono, deps: FileRouteDeps): void 
     return c.json(toWire(file), 200);
   });
 
-  api.openapi(defineFileDeleteRoute(deps.fileInUse.openApi), async (c) => {
+  api.openapi(deps.fileDeleteRoute, async (c) => {
     const principal = c.get('principal')!;
     const { id } = c.req.valid('param');
     // Same scope on the mutation: a member must not be able to delete (or
@@ -174,7 +172,7 @@ export function registerFileRoutes(api: OpenAPIHono, deps: FileRouteDeps): void 
     if (!file) return c.json(err('not_found', 'File not found'), 404);
     const outcome = await service.delete(file, (tx, row) => deps.blobInUse(tx, row.workspaceId, row.sha256));
     if (outcome === 'in_use') {
-      return c.json(err('file_in_use', deps.fileInUse.message), 409);
+      return c.json(err('file_in_use', deps.fileInUse), 409);
     }
     c.set('audit', { action: 'file.delete', resourceType: 'file', resourceId: file.id });
     return c.json(toWire(file), 200);

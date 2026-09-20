@@ -133,8 +133,6 @@ export interface ToolCopy {
   guestTarget: string;
   /** 409 `file_in_use`: the message of `DELETE /files/{id}` when the tool's `blobInUse` says yes. */
   fileInUse: string;
-  /** The same refusal as the OpenAPI document describes it (the 409 of `DELETE /files/{id}`). */
-  fileInUseOpenApi: string;
 }
 
 export interface ToolApiSlots<TEnvShape extends z.ZodRawShape, TDomain, TBuckets extends string, TEvents> {
@@ -223,7 +221,7 @@ export interface ToolDefinition<
     cliKey: readonly string[];
     /** The composed fail-closed allowlist: chassis rules first, then the tool's; null = 403. */
     requiredScopeFor: (path: string, method: string) => string | null;
-    /** The generic routes that carry the tool's scope vocabulary (`defineChassisRoutes(contract)`). */
+    /** The generic routes that carry the tool's scopes or wording (`defineChassisRoutes(contract, identity, copy)`). */
     contractRoutes: ScopeRoutes;
   };
   /**
@@ -304,7 +302,7 @@ export interface BootResult<
  */
 export function assertToolCopy(copy: ToolCopy | undefined): asserts copy is ToolCopy {
   if (!copy) throw new Error('tool definition: the `copy` slot is required');
-  for (const name of ['guestForbidden', 'guestTarget', 'fileInUse', 'fileInUseOpenApi'] as const) {
+  for (const name of ['guestForbidden', 'guestTarget', 'fileInUse'] as const) {
     if (typeof copy[name] !== 'string' || copy[name] === '') {
       throw new Error(`tool definition: copy.${name} is required (a non-empty sentence)`);
     }

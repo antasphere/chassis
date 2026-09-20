@@ -38,15 +38,21 @@ describe('defineChassisContract', () => {
 });
 
 describe('defineChassisRoutes', () => {
-  it('returns the six route contracts over the instantiated schemas', () => {
-    const routes = defineChassisRoutes(a, { cliKeyScopesLabel: 'widgets:read+write' });
+  it('returns the eight route contracts over the instantiated schemas', () => {
+    const routes = defineChassisRoutes(
+      a,
+      { cliKeyScopesLabel: 'widgets:read+write', scopes: { dataExport: 'widgets:export' } },
+      { fileInUseOpenApi: 'file_in_use: referenced by a widget' }
+    );
     expect(Object.entries(routes).map(([name, r]) => `${name} ${r.method} ${r.path}`)).toEqual([
       'meRoute get /me',
       'apiKeysListRoute get /api-keys',
       'apiKeyCreateRoute post /api-keys',
       'apiKeyRevokeRoute delete /api-keys/{id}',
       'cliAuthCompleteRoute post /cli/auth/complete',
-      'ssoCliConnectRoute post /sso/cli-connect'
+      'ssoCliConnectRoute post /sso/cli-connect',
+      'workspaceExportRoute get /workspace/export',
+      'fileDeleteRoute delete /files/{id}'
     ]);
     expect(routes.meRoute.responses[200].content['application/json'].schema).toBe(a.meResponseSchema);
   });

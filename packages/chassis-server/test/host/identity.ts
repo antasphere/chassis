@@ -1,4 +1,5 @@
 import type { ToolIdentity } from '@antasphere/chassis-contract';
+import type { ChassisRoutesCopy } from '@antasphere/chassis-contract/routes';
 import type { ToolCopy } from '@antasphere/chassis-server';
 
 /**
@@ -26,6 +27,10 @@ export const THINGS_COPY: ToolCopy = {
   guestForbidden: 'Guest access is limited to the things you were invited to',
   guestTarget:
     'This member is an external guest of one thing: their account is not this workspace’s to recover',
-  fileInUse: 'This file is referenced by a thing',
+  fileInUse: 'This file is referenced by a thing'
+};
+
+/** And its wording of the OpenAPI document (`defineChassisRoutes`' third argument). */
+export const THINGS_ROUTES_COPY: ChassisRoutesCopy = {
   fileInUseOpenApi: 'file_in_use: referenced by a thing'
 };

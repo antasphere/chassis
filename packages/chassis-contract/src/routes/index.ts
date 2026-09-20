@@ -404,34 +404,6 @@ export const ssoLogoutRoute = createRoute({
   }
 });
 
-// ── Workspace ────────────────────────────────────────────────────────────────
-
-/**
- * The export route, with the name of the scope a key needs in its summary.
- * That name is the tool's, so the SERVER registers the contract built from
- * the tool's identity (`defineWorkspaceExportRoute(identity.scopes.dataExport)`)
- * and the OpenAPI document prints the tool's own scope. The static export
- * below is the same contract with no tool named: what a client-side reader of
- * the route list (the SDK's coverage guard) sees.
- */
-export const defineWorkspaceExportRoute = (exportScope: string) =>
-  createRoute({
-    method: 'get',
-    path: '/workspace/export',
-    tags: ['workspace'],
-    summary: `Full workspace export as a streamed zip (admin+; keys need ${exportScope})`,
-    responses: {
-      // Deliberately NO `content` key on the 200: that is what lets the
-      // api.openapi handler legally return a plain streamed Response.
-      200: { description: 'Zip archive stream (application/zip)' },
-      401: errorResponses[401],
-      403: errorResponses[403],
-      429: errorResponses[429]
-    }
-  });
-
-export const workspaceExportRoute = defineWorkspaceExportRoute('the export scope');
-
 // ── Break-glass (superadmin recovery, ADR 010) ──────────────────────────────
 // Session-only by construction: both paths are deliberately UNLISTED in the
 // machine scope allowlist (middleware/scopes.ts), so API keys and OAuth
@@ -560,40 +532,27 @@ export const fileUploadRoute = createRoute({
 });
 
 /**
- * The delete route, with the tool's wording of its 409. What references a
- * blob is the tool's to name, so the SERVER registers the contract built from
- * the tool's copy (`defineFileDeleteRoute(copy.fileInUseOpenApi)`), the same
- * way as `defineWorkspaceExportRoute`; the static export names no domain.
+ * What the OpenAPI document says in the tool's own words, beyond its identity:
+ * today one sentence. Pure data, handed to `defineChassisRoutes`.
  */
-export const defineFileDeleteRoute = (inUseDescription: string) =>
-  createRoute({
-    method: 'delete',
-    path: '/files/{id}',
-    tags: ['files'],
-    summary: 'Delete a file (metadata soft-deleted, blob removed)',
-    request: { params: uuidParams },
-    responses: {
-      200: jsonBody(fileSchema, 'Deleted file'),
-      401: errorResponses[401],
-      404: errorResponses[404],
-      // ADR 011 blob-delete guard: a blob the tool still references is not
-      // deletable through the generic files surface.
-      409: jsonBody(apiErrorSchema, inUseDescription)
-    }
-  });
-
-export const fileDeleteRoute = defineFileDeleteRoute('file_in_use: the tool still references this file');
+export interface ChassisRoutesCopy {
+  /** How the document describes the 409 of `DELETE /files/{id}`: what references a blob is the tool's to name. */
+  fileInUseOpenApi: string;
+}
 
 /**
- * The route contracts that carry the TOOL's scope vocabulary: every route
- * whose request or response schema transitively holds `scopeSchema`. Built
- * from the contract `defineChassisContract({ scopes })` returned and from the
- * tool's identity (the one summary that names the CLI key's grant) — no
- * module-level state, one instantiation per tool.
+ * The route contracts that carry something of the TOOL: every route whose
+ * request or response schema transitively holds `scopeSchema`, and the routes
+ * whose OpenAPI text names a scope or the tool's domain (the CLI key's grant,
+ * the export scope, the file-in-use refusal). Built from the contract
+ * `defineChassisContract({ scopes })` returned, from the tool's identity and
+ * from its wording of the document — no module-level state, one instantiation
+ * per tool, and no route object that no tool serves.
  */
 export function defineChassisRoutes<TScope extends string>(
   contract: ChassisContract<TScope>,
-  identity: Pick<ToolIdentity, 'cliKeyScopesLabel'>
+  identity: Pick<ToolIdentity, 'cliKeyScopesLabel'> & { scopes: Pick<ToolIdentity['scopes'], 'dataExport'> },
+  copy: ChassisRoutesCopy
 ) {
   const {
     meResponseSchema,
@@ -708,12 +667,53 @@ export function defineChassisRoutes<TScope extends string>(
     }
   });
 
+  // ── Workspace ────────────────────────────────────────────────────────────────
+
+  // The export route names the scope a key needs in its summary, and that
+  // name is the tool's (`identity.scopes.dataExport`).
+  const workspaceExportRoute = createRoute({
+    method: 'get',
+    path: '/workspace/export',
+    tags: ['workspace'],
+    summary: `Full workspace export as a streamed zip (admin+; keys need ${identity.scopes.dataExport})`,
+    responses: {
+      // Deliberately NO `content` key on the 200: that is what lets the
+      // api.openapi handler legally return a plain streamed Response.
+      200: { description: 'Zip archive stream (application/zip)' },
+      401: errorResponses[401],
+      403: errorResponses[403],
+      429: errorResponses[429]
+    }
+  });
+
+  // ── Files ────────────────────────────────────────────────────────────────────
+
+  // The delete route carries the tool's wording of its 409: what references a
+  // blob is the tool's to name (`copy.fileInUseOpenApi`).
+  const fileDeleteRoute = createRoute({
+    method: 'delete',
+    path: '/files/{id}',
+    tags: ['files'],
+    summary: 'Delete a file (metadata soft-deleted, blob removed)',
+    request: { params: uuidParams },
+    responses: {
+      200: jsonBody(fileSchema, 'Deleted file'),
+      401: errorResponses[401],
+      404: errorResponses[404],
+      // ADR 011 blob-delete guard: a blob the tool still references is not
+      // deletable through the generic files surface.
+      409: jsonBody(apiErrorSchema, copy.fileInUseOpenApi)
+    }
+  });
+
   return {
     meRoute,
     apiKeysListRoute,
     apiKeyCreateRoute,
     apiKeyRevokeRoute,
     cliAuthCompleteRoute,
-    ssoCliConnectRoute
+    ssoCliConnectRoute,
+    workspaceExportRoute,
+    fileDeleteRoute
   };
 }

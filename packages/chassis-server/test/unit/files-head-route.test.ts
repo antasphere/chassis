@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { OpenAPIHono } from '@hono/zod-openapi';
 import { Readable } from 'node:stream';
 import { pino } from 'pino';
-import type { Principal } from '@antasphere/chassis-contract';
+import { defineChassisContract, type Principal } from '@antasphere/chassis-contract';
+import { defineChassisRoutes } from '@antasphere/chassis-contract/routes';
 import { registerFileRoutes } from '@antasphere/chassis-server/api';
 import type { FileService } from '@antasphere/chassis-server/files';
 import type { PlatformRegistry } from '@antasphere/chassis-server/platform';
 import type { StorageDriver } from '@antasphere/chassis-server/storage';
+import { THINGS_COPY, THINGS_IDENTITY, THINGS_ROUTES_COPY } from '../host/identity.js';
 
 /**
  * PLT-39, the half that actually matters: the REGISTERED ROUTE must answer a
@@ -19,6 +21,12 @@ import type { StorageDriver } from '@antasphere/chassis-server/storage';
  * real handler, so the `c.req.method === 'HEAD'` derivation is covered by
  * something that fails when it is removed.
  */
+const { fileDeleteRoute } = defineChassisRoutes(
+  defineChassisContract({ scopes: [THINGS_IDENTITY.scopes.read] }),
+  THINGS_IDENTITY,
+  THINGS_ROUTES_COPY
+);
+
 const WORKSPACE = '11111111-2222-3333-4444-555555555555';
 const SHA = 'a'.repeat(64);
 const BODY = 'hello head';
@@ -74,10 +82,8 @@ function app(): OpenAPIHono {
     // view: undefined = unscoped, exactly what an admin/owner principal gets.
     blobReadScope: () => undefined,
     blobInUse: async () => false,
-    fileInUse: {
-      message: 'This file is referenced by a thing',
-      openApi: 'file_in_use: referenced by a thing'
-    }
+    fileDeleteRoute,
+    fileInUse: THINGS_COPY.fileInUse
   });
   return api;
 }
@@ -138,10 +144,8 @@ describe('GET/HEAD /files/:id/content (one registration, verb read off the reque
       // view: undefined = unscoped, exactly what an admin/owner principal gets.
       blobReadScope: () => undefined,
       blobInUse: async () => false,
-      fileInUse: {
-        message: 'This file is referenced by a thing',
-        openApi: 'file_in_use: referenced by a thing'
-      }
+      fileDeleteRoute,
+      fileInUse: THINGS_COPY.fileInUse
     });
 
     await api.request(CONTENT_PATH, { method: 'HEAD' });

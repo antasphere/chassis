@@ -1051,7 +1051,7 @@ export function createApiApp<
     limiters,
     clientIp,
     logger,
-    exportScope: tool.identity.scopes.dataExport
+    workspaceExportRoute: tool.scopes.contractRoutes.workspaceExportRoute
   });
 
   // Instance id for usage-event sources, cached after first read.
@@ -1075,7 +1075,8 @@ export function createApiApp<
     // authorizes per DECK, not per workspace — the ADR 013 policy expressed
     // as a WHERE predicate.
     ...tool.api.filePolicy(deps.domain),
-    fileInUse: { message: tool.copy.fileInUse, openApi: tool.copy.fileInUseOpenApi }
+    fileDeleteRoute: tool.scopes.contractRoutes.fileDeleteRoute,
+    fileInUse: tool.copy.fileInUse
   });
   // The tool's own routes: AFTER the files routes, BEFORE the OpenAPI
   // document and the JSON 404. The tool keeps its own internal order.

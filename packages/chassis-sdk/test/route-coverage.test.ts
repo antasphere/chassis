@@ -17,7 +17,11 @@ import { ChassisClient } from '../src/index.js';
  */
 
 const contract = defineChassisContract({ scopes: ['things:read', 'things:write'] });
-const scopedRoutes = chassisRoutes.defineChassisRoutes(contract, { cliKeyScopesLabel: 'things:read+write' });
+const scopedRoutes = chassisRoutes.defineChassisRoutes(
+  contract,
+  { cliKeyScopesLabel: 'things:read+write', scopes: { dataExport: 'things:export' } },
+  { fileInUseOpenApi: 'file_in_use: referenced by a thing' }
+);
 type ThingsScope = 'things:read' | 'things:write';
 type Client = ChassisClient<ThingsScope>;
 
