@@ -260,14 +260,14 @@ export function requireAuth(): MiddlewareHandler {
 
 /**
  * Route guard (D2, internal/federation.md P6): an `origin='guest'` membership
- * belongs to an EXTERNAL per-deck collaborator — it exists so the platform
+ * belongs to an EXTERNAL per-resource collaborator — it exists so the platform
  * can resolve them to a principal at all, not to make them a workspace
- * actor. Guests keep every ADR 013 per-deck surface their grant opens
- * (read, version push, share tokens, annotations on THAT deck) but are
- * refused deck creation and workspace-level surfaces on BOTH editions.
+ * actor. Guests keep every ADR 013 per-resource surface their grant opens
+ * (read, version push, share tokens, annotations on THAT resource) but are
+ * refused resource creation and workspace-level surfaces on BOTH editions.
  * Judges the resolved principal, so sessions, API keys, and OAuth bearers
  * all pass the same gate. 403 — the surfaces this guards are flat,
- * documented workspace surfaces, not probeable per-deck resources, so the
+ * documented workspace surfaces, not probeable per-grant resources, so the
  * ADR 013 hide-existence 404 posture does not apply here (same stance as
  * requireRole).
  */

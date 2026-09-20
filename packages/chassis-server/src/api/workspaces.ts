@@ -48,7 +48,7 @@ const err = (code: string, message: string) => ({ error: { code, message } });
 /**
  * Per-user creation lock, two-int advisory form `(classid, hashtext(userId))`.
  * 7432006 is free in this repository (7432001 migrations, 7432002/3 the
- * last-owner guards, 7432004 the grant refresh + pg-boss, 7432005 deck
+ * last-owner guards, 7432004 the grant refresh + pg-boss, 7432005 a tool's
  * uploads) and is, on purpose, the same number the hub uses for the same
  * job in ITS database.
  */
@@ -82,7 +82,7 @@ export interface WorkspaceCreationPolicy {
  *  - sessions only;
  *  - the operator's dial at 0 closes the door on both editions;
  *  - a GUEST-ONLY user (every active membership is `origin='guest'`) is an
- *    outsider invited to single decks (D2): refused like every other
+ *    outsider invited to single resources (D2): refused like every other
  *    workspace-level act. One non-guest active membership anywhere lifts it
  *    — it is a fact about the PERSON, not about the workspace they are in;
  *  - oss: fewer ACTIVE OWNER memberships than the cap (setup's counts);

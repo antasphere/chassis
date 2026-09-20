@@ -59,7 +59,7 @@ export function createProgram<TClient extends ChassisClient<string>>(
     registerTool: RegisterTool,
     version: string
   ): Promise<number> {
-    // Every human sink is wrapped ONCE, here: deck titles, annotation bodies,
+    // Every human sink is wrapped ONCE, here: resource titles, annotation bodies,
     // stored filenames and server error messages are all somebody else's text
     // heading for a terminal (context.ts `sanitizeForTty`). `--json` keeps the
     // raw sink through `printJson`.

@@ -16,8 +16,8 @@ export interface McpToolContext {
   authorizationHeader: string;
   /**
    * The instance's public origin (`PUBLIC_BASE_URL`), for the one thing a
-   * tool composes for a human rather than for the API: the deck's own page
-   * a push answers with (PRDCT-2280). Never used to reach the API.
+   * tool composes for a human rather than for the API: the page of the tool's
+   * resource that a push answers with (PRDCT-2280). Never used to reach the API.
    */
   publicBaseUrl: string;
   /**
@@ -127,7 +127,7 @@ export async function callApi(ctx: McpToolContext, path: string, init: RequestIn
 
 /**
  * Append cursor/limit list params to a path, after the route's own filters
- * (`extra`, e.g. the presentations list's `type`); an undefined filter is
+ * (`extra`, e.g. the `type` of the tool's resource list); an undefined filter is
  * left out.
  */
 export function pageQuery(

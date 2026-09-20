@@ -68,7 +68,7 @@ export const INT4_MAX = 2_147_483_647;
  * True when the value graph carries a NUL character in any string — object
  * keys included. Postgres cannot store NUL in `text` (SQLSTATE 22021) or in
  * `jsonb` (`\u0000` raises 22P05), so any client-supplied structure bound for
- * a jsonb column (annotation selections, form payloads, deck metadata) is
+ * a jsonb column (annotation selections, form payloads, a resource's metadata) is
  * refused at the contract instead of surfacing a driver error. Iterative walk
  * — never recursion — so a deeply nested value cannot blow the stack in the
  * very guard meant to protect against hostile shapes.

@@ -54,7 +54,7 @@ export interface CliIo extends CoreCliIo {
  *
  * Almost everything the CLI prints in its human mode is content someone
  * ELSE wrote: annotation bodies and author names from a share-link
- * recipient, deck and share-token titles, form-response payloads, stored
+ * recipient, the titles of the tool's resources, form-response payloads, stored
  * filenames, and server error messages. A terminal renders ANSI escapes in
  * all of it — colours and cursor moves are the mild end; OSC 8 hyperlinks
  * hide a URL behind friendly text, OSC 52 writes the user's clipboard, and
@@ -349,7 +349,7 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
   }
 
   /**
-   * The hint for a 404 under a selection: a deck id (a linked folder's, a
+   * The hint for a 404 under a selection: a resource id (a linked folder's, a
    * pasted one) lives in ONE workspace, and the same id asked of another is
    * "not found" — true, and useless without the workspace that was asked.
    */

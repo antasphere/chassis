@@ -62,8 +62,8 @@ export function defineMeSchemas<TScope extends string>(scopeSchema: ScopeSchema<
     /**
      * How the caller's membership of the ACTIVE workspace came to exist
      * (mirrors Principal.origin): 'local' = setup/invitation, 'hub' = SSO
-     * projection (cloud), 'guest' = a per-deck collaborator (D2) — clients
-     * hide the guest-forbidden workspace surfaces (deck creation, files,
+     * projection (cloud), 'guest' = a per-resource collaborator (D2) — clients
+     * hide the guest-forbidden workspace surfaces (resource creation, files,
      * member roster, export) for 'guest'. Null only in the zero-membership
      * session state.
      */

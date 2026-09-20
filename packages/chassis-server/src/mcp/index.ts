@@ -8,6 +8,7 @@ export {
   wrapToolErrors
 } from './errors.js';
 export { mcpRoutes } from './http.js';
+export { type McpInputs, mcpInputs } from './inputs.js';
 export { type McpIdentity, type McpServerInfo, type McpToolDefinition, buildMcpServer } from './server.js';
 export {
   type McpToolContext,

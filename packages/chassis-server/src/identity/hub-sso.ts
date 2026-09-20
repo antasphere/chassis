@@ -579,7 +579,7 @@ export class HubSsoService {
    * hub user B's email was changed (hub-side, verified there) to an address
    * some local user A still carries because A's projection is stale — B's
    * first login then finds no account row, matches A by email, and the D9
-   * trusted link merges B onto A's local user (and A's decks). Detect the
+   * trusted link merges B onto A's local user (and A's resources). Detect the
    * second `antasphere` accountId, DELETE the NEWEST link row, and fail the
    * login. The conflict clears when A next logs in (their email re-syncs
    * away) or an operator intervenes.

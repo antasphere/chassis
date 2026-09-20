@@ -13,7 +13,7 @@ import { apiError } from '../api/errors.js';
  * concurrent requests with the same key can never both execute.
  *
  * Explicit target list, fail-closed style — only these consult it (the
- * `/presentations` ones are the TOOL's, declared through `toolTargets`):
+ * lines that say "the tool's" are the TOOL's, declared through `toolTargets`):
  *   POST /api/v1/api-keys
  *   POST /api/v1/invitations
  *   POST /api/v1/members/{id}/reset-link
@@ -24,22 +24,22 @@ import { apiError } from '../api/errors.js';
  *     retried mint silently produced a SECOND live sign-in-equivalent JWT
  *     that cannot be revoked, on top of the first. The two mint routes must
  *     stay listed together.)
- *   POST /api/v1/presentations/{id}/tokens
- *   POST /api/v1/presentations/{id}/duplicate (PRDCT-2279: one click mints
- *     one deck; a network-blip retry must not mint a second copy)
+ *   the tool's token mint on one of its resources
+ *   the tool's duplicate of a resource (PRDCT-2279: one click mints
+ *     one copy; a network-blip retry must not mint a second copy)
  *   POST /api/v1/workspaces (PRDCT-2444/2443: one click mints one workspace;
  *     on cloud the retry would otherwise create a second organization at
  *     the hub. The claim is scoped to the caller's CURRENT workspace + user;
  *     the cloud zero-membership session has no principal and runs unclaimed)
- *   POST /api/v1/presentations/uploads (a retried reserve must not leak a
- *     second session + reserved deck id)
+ *   the tool's upload reserve (a retried reserve must not leak a
+ *     second session + reserved resource id)
  * Deliberate NON-targets:
- *   POST /api/v1/files and /api/v1/presentations/assets — content-addressed
+ *   POST /api/v1/files and the tool's asset upload — content-addressed
  *     dedupe already makes them idempotent, and upload bodies must never be
  *     buffered here;
  *   POST /api/v1/setup and /api/v1/invitations/accept — one-shot by
  *     construction (retries answer 410), and they run without a principal;
- *   the presentation commits — one-shot (session consumed / version counter)
+ *   the tool's version commits — one-shot (session consumed / version counter)
  *     by construction: a retry answers 409.
  *
  * The cached response body is stored AES-256-GCM ENCRYPTED: these responses

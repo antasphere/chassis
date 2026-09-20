@@ -25,7 +25,7 @@ export function inlineScriptHashes(html: string): string[] {
 
 export interface CspOptions {
   /**
-   * Extra `frame-src` sources beyond 'self'. The dashboard previews decks in
+   * Extra `frame-src` sources beyond 'self'. A dashboard may preview a resource in
    * a sandboxed iframe whose URL honours VIEWER_BASE_URL (PRDCT-1352, DASH-4):
    * with `default-src 'self'` and no `frame-src`, a split viewer origin made
    * that preview a blank frame with no error anywhere but the console.

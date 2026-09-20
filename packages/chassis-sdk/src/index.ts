@@ -90,7 +90,7 @@ export interface ClientOptions {
    */
   timeoutMs?: number;
   /**
-   * Deadline for the byte-streaming calls — deck assets, file content, the
+   * Deadline for the byte-streaming calls — a tool's assets, file content, the
    * workspace export (default 600 000; 0 disables). Separate because it
    * covers the whole body transfer, and an export is legitimately slow.
    */
@@ -116,7 +116,7 @@ export interface AuditListResponse {
 export interface AuditListParams extends ListParams {
   /** Free text, matched case-insensitively against the actor's email and the action. */
   q?: string;
-  /** Actions or families: an item ending in `.` matches the family (`presentation.`). */
+  /** Actions or families: an item ending in `.` matches the family (`apikey.`). */
   action?: string[];
   /** How the actor authenticated. */
   actorVia?: AuditVia[];
@@ -382,7 +382,7 @@ export class ChassisClient<TScope extends string> {
 
   /**
    * Owner: mint a one-time password reset link for a member (SMTP-free
-   * recovery). Refused for a per-deck guest and for anyone who also belongs
+   * recovery). Refused for a per-resource guest and for anyone who also belongs
    * to another workspace — the minted credential is global (PRDCT-1354).
    */
   createMemberResetLink(id: string, opts: IdempotentRequestOptions = {}): Promise<MemberResetLink> {

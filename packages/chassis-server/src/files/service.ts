@@ -88,13 +88,13 @@ export class FileService {
    * Records that this user pushed these exact bytes — on the fresh-insert AND
    * the dedupe path. `files.created_by` only ever names the FIRST uploader,
    * so it cannot answer "does this principal hold these bytes" once blob
-   * reads are per-deck authorized (SL-B1); this join table can. Idempotent.
+   * reads are per-resource authorized (SL-B1); this join table can. Idempotent.
    */
   private async recordUploader(fileId: string, userId: string): Promise<void> {
     await this.db.insert(fileUploaders).values({ fileId, userId }).onConflictDoNothing();
   }
 
-  /** Content-addressed lookup — the presentation asset pull path. */
+  /** Content-addressed lookup — the tool's asset pull path. */
   async getBySha(workspaceId: string, sha256: string): Promise<FileRow | null> {
     const [row] = await this.db
       .select()
@@ -107,7 +107,7 @@ export class FileService {
 
   /**
    * `visibility` is the caller's per-blob authorization predicate over the
-   * `files` row (SL-B1): the files module stays presentation-agnostic, so the
+   * `files` row (SL-B1): the files module stays tool-agnostic, so the
    * wiring point injects the ADR 013 scope. `undefined` = the operator view
    * (workspace admin/owner), which sees every blob in the workspace. An
    * unauthorized blob is indistinguishable from a missing one — the handlers

@@ -30,8 +30,8 @@ import type { HubOrgReconciler } from './hub-reconcile.js';
  * entirely EXCEPT the org-level suspension read — and that reads the
  * LOCALLY MATERIALIZED `workspaces.hub_status` column only, never a hub
  * round-trip on a borrowed grant. ACCEPTED BOUND (documented): a guest's
- * own `/orgs` never includes the deck's org, so that column refreshes only
- * when a MEMBER's reconcile runs — a guest may keep deck access in a
+ * own `/orgs` never includes the resource's org, so that column refreshes only
+ * when a MEMBER's reconcile runs — a guest may keep resource access in a
  * hub-suspended org until a member next touches the tool. Every cheap fix
  * leaks (a public status probe = suspension oracle) or borrows credentials
  * (acting on a grant its holder didn't present). Same accepted-bound class

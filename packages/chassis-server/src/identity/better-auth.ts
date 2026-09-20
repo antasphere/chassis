@@ -78,8 +78,8 @@ export interface CreateAuthOptions {
   /**
    * Origins that are NEVER trusted, serving origin or not (PRDCT-1352): each
    * is filtered out of `trustedOrigins` and refused outright by the sign-in
-   * Origin lock. Empty = nothing installed. A deck tool passes its viewer
-   * origin (author-controlled deck script runs there).
+   * Origin lock. Empty = nothing installed. A tool with a viewer passes its
+   * viewer origin (author-controlled script runs there).
    */
   untrustedOrigins: readonly string[];
   /** When provided (an email driver delivers), the email-OTP login auto-enables. */
@@ -341,7 +341,7 @@ function isHttpUrl(value: unknown): boolean {
  * Better Auth `trustedOrigins` (PRDCT-1352): the configured public origin plus
  * the origin the request was served on (localhost, previews, any domain behind
  * a TLS-terminating proxy) — MINUS the viewer origin, which is author-
- * controlled deck script's origin and is never trusted, serving origin or
+ * controlled script's origin and is never trusted, serving origin or
  * not. The host gate keeps the auth surface off that hostname; this is the
  * second lock behind it. Exported pure so a unit test can pin the exclusion.
  */
@@ -366,7 +366,7 @@ export function trustedOriginsFor(
  * The sign-in Origin lock (M9 login-CSRF hardening + PRDCT-1352): a sign-in
  * that presents an Origin must present a trusted one — the serving origin or
  * Better Auth's own trusted list — and the viewer origin is refused OUTRIGHT,
- * even as the serving origin: deck script must never mint a session on the
+ * even as the serving origin: author script must never mint a session on the
  * hostname it runs on. Exported pure so a unit test can pin both arms.
  */
 export function signInOriginRefused(input: {

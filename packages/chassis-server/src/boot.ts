@@ -348,8 +348,8 @@ export async function bootPlatform<
     authSecret,
     // The tool's values for the two generic-by-parameter points of the
     // identity module: the published OAuth scope list (order included) and
-    // the origins that are never trusted (for a deck tool the viewer origin,
-    // where author-controlled deck script runs, PRDCT-1352). None = nothing installed.
+    // the origins that are never trusted (e.g. a tool's viewer origin,
+    // where author-controlled script runs, PRDCT-1352). None = nothing installed.
     oauthScopes: tool.scopes.oauth,
     untrustedOrigins,
     hubSso,
@@ -673,7 +673,7 @@ export async function bootPlatform<
   // here precedes every emission).
   //
   // ONE step swapped sides in the move, and this is it. At base
-  // (`apps/server/src/boot.ts@461db68`) the deck services STRADDLED
+  // (`apps/server/src/boot.ts@461db68`) the tool's services STRADDLED
   // `createRateLimiters`: the form and form-upload services were built before
   // it (and the purge cell filled), the collaborator service after it. Here
   // `createRateLimiters` runs after the whole `tool.services` slot. The one
@@ -752,7 +752,7 @@ export async function bootPlatform<
         : undefined
   });
 
-  // The tool's public routes (for a deck tool the share-link viewer, Phase 4,
+  // The tool's public routes (e.g. a share-link viewer, Phase 4,
   // ADR 012): anonymous, mounted in app.ts's public-route slot.
   const publicRoutes = tool.app?.publicRoutes?.({ ...core, overrides: undefined }, domain);
 

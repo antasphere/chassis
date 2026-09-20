@@ -51,11 +51,11 @@ export interface Principal {
   /**
    * How the resolved membership came to exist (D2, internal/federation.md §P6):
    * 'local' = ordinary membership (setup, workspace invitation), 'hub' = a
-   * hub-org projection (cloud SSO), 'guest' = an external per-deck
+   * hub-org projection (cloud SSO), 'guest' = an external per-resource
    * collaborator minted by the claim path. Origin is a CAPABILITY axis, not
-   * a role: a guest resolves like any member but is refused deck creation
+   * a role: a guest resolves like any member but is refused resource creation
    * and workspace-level surfaces (requireNonGuest) on BOTH editions — their
-   * access is the per-deck grant (ADR 013), which stays untouched. Every
+   * access is the per-resource grant (ADR 013), which stays untouched. Every
    * credential path (session, API key, OAuth bearer) reads it live from the
    * membership row backing the request's workspace.
    */

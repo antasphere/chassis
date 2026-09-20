@@ -483,8 +483,8 @@ function invitationSchemaRef() {
 }
 
 // ── Files ────────────────────────────────────────────────────────────────────
-// Every read here is per-deck authorized (ADR 013): you get the blobs you
-// uploaded plus those belonging to decks you can read; workspace admins and
+// Every read here is per-resource authorized (ADR 013): you get the blobs you
+// uploaded plus those of the tool's resources you can read; workspace admins and
 // owners get the whole workspace. Anything outside that scope answers 404,
 // never 403 — a blob you cannot read must not be probeable.
 

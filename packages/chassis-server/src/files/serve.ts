@@ -41,7 +41,7 @@ export interface ServeBlobOptions {
  * Stream one content-addressed blob: immutable ETag (= the sha), 304, single
  * Range (206/416), safe-serving disposition + nosniff (docs/security/security.md —
  * user content never renders on the app origin). Shared by the files content
- * route and the presentation asset download; both resolve METADATA first and
+ * route and the tool's asset download; both resolve METADATA first and
  * only then hand the bytes question here.
  */
 export async function serveBlob(c: Context, opts: ServeBlobOptions): Promise<Response> {

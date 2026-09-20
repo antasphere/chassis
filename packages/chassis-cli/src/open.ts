@@ -7,7 +7,7 @@ import type { CliIo } from './context.js';
  * it on demand, its `dev` command opens the local preview.
  *
  * The URL is always ONE argv item handed to the platform's opener binary,
- * never a string a shell interprets: a deck title or an instance URL is
+ * never a string a shell interprets: a resource title or an instance URL is
  * somebody else's text, and `sh -c "open $url"` would run whatever it
  * carries. On Windows `start` is a cmd.exe builtin that `spawn` cannot run
  * without a shell, so the URL handler is invoked through `rundll32`

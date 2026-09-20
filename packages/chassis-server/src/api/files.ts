@@ -39,16 +39,16 @@ export interface FileRouteDeps {
   instanceId: () => Promise<string>;
   /**
    * ADR 011 blob-delete guard: true when the blob is referenced by a live
-   * presentation version manifest — DELETE answers 409 file_in_use instead
+   * version manifest of the tool's resource — DELETE answers 409 file_in_use instead
    * of removing it. Runs inside the delete transaction (files module stays
-   * presentation-agnostic; the wiring point injects the presentation check).
+   * tool-agnostic; the wiring point injects the tool's check).
    */
   blobInUse: (tx: DbConn, workspaceId: string, sha256: string) => Promise<boolean>;
   /**
    * ADR 013 per-blob read scope (SL-B1): a WHERE predicate over the `files`
    * row, or `undefined` for the workspace admin/owner operator view. Injected
    * for the same reason as `blobInUse` — the files module stays
-   * presentation-agnostic and the wiring point supplies the deck policy.
+   * tool-agnostic and the wiring point supplies the tool's policy.
    */
   blobReadScope: (principal: Principal) => SQL | undefined;
   /**
@@ -68,13 +68,13 @@ export function registerFileRoutes(api: OpenAPIHono, deps: FileRouteDeps): void 
   api.use('/files/*', requireAuth());
   // Guest capability limit (D2, both editions): the generic files surface is
   // a WORKSPACE-level surface (ADR 006) — an inventory of the tenant's blobs
-  // with a delete on it. Its READS are now per-deck authorized like every
+  // with a delete on it. Its READS are now per-resource authorized like every
   // other content read (SL-B1: `deps.blobReadScope`, ADR 013), but the
   // surface as a whole still belongs to the workspace, and an external guest
-  // has no business there: they were invited to ONE deck, not to the host
-  // tenant's file cabinet. Guests push and pull deck bytes through the ADR
-  // 013-gated presentation routes instead (/presentations/assets,
-  // /presentations/{id}/assets/{sha256}).
+  // has no business there: they were invited to ONE resource, not to the host
+  // tenant's file cabinet. Guests push and pull its bytes through the ADR
+  // 013-gated routes of the tool instead (its asset upload and its
+  // per-resource asset download).
   api.use('/files', requireNonGuest());
   api.use('/files/*', requireNonGuest());
 
@@ -85,7 +85,7 @@ export function registerFileRoutes(api: OpenAPIHono, deps: FileRouteDeps): void 
       ...(cursor !== undefined ? { cursor } : {}),
       limit,
       // ADR 013 (SL-B1): a plain member pages the blobs they uploaded plus
-      // those referenced by decks they can read; admins/owners keep the
+      // those referenced by resources they can read; admins/owners keep the
       // whole-workspace operator view.
       visibility: deps.blobReadScope(principal)
     });
@@ -182,7 +182,7 @@ export function registerFileRoutes(api: OpenAPIHono, deps: FileRouteDeps): void 
   // byte endpoint, not part of the JSON OpenAPI surface); guarded by the
   // same requireAuth + scope machinery as everything else under /files.
   // The streaming machinery itself (ETag/304/Range/safe-serving) is shared
-  // with the presentation asset download — files/serve.ts.
+  // with the tool's asset download — files/serve.ts.
   const contentHandler = async (c: Context, headOnly: boolean) => {
     const principal = c.get('principal')!;
     const id = c.req.param('id') ?? '';
@@ -190,7 +190,7 @@ export function registerFileRoutes(api: OpenAPIHono, deps: FileRouteDeps): void 
     // or it reaches Postgres' uuid cast and surfaces as a sanitized 500.
     if (!isUuid(id)) return c.json(err('not_found', 'File not found'), 404);
     // The byte route carries the ADR 013 scope too (SL-B1) — this was the
-    // whole-tenant read: `workspace_id` alone served ANY deck's content to
+    // whole-tenant read: `workspace_id` alone served ANY resource's content to
     // any member and to any read-scope key.
     const file = await service.get(principal.workspaceId, id, deps.blobReadScope(principal));
     if (!file) return c.json(err('not_found', 'File not found'), 404);

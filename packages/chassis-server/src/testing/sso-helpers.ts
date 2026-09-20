@@ -21,7 +21,7 @@ export const nextIp = () => `10.99.${Math.floor(ipCounter / 250)}.${(ipCounter++
 /**
  * Seed a cloud-LOCAL workspace (`central_account_id NULL`) owned by the
  * given user, straight into the database. Cloud setup mints NO workspace
- * (user-scoped federation), so fixtures that need one — deck-guest host
+ * (user-scoped federation), so fixtures that need one — guest host
  * workspaces, the P7 local-vs-projected contrast — seed it here; the state
  * is exactly what a pre-flip instance (or break-glass recovery) leaves
  * behind.

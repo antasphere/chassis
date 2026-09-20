@@ -331,8 +331,8 @@ export function createApiApp<
   // ── Cross-site (CSRF) gate, before ANY other work: an unsafe method driven
   // from another origin is refused before a body is buffered, before a
   // limiter bucket is touched, and before a credential resolves. Sessions are
-  // ambient credentials — every business route below (presentations, share
-  // tokens, collaborators, annotations, api-keys) would otherwise be drivable
+  // ambient credentials — every business route below (the tool's resources,
+  // its tokens and collaborators, api-keys) would otherwise be drivable
   // from any page the user happens to have open.
   //
   // SCOPED TO /api/v1 ON PURPOSE. The public viewer (`/v/:secret`) is mounted
@@ -345,8 +345,8 @@ export function createApiApp<
     '*',
     crossSiteGuard({
       publicBaseUrl: env.PUBLIC_BASE_URL,
-      // The tool's never-trusted origins (for a deck tool the viewer origin,
-      // PRDCT-1352: author-controlled deck script's origin): never a trust
+      // The tool's never-trusted origins (e.g. a viewer origin, PRDCT-1352:
+      // the origin author-controlled script runs on): never a trust
       // grant here, even if it is the serving origin.
       deniedOrigins: deps.untrustedOrigins,
       // `/api/v1/viewer/*` is the share-token annotation API, and it is a
@@ -374,10 +374,10 @@ export function createApiApp<
   // body. Exceptions:
   //  - /files: streamed uploads with their own mid-stream cap
   //    (MAX_FILE_SIZE_MB) plus a Content-Length entitlement check;
-  //  - /presentations/assets: multipart deck-asset uploads — capped at
+  //  - the tool's multipart asset uploads (its `bodyLimit` slot) — capped at
   //    MAX_FILE_SIZE_MB (+1 MiB multipart framing headroom) so an unbounded
   //    body can never balloon the buffering parse;
-  //  - the rest of the deck routes, which are JSON, but commit manifests are legal up to
+  //  - the rest of the tool's routes, which are JSON, but commit manifests are legal up to
   //    5000 entries × 1 KiB paths — a 16 MiB cap fits any contract-valid
   //    manifest while still bounding abuse.
   const jsonBodyLimit = bodyLimit({
@@ -445,7 +445,7 @@ export function createApiApp<
   api.use('/setup', rateLimit(limiters.setup, clientIp));
   api.use('/invitations/accept', rateLimit(limiters.invitationAccept, clientIp));
   api.use('/invitations/lookup', rateLimit(limiters.invitationAccept, clientIp));
-  // Collaborator claims are invitation acceptances in per-deck clothing —
+  // Collaborator claims are invitation acceptances in per-resource clothing —
   // the same public token-redemption surface, the same wall.
   const rateLimitContext: ApiRateLimitContext<TEnvShape, TBuckets, TEvents> = { ...hookContext, clientIp };
   tool.api.rateLimits?.(api, rateLimitContext);
@@ -1071,10 +1071,10 @@ export function createApiApp<
     env,
     logger,
     instanceId,
-    // The tool's blob policy. For a deck tool — ADR 011 sharp edge closed: a
-    // blob referenced by a live deck version manifest is not deletable
+    // The tool's blob policy. ADR 011 sharp edge closed: a blob referenced
+    // by a live version manifest of the tool's resource is not deletable
     // through the generic files surface; SL-B1: the generic files surface
-    // authorizes per DECK, not per workspace — the ADR 013 policy expressed
+    // authorizes per RESOURCE, not per workspace — the ADR 013 policy expressed
     // as a WHERE predicate.
     ...tool.api.filePolicy(deps.domain),
     fileDeleteRoute: tool.scopes.contractRoutes.fileDeleteRoute,

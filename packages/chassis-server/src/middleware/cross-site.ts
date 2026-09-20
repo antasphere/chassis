@@ -54,7 +54,7 @@ export interface CrossSiteGuardOptions {
    * altogether, so in the shipped assembly no request here carries it as the
    * serving origin — this is the second lock, so that a gate regression or a
    * proxy routing the viewer hostname at the app never turns "the origin we
-   * are served on" into a trust grant for author-controlled deck script.
+   * are served on" into a trust grant for author-controlled script.
    */
   deniedOrigins?: readonly string[];
   /** Escape hatch for surfaces that must stay open (paths are `/api/v1/...`). */

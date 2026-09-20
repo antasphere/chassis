@@ -13,7 +13,7 @@ export type Db = NodePgDatabase<Record<string, unknown>>;
 
 /**
  * A database handle OR an open transaction — for code that must run either
- * standalone or inside a caller's transaction (e.g. the presentation blob
+ * standalone or inside a caller's transaction (e.g. a tool's blob
  * in-use guard inside the file-delete transaction).
  */
 export type DbConn = Db | Parameters<Parameters<Db['transaction']>[0]>[0];

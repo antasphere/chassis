@@ -1,6 +1,6 @@
 import type { ToolIdentity } from '@antasphere/chassis-contract';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { z } from 'zod';
+import { mcpInputs } from './inputs.js';
 import { jsonText, mergeErrorHints, wrapToolErrors, type ErrorHints } from './errors.js';
 import {
   callApi,
@@ -70,10 +70,8 @@ export function buildMcpServer(
     }
   );
 
-  const workspaceInput = z
-    .uuid()
-    .optional()
-    .describe(`Target organization (workspace id). Omit to use your default org — see ${whoami}.`);
+  // The shared inputs (`inputs.ts`): the ones a tool's own set declares its tools with.
+  const { workspaceInput, cursorInput, limitInput } = mcpInputs(identity);
 
   // ── Pattern 1: READ tool — the end-to-end whoami proof ────────────────────
   server.registerTool(
@@ -105,14 +103,8 @@ export function buildMcpServer(
         'through the API, not through tools.',
       inputSchema: {
         workspace: workspaceInput,
-        limit: z
-          .number()
-          .int()
-          .min(1)
-          .max(100)
-          .optional()
-          .describe('Page size (server max 100). Default 50.'),
-        cursor: z.string().optional().describe('nextCursor from a previous page.')
+        limit: limitInput,
+        cursor: cursorInput
       },
       annotations: { readOnlyHint: true }
     },

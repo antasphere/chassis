@@ -119,7 +119,7 @@ export type WorkspaceRole = (typeof workspaceRoles)[number];
  *  - 'hub':   created/updated ONLY by the cloud edition's SSO JIT projection
  *    and re-asserted against the hub (Phase 3+); local surfaces never mint it.
  *  - 'guest': created by the collaborator claim path — an external party
- *    invited to ONE deck whose membership exists only because principal
+ *    invited to ONE resource whose membership exists only because principal
  *    resolution requires one. Excluded from hub re-assertion; guest
  *    capability limits arrive in Phase 6.
  *
@@ -441,7 +441,7 @@ export const files = pgTable(
  * `files` is content-addressed and unique per (workspace, sha256), so a
  * second uploader of identical bytes deduplicates onto the FIRST uploader's
  * row and `files.created_by` keeps naming that first uploader. Once blob
- * reads are per-deck authorized, that single column is no longer a truthful
+ * reads are per-resource authorized, that single column is no longer a truthful
  * answer to "may this principal see these bytes": a member who uploaded a
  * shared logo that another member had uploaded first would be locked out of
  * a blob they demonstrably hold — and their version commit, which must only

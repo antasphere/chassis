@@ -71,8 +71,8 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
   api.use('/members', requireAuth());
   // Guest capability limit (D2, both editions): the member roster (names +
   // emails of the whole team) is a workspace-level surface. A guest is an
-  // external party invited to ONE deck — the host tenant's directory is not
-  // theirs to read. Per-deck surfaces their grant opens are untouched.
+  // external party invited to ONE resource — the host tenant's directory is not
+  // theirs to read. Per-resource surfaces their grant opens are untouched.
   api.use('/members', requireNonGuest());
   api.openapi(membersListRoute, async (c) => {
     const principal = c.get('principal')!;
@@ -139,7 +139,7 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
     // Guest role-lock (D2): a guest row is 'member' by construction and the
     // guest capability limits key on origin, which no surface upgrades —
     // promoting one would mint a workspace admin the guest gates still
-    // refuse deck creation to (an incoherent half-state), and on cloud an
+    // refuse resource creation to (an incoherent half-state), and on cloud an
     // administrator the hub knows nothing about. To empower the person,
     // invite them as a real member; the claim path preserves that row's
     // origin. Deactivate/reactivate stays available — cutting a guest off
@@ -334,7 +334,7 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
    * are refused outright:
    *
    *  1. `origin='guest'` — the guest row exists for principal resolution
-   *     only (D2). It was created by the per-deck claim path for an
+   *     only (D2). It was created by the per-resource claim path for an
    *     EXTERNAL party whose account is not this tenant's to administer;
    *     the host tenant never owned that credential. Admins have no
    *     recovery duty toward a guest, so there is nothing to trade away.
@@ -395,7 +395,7 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
     // so minting would hand admins a dead link. Refuse at the source instead.
     // Hub-origin workspaces already died at the subtree gate above with
     // `hub_managed`; this covers cloud-LOCAL workspaces (the operator's,
-    // deck-guest hosts). Recovery for local accounts there: hub SSO for
+    // guest hosts). Recovery for local accounts there: hub SSO for
     // humans, break-glass for the operator. oss is untouched.
     if (hubManaged) {
       return c.json(
@@ -463,7 +463,7 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
     // on every login, so a local rewrite is either overwritten or a
     // hijack). Hub-origin workspaces already died at the P7 subtree gate
     // with `hub_managed`; this covers cloud-LOCAL workspaces (the
-    // operator's, deck-guest hosts). oss is untouched.
+    // operator's, guest hosts). oss is untouched.
     if (hubManaged) {
       return c.json(
         err(

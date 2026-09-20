@@ -25,7 +25,7 @@ export const AUDIT_ACTOR_SYSTEM = 'system';
 
 /**
  * A comma-separated list of actions or families: an item ending in `.`
- * matches the family (`presentation.` is every presentation action), any
+ * matches the family (`apikey.` is every API key action), any
  * other item matches exactly. The fallback action of an unlabelled route is
  * `<method> <path>`, so a space and a slash are legitimate characters.
  */
@@ -41,7 +41,7 @@ const AUDIT_VIA_LIST_RE = /^(session|api_key|oauth|system)(,(session|api_key|oau
 export const auditListQuerySchema = cursorPageQuerySchema.extend({
   /** Free text, matched case-insensitively against the actor's email and the action. */
   q: noControlChars(z.string().max(120)).optional(),
-  /** Actions or families, comma-separated (`presentation.,apikey.create`); at most 20. */
+  /** Actions or families, comma-separated (`member.,apikey.create`); at most 20. */
   action: z
     .string()
     .max(600)
