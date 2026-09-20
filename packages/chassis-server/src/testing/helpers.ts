@@ -105,8 +105,13 @@ const POOL_CLOSE_TIMEOUT_MS = 10_000;
  * the pool, wait for as many `remove`. The `error` listener is the net under
  * it (a wait that timed out): it takes `57P01` on this ENDING pool and nothing
  * else, any other error is thrown as it was before.
+ *
+ * A ceiling that expires SAYS so, in one `console.warn` line with the number
+ * of clients still open: it does not throw (the listener stays the net), but
+ * a chronically slow teardown is then visible instead of leaning on the
+ * listener in silence. `ceilingMs` exists for the helper's own unit test.
  */
-export async function endPool(pool: pg.Pool): Promise<void> {
+export async function endPool(pool: pg.Pool, ceilingMs: number = POOL_CLOSE_TIMEOUT_MS): Promise<void> {
   pool.on('error', (err: Error & { code?: string }) => {
     if (err.code !== ADMIN_SHUTDOWN) throw err;
   });
@@ -117,7 +122,12 @@ export async function endPool(pool: pg.Pool): Promise<void> {
     pool.on('remove', () => {
       if (--open === 0) resolve();
     });
-    timer = setTimeout(resolve, POOL_CLOSE_TIMEOUT_MS);
+    timer = setTimeout(() => {
+      console.warn(
+        `endPool: ${open} pool client(s) still open after the ${ceilingMs} ms ceiling; the teardown goes on`
+      );
+      resolve();
+    }, ceilingMs);
     timer.unref();
   });
   await pool.end();
