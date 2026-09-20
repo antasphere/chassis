@@ -75,6 +75,17 @@ const MEMBER = {
   createdAt: '2026-01-02T03:04:05.000Z'
 };
 
+/**
+ * A name the terminal must never see raw: a C1 CSI introducer and a DEL, the
+ * two kinds of byte `JSON.stringify` leaves as they are (it escapes C0 only,
+ * so an ESC in a fixture proves nothing about the sink). Every `--json` pin
+ * carries it: `--json` is byte-exact (PRDCT-1353), and a sink routed through
+ * the sanitizer by mistake goes red here instead of staying invisible.
+ */
+const RAW_NAME = 'Atlas\u009b2K\u007fHIDDEN';
+const RAW_PROJECT = { ...PROJECT, name: RAW_NAME };
+const RAW_MEMBER = { ...MEMBER, name: RAW_NAME };
+
 /** An error body in the server's shape. */
 const refusal = (status: number, code: string, message = 'terse wire message'): Canned => ({
   status,
@@ -136,9 +147,9 @@ describe(`${bin} projects`, () => {
   });
 
   it('list --json prints the wire shape { projects, nextCursor } byte-exactly', async () => {
-    const h = harness([{ body: { projects: [PROJECT], nextCursor: 'p-1' } }]);
+    const h = harness([{ body: { projects: [RAW_PROJECT], nextCursor: 'p-1' } }]);
     expect(await run(['projects', 'list', '--json', ...WIRED], h.io)).toBe(0);
-    expect(h.out()).toBe(`${JSON.stringify({ projects: [PROJECT], nextCursor: 'p-1' }, null, 2)}\n`);
+    expect(h.out()).toBe(`${JSON.stringify({ projects: [RAW_PROJECT], nextCursor: 'p-1' }, null, 2)}\n`);
   });
 
   // ── get ────────────────────────────────────────────────────────────────────
@@ -152,9 +163,9 @@ describe(`${bin} projects`, () => {
   });
 
   it('get --json prints the project payload byte-exactly', async () => {
-    const h = harness([{ body: PROJECT }]);
+    const h = harness([{ body: RAW_PROJECT }]);
     expect(await run(['projects', 'get', 'p-1', '--json', ...WIRED], h.io)).toBe(0);
-    expect(h.out()).toBe(`${JSON.stringify(PROJECT, null, 2)}\n`);
+    expect(h.out()).toBe(`${JSON.stringify(RAW_PROJECT, null, 2)}\n`);
   });
 
   it('get escapes an id into the path', async () => {
@@ -241,9 +252,9 @@ describe(`${bin} projects`, () => {
   });
 
   it('update --json prints the project payload byte-exactly', async () => {
-    const h = harness([{ body: PROJECT }]);
+    const h = harness([{ body: RAW_PROJECT }]);
     expect(await run(['projects', 'update', 'p-1', '--name', 'Atlas', '--json', ...WIRED], h.io)).toBe(0);
-    expect(h.out()).toBe(`${JSON.stringify(PROJECT, null, 2)}\n`);
+    expect(h.out()).toBe(`${JSON.stringify(RAW_PROJECT, null, 2)}\n`);
   });
 
   // ── archive / unarchive ────────────────────────────────────────────────────
@@ -263,9 +274,10 @@ describe(`${bin} projects`, () => {
   });
 
   it('archive --json prints the project payload byte-exactly', async () => {
-    const h = harness([{ body: ARCHIVED }]);
+    const archived = { ...ARCHIVED, name: RAW_NAME };
+    const h = harness([{ body: archived }]);
     expect(await run(['projects', 'archive', 'p-2', '--json', ...WIRED], h.io)).toBe(0);
-    expect(h.out()).toBe(`${JSON.stringify(ARCHIVED, null, 2)}\n`);
+    expect(h.out()).toBe(`${JSON.stringify(archived, null, 2)}\n`);
   });
 
   // ── members ────────────────────────────────────────────────────────────────
@@ -300,9 +312,9 @@ describe(`${bin} projects`, () => {
   });
 
   it('members list --json prints { members, nextCursor } byte-exactly', async () => {
-    const h = harness([{ body: { members: [MEMBER], nextCursor: null } }]);
+    const h = harness([{ body: { members: [RAW_MEMBER], nextCursor: null } }]);
     expect(await run(['projects', 'members', 'list', 'p-1', '--json', ...WIRED], h.io)).toBe(0);
-    expect(h.out()).toBe(`${JSON.stringify({ members: [MEMBER], nextCursor: null }, null, 2)}\n`);
+    expect(h.out()).toBe(`${JSON.stringify({ members: [RAW_MEMBER], nextCursor: null }, null, 2)}\n`);
   });
 
   it('members add sends { email } when the argument carries an @', async () => {
@@ -337,13 +349,13 @@ describe(`${bin} projects`, () => {
   });
 
   it('members add --json prints the member payload byte-exactly', async () => {
-    const h = harness([{ status: 201, body: MEMBER }]);
+    const h = harness([{ status: 201, body: RAW_MEMBER }]);
     const code = await run(
       ['projects', 'members', 'add', 'p-1', 'u2', '--role', 'editor', '--json', ...WIRED],
       h.io
     );
     expect(code).toBe(0);
-    expect(h.out()).toBe(`${JSON.stringify(MEMBER, null, 2)}\n`);
+    expect(h.out()).toBe(`${JSON.stringify(RAW_MEMBER, null, 2)}\n`);
   });
 
   it('members role → PATCH /api/v1/projects/:id/members/:userId', async () => {
@@ -374,9 +386,9 @@ describe(`${bin} projects`, () => {
   });
 
   it('members remove --json prints the member payload byte-exactly', async () => {
-    const h = harness([{ body: MEMBER }]);
+    const h = harness([{ body: RAW_MEMBER }]);
     expect(await run(['projects', 'members', 'remove', 'p-1', 'u2', '--json', ...WIRED], h.io)).toBe(0);
-    expect(h.out()).toBe(`${JSON.stringify(MEMBER, null, 2)}\n`);
+    expect(h.out()).toBe(`${JSON.stringify(RAW_MEMBER, null, 2)}\n`);
   });
 
   // ── the refusals, one per server code, each one a sentence ─────────────────
