@@ -26,7 +26,8 @@ import {
  *    enforcement point; this just gives the model a clean, actionable error.
  *
  * get_me and list_files below are the chassis' original example tools (the
- * end-to-end whoami proof + a cursor-paginated list); the product tool set
+ * end-to-end whoami proof + a cursor-paginated list), followed by
+ * `<toolPrefix>whoami`, the identity tool under the tool's own prefix; the product tool set
  * (`<toolPrefix>*`) lives in the tool's app (its tools.ts).
  */
 export type { McpToolContext } from './tool-kit.js';
@@ -38,7 +39,7 @@ export interface McpServerInfo {
 
 /**
  * What a tool plugs into the bundled MCP server: its own tool set (registered
- * AFTER the two chassis tools, so `tools/list` keeps its order), the server
+ * AFTER the three chassis tools, so `tools/list` keeps its order), the server
  * instructions, the error hints of its domain codes, and the two scope names
  * the chassis tools pre-check.
  */
@@ -58,7 +59,7 @@ export function buildMcpServer(
   tool: McpToolDefinition,
   identity: McpIdentity
 ): McpServer {
-  // The tool registers `<prefix>whoami` (the contract of `toolPrefix`): the two chassis tools point at it.
+  // `<prefix>whoami` (the contract of `toolPrefix`), registered below: the other chassis tools point at it.
   const whoami = `${identity.toolPrefix}whoami`;
   const checkScope = createScopeCheck(tool.scopes);
   const hints = mergeErrorHints(tool.errorHints);
@@ -126,7 +127,32 @@ export function buildMcpServer(
     }
   );
 
-  // The product surface: the tool's own set, after the two chassis tools.
+  // ── Identity under the tool's own prefix ───────────────────────────────────
+  // Registered by the chassis (it reads `/me`, nothing of a domain) so that the
+  // name every `workspace` argument and `get_me` point at always exists. Third,
+  // right before the tool's set: `tools/list` keeps its order.
+  server.registerTool(
+    whoami,
+    {
+      description:
+        'Who is connected: the user this MCP connection acts as, plus ALL their organizations ' +
+        '(workspaces) with per-entry role/default/suspended flags. Returns { user: { id, email, ' +
+        'name }, workspace, role, via, scopes, workspaces: [...], activeWorkspaceId }. The ' +
+        'credential is the USER; the organization is a PER-CALL parameter: every tool accepts an ' +
+        'optional `workspace` (an id from `workspaces[]`) — omitted, the entry flagged `default: ' +
+        'true` is used (else the oldest membership). Call this first to discover the ids.',
+      inputSchema: { workspace: workspaceInput },
+      annotations: { readOnlyHint: true }
+    },
+    async ({ workspace }) => {
+      const denied = checkScope(ctx.principal, tool.scopes.read);
+      if (denied) return denied;
+      const c = forWorkspace(ctx, workspace);
+      return wrapToolErrors(async () => jsonText(await callApi(c, '/api/v1/me')), hints);
+    }
+  );
+
+  // The product surface: the tool's own set, after the three chassis tools.
   tool.registerTools(server, ctx);
 
   return server;

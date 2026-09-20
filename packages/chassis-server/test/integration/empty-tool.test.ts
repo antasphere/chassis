@@ -159,19 +159,40 @@ describe('the chassis with an empty tool', () => {
     );
     expect(foreign.status).toBe(400);
 
-    // /mcp lists exactly the generic tools.
-    const mcp = await booted.app.request('/mcp', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        accept: 'application/json, text/event-stream',
-        authorization
-      },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
-    });
+    // /mcp lists exactly the generic tools: the chassis registers `<toolPrefix>whoami`
+    // itself, third, so the name its other tools point at exists for every tool.
+    const rpc = (body: unknown) =>
+      booted.app.request('/mcp', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+          authorization
+        },
+        body: JSON.stringify(body)
+      });
+    const mcp = await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
     expect(mcp.status).toBe(200);
     const listed = (await mcp.json()) as { result: { tools: Array<{ name: string }> } };
-    expect(listed.result.tools.map((t) => t.name)).toEqual(['get_me', 'list_files']);
+    expect(listed.result.tools.map((t) => t.name)).toEqual(['get_me', 'list_files', 'things_whoami']);
+
+    // …and it answers `/me`, as the key it was called with.
+    const called = await rpc({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'things_whoami', arguments: {} }
+    });
+    expect(called.status).toBe(200);
+    const answer = (await called.json()) as {
+      result: { isError?: boolean; content: Array<{ type: string; text: string }> };
+    };
+    expect(answer.result.isError).toBeFalsy();
+    expect(JSON.parse(answer.result.content[0]!.text)).toMatchObject({
+      user: { email: OWNER.email },
+      via: 'api_key',
+      scopes: ['things:read']
+    });
   });
 
   it('the OpenAPI document carries no deck path and the root app no deck surface', async () => {
