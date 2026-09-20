@@ -42,6 +42,69 @@ export interface ExportRouteDeps {
   logger: Logger;
   /** The export route the tool instantiated: its OpenAPI summary names the tool's export scope. */
   workspaceExportRoute: ScopeRoutes['workspaceExportRoute'];
+  /** The tool's `api.exportEntries` slot, already bound to its domain. Absent = the chassis sections only. */
+  exportEntries?: ExportEntriesFn;
+}
+
+/** One entry a tool adds to the bundle: written as `<name>.json`, its rows as a JSON array. */
+export interface ExportEntry {
+  name: string;
+  rows: unknown[];
+}
+
+/**
+ * What the `api.exportEntries` slot returns: the tool's entries for ONE
+ * workspace. It reads with the handle the route itself reads with (`db`, no
+ * transaction), and it filters on `workspaceId` itself.
+ */
+export type ExportEntriesFn = (db: Db, workspaceId: string) => Promise<ExportEntry[]>;
+
+/**
+ * The entry names the chassis writes itself, without their extension. A tool
+ * entry that lands on one of them is refused: never a silent overwrite, never
+ * two zip entries of one name. (`files/…` needs no line here: a sanitized name
+ * holds no `/`.) `audit-log` is reserved although its file is `.ndjson`, so
+ * that the bundle never holds two audit logs.
+ */
+export const RESERVED_EXPORT_ENTRY_NAMES = [
+  'manifest',
+  'workspace',
+  'members',
+  'invitations',
+  'api-keys',
+  'audit-log',
+  'files',
+  'skipped-blobs'
+] as const;
+
+/** A tool entry, ready to write: its zip entry name and its bytes. */
+export interface ResolvedExportEntry {
+  entryName: string;
+  buffer: Buffer;
+}
+
+/**
+ * Tool entries → zip entries, BEFORE the stream starts: every name goes
+ * through `sanitizeEntryName`, every `rows` through `jsonBuffer`, and a name
+ * that collides (compared without case, since the bundle is extracted on
+ * case-insensitive disks too) with a chassis entry or with another tool entry
+ * throws. Order is the tool's.
+ */
+export function resolveExportEntries(entries: ExportEntry[]): ResolvedExportEntry[] {
+  if (!Array.isArray(entries)) throw new Error('export entries: the tool must return an array of entries');
+  const taken = new Set<string>(RESERVED_EXPORT_ENTRY_NAMES);
+  return entries.map((entry) => {
+    if (typeof entry?.name !== 'string' || !Array.isArray(entry.rows)) {
+      throw new Error('export entries: every entry is { name: string, rows: unknown[] }');
+    }
+    const name = sanitizeEntryName(entry.name);
+    const key = name.toLowerCase();
+    if (taken.has(key)) {
+      throw new Error(`export entries: the name "${name}" is already an entry of the bundle`);
+    }
+    taken.add(key);
+    return { entryName: `${name}.json`, buffer: jsonBuffer(entry.rows) };
+  });
 }
 
 /**
@@ -110,6 +173,17 @@ export function registerExportRoutes(api: OpenAPIHono, deps: ExportRouteDeps): v
       .select({ liveFiles: sql<number>`count(*)::int` })
       .from(files)
       .where(and(eq(files.workspaceId, workspaceId), isNull(files.deletedAt)))) as [{ liveFiles: number }];
+
+    // The tool's entries (the `api.exportEntries` slot), computed and
+    // serialized BEFORE the audit row and before the first byte: a
+    // contribution that throws, or whose name collides, answers the standard
+    // 500 with no audit row (the middleware writes none on a 4xx/5xx, and the
+    // session row below is not reached) and never a truncated zip. They are
+    // held in memory until their place in the pump: bounded tables only, the
+    // same stance as the chassis sections of step 2. No slot: nothing runs.
+    const toolEntries = deps.exportEntries
+      ? resolveExportEntries(await deps.exportEntries(db, workspaceId))
+      : [];
 
     // Exactly one audit row either way: machine reads are audited by the
     // middleware (it picks this up from c.set), session GETs are not
@@ -255,6 +329,9 @@ export function registerExportRoutes(api: OpenAPIHono, deps: ExportRouteDeps): v
         ),
         'files.json'
       );
+
+      // 4b. The tool's entries, in the tool's order (none without the slot).
+      for (const entry of toolEntries) zip.addBuffer(entry.buffer, entry.entryName);
 
       // 5. Blobs, strictly one at a time: await each stream's end before
       //    opening the next so file descriptors / S3 sockets never pile up

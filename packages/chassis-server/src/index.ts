@@ -3,6 +3,7 @@ import { bootPlatform } from './boot.js';
 import type { BootOverrides, BootResult, ToolDefinition } from './tool-definition.js';
 
 export { type AppDeps, createApp, postgresErrorCode } from './app.js';
+export type { ExportEntriesFn, ExportEntry } from './api/export.js';
 export type {
   ApiContext,
   ApiRateLimitContext,

@@ -4,6 +4,7 @@ import type { OpenAPIHono } from '@hono/zod-openapi';
 import type { Hono, MiddlewareHandler } from 'hono';
 import type { RateLimiterAbstract } from 'rate-limiter-flexible';
 import type { z } from 'zod';
+import type { ExportEntriesFn } from './api/export.js';
 import type { FileRouteDeps } from './api/files.js';
 import type { ScopeRoutes } from './api/scope-routes.js';
 import type { PepperRegistry } from './apikeys/peppers.js';
@@ -166,6 +167,20 @@ export interface ToolApiSlots<TEnvShape extends z.ZodRawShape, TDomain, TBuckets
    * (a blob read is never authorized on `workspace_id` alone, SL-B1).
    */
   filePolicy: (tool: TDomain) => FilePolicy;
+  /**
+   * The tool's entries of `GET /workspace/export` (slot 15b). OPTIONAL: absent,
+   * the bundle is the chassis sections and the blobs, byte for byte. Called
+   * ONCE at registration with the tool's domain; the returned function runs
+   * per export, with the handle the route reads with (`db`, not a transaction)
+   * and the workspace id, and filters on that workspace ITSELF. Each entry is
+   * written as `<sanitized name>.json`, after `files.json` and before the
+   * blobs, in the order returned; an empty list writes nothing. Every entry is
+   * computed before the first byte: a throw, a name of
+   * `RESERVED_EXPORT_ENTRY_NAMES` or the same name twice answers 500, never a
+   * truncated zip. The manifest does not list them. Select the columns to
+   * export: a secret left in a row leaves the instance.
+   */
+  exportEntries?: (tool: TDomain) => ExportEntriesFn;
   /**
    * Positional hook (slot 16): AFTER the files routes, BEFORE the OpenAPI
    * document and the JSON 404. The tool keeps its own internal order.

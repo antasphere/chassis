@@ -2,7 +2,14 @@ export { registerApiKeyRoutes } from './apikeys.js';
 export { registerAuditRoutes } from './audit.js';
 export { registerBreakGlassRoutes } from './break-glass.js';
 export { registerCliAuthRoutes } from './cli-auth.js';
-export { registerExportRoutes, sanitizeEntryName } from './export.js';
+export {
+  registerExportRoutes,
+  resolveExportEntries,
+  sanitizeEntryName,
+  RESERVED_EXPORT_ENTRY_NAMES,
+  type ExportEntriesFn,
+  type ExportEntry
+} from './export.js';
 export { registerFileRoutes } from './files.js';
 export { registerInvitationRoutes } from './invitations.js';
 export { registerMemberRoutes } from './members.js';

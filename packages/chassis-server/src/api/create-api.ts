@@ -1051,7 +1051,9 @@ export function createApiApp<
     limiters,
     clientIp,
     logger,
-    workspaceExportRoute: tool.scopes.contractRoutes.workspaceExportRoute
+    workspaceExportRoute: tool.scopes.contractRoutes.workspaceExportRoute,
+    // The tool's export entries, bound to its domain once, here. No slot: no field.
+    ...(tool.api.exportEntries ? { exportEntries: tool.api.exportEntries(deps.domain) } : {})
   });
 
   // Instance id for usage-event sources, cached after first read.
