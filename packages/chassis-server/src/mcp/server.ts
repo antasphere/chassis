@@ -2,6 +2,7 @@ import type { ToolIdentity } from '@antasphere/chassis-contract';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { mcpInputs } from './inputs.js';
 import { jsonText, mergeErrorHints, wrapToolErrors, type ErrorHints } from './errors.js';
+import { PROJECT_ERROR_HINTS, registerProjectTools } from './projects.js';
 import {
   callApi,
   createScopeCheck,
@@ -62,7 +63,8 @@ export function buildMcpServer(
   // `<prefix>whoami` (the contract of `toolPrefix`), registered below: the other chassis tools point at it.
   const whoami = `${identity.toolPrefix}whoami`;
   const checkScope = createScopeCheck(tool.scopes);
-  const hints = mergeErrorHints(tool.errorHints);
+  // The tool's hints last: a tool may re-word a chassis code, never the reverse.
+  const hints = mergeErrorHints({ ...PROJECT_ERROR_HINTS, ...tool.errorHints });
   const server = new McpServer(
     { name: identity.serverName, version: info.version },
     {
@@ -144,7 +146,14 @@ export function buildMcpServer(
     }
   );
 
-  // The product surface: the tool's own set, after the three chassis tools.
+  // ── Projects: a chassis concept, so a chassis tool set ─────────────────────
+  // A project is a subgroup of a workspace with its own members and roles —
+  // the chassis owns it, and therefore owns the nine tools over it. Registered
+  // under the tool's prefix, after whoami and before the tool's own set, so
+  // `tools/list` keeps one stable order across every instance.
+  registerProjectTools(server, ctx, identity, tool.scopes, checkScope, hints);
+
+  // The product surface: the tool's own set, after the chassis tools.
   tool.registerTools(server, ctx);
 
   return server;
