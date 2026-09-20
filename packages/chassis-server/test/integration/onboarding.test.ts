@@ -219,12 +219,11 @@ describe('cloud: first-run onboarding + ssoOnly', () => {
     );
     const danaBefore = (await onboardingRow(dana.email))!.dismissed_at!;
 
-    // Run the committed backfill migration SQL verbatim against the pool —
-    // exactly what a redeploy would apply.
-    const backfill = await readFile(
-      join(import.meta.dirname, '../../../../packages/db/drizzle/0028_user_onboarding_backfill.sql'),
-      'utf8'
-    );
+    // Run the backfill SQL verbatim against the pool — exactly what a redeploy
+    // would apply. The statement is a fixture the chassis owns (its header says
+    // which migration it mirrors): a chassis test never names a tool's
+    // migration file.
+    const backfill = await readFile(join(import.meta.dirname, '../fixtures/onboarding-backfill.sql'), 'utf8');
     await app.db.pool.query(backfill);
 
     // Pre-existing (row-less) users are dismissed — no retroactive welcome…

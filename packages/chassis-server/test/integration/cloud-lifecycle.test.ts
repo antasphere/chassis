@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
+const fixturesDir = resolve(dirname(fileURLToPath(import.meta.url)), '../fixtures');
 
 /**
  * PRDCT-1356 — cloud lifecycle & recovery, the server-side members:
@@ -101,9 +101,9 @@ describe("cloud edition: the local doors are the operator's only", () => {
       json({ email: OWNER.email, password: OWNER.password })
     );
     expect(shut.status).toBe(403);
-    // Run the migration's backfill statement (everything after the ALTER).
-    const sql = readFileSync(join(repoRoot, 'packages/db/drizzle/0036_operator_user_id.sql'), 'utf8');
-    const backfill = sql.split('--> statement-breakpoint').slice(1).join('\n');
+    // Run the migration's backfill statement (everything after the ALTER): a
+    // fixture the chassis owns, whose header says which migration it mirrors.
+    const backfill = readFileSync(join(fixturesDir, 'operator-user-id-backfill.sql'), 'utf8');
     expect(backfill).toMatch(/UPDATE "instance_settings"/);
     await app.db.pool.query(backfill);
     const { rows } = await app.db.pool.query<{ email: string }>(
