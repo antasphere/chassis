@@ -20,7 +20,8 @@ export const cli = defineCli({
     legacyConfigDir: 'things',
     displayName: 'Things',
     envPrefix: 'THINGS',
-    keyPrefix: 'thk'
+    keyPrefix: 'thk',
+    exportScope: 'things:export'
   },
   description: 'Command-line client for a Things instance',
   createClient: (options) => new ChassisClient<ThingsScope>(options)

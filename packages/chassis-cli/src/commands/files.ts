@@ -64,7 +64,7 @@ export function registerFileCommands<TClient extends ChassisClient<string>>(
 
   program
     .command('export')
-    .description('Download the full workspace export as a zip (key needs data:export)')
+    .description(`Download the full workspace export as a zip (key needs ${kit.identity.exportScope})`)
     .option('-o, --out <path>', 'write to this path (defaults to export-<date>.zip)')
     .action(async (opts: { out?: string }, cmd: Command) => {
       const ctx = resolveContext(cmd, io);

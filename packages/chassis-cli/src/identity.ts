@@ -1,3 +1,5 @@
+import type { ToolIdentity } from '@antasphere/chassis-contract';
+
 /**
  * What a tool is called, in every place the generic CLI spells it. ONE object,
  * passed by the tool to `defineCli` (index.ts): the chassis holds no product
@@ -17,4 +19,23 @@ export interface CliIdentity {
   envPrefix: string;
   /** The API key prefix, without the underscore: `<prefix>_…`. */
   keyPrefix: string;
+  /** The scope a key needs for the full-workspace export, as `export --help` names it. */
+  exportScope: string;
+}
+
+/**
+ * The CLI's identity, BUILT from the tool's one definition (`ToolIdentity`,
+ * written in the tool's contract package): a tool passes
+ * `cliIdentity(IDENTITY)` to `defineCli` and spells nothing a second time.
+ */
+export function cliIdentity(identity: ToolIdentity): CliIdentity {
+  return {
+    bin: identity.cli.bin,
+    tool: identity.slug,
+    legacyConfigDir: identity.cli.legacyConfigDir,
+    displayName: identity.displayName,
+    envPrefix: identity.cli.envPrefix,
+    keyPrefix: identity.apiKeyPrefix,
+    exportScope: identity.scopes.dataExport
+  };
 }

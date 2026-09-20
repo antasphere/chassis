@@ -14,7 +14,7 @@ import { createWorkspace } from './workspace.js';
  * its command modules read the kit that comes back.
  */
 
-export type { CliIdentity } from './identity.js';
+export { cliIdentity, type CliIdentity } from './identity.js';
 export { redactKey, type CliConfigStore } from './config.js';
 export type { CliConfig, CliConnectKey, CliEnv, CliProfile } from './config.js';
 export {
