@@ -21,7 +21,14 @@ import { minimalTool } from '../host/minimal-tool.js';
  * same thing under either runner of the suite: it never reads `@chassis-test/host`.
  *
  * The export bucket is 5 per user per 10 minutes: the filled tool's owner
- * exports four times here, the bare tool's owner once.
+ * exports five times here, the bare tool's owner once. A request refused at
+ * the membership gate resolves no principal, so it spends the ADDRESS bucket
+ * only: those come from addresses of their own.
+ *
+ * EVERY export request of this file carries hostile values that name ANOTHER
+ * workspace (a header and a query parameter): the tool function receives the
+ * principal's resolved workspace id, never a raw request value (F2 of the
+ * PRDCT-2543 verification).
  */
 
 const OWNER = {
@@ -92,8 +99,16 @@ async function upload(app: Booted, cookie: string, name: string, text: string): 
   return (await readJson(res)).file.id as string;
 }
 
-const exportAs = (app: Booted, cookie: string) =>
-  app.app.request('/api/v1/workspace/export', { headers: { cookie, 'x-forwarded-for': IP } });
+/** A well-formed workspace id that is nobody's: what the hostile request values name. */
+const HOSTILE_WORKSPACE = '0b57113e-0000-4000-8000-00000000dead';
+
+const exportAs = (app: Booted, cookie: string, headers: Record<string, string> = {}) =>
+  app.app.request(
+    `/api/v1/workspace/export?workspaceId=${HOSTILE_WORKSPACE}&workspace=${HOSTILE_WORKSPACE}`,
+    {
+      headers: { cookie, 'x-forwarded-for': IP, 'x-export-workspace': HOSTILE_WORKSPACE, ...headers }
+    }
+  );
 
 async function exportAuditRows(app: Booted, cookie: string): Promise<number> {
   const res = await app.app.request('/api/v1/audit?action=workspace.export', { headers: { cookie } });
@@ -208,6 +223,63 @@ describe('GET /workspace/export with the `api.exportEntries` slot filled', () =>
     expect(res.headers.get('content-type')).toMatch(/json/);
     expect(res.headers.get('content-disposition')).toBeNull();
     expect(await exportAuditRows(filled, filledOwner.cookie)).toBe(2);
+  });
+});
+
+describe("the workspace id the tool function receives is the principal's, never a request value", () => {
+  it('the hostile header and query parameters were sent on every export above, and never seen', () => {
+    expect(seen.length).toBeGreaterThanOrEqual(4);
+    expect(seen.map((s) => s.workspaceId)).toEqual(seen.map(() => filledOwner.workspaceId));
+  });
+
+  it('X-Workspace-Id naming a workspace the caller is NOT a member of: 401, the tool function is not called', async () => {
+    // A real workspace of the same instance, with no membership row for the caller.
+    const foreign = await filled.db.pool.query<{ id: string }>(
+      `INSERT INTO workspaces (name) VALUES ('Somebody else''s') RETURNING id`
+    );
+    const foreignId = foreign.rows[0]!.id;
+    contribution = async () => [{ name: 'things', rows: [] }];
+    const calls = seen.length;
+    for (const [selector, ip] of [
+      [foreignId, '10.7.0.2'],
+      [HOSTILE_WORKSPACE, '10.7.0.3']
+    ] as const) {
+      // Same answer for a workspace that exists and one that does not (no oracle).
+      const res = await exportAs(filled, filledOwner.cookie, {
+        'x-workspace-id': selector,
+        'x-forwarded-for': ip
+      });
+      expect(res.status).toBe(401);
+      expect(res.headers.get('content-type')).toMatch(/json/);
+      expect(res.headers.get('content-disposition')).toBeNull();
+    }
+    expect(seen.length).toBe(calls);
+    expect(await exportAuditRows(filled, filledOwner.cookie)).toBe(2);
+  });
+
+  it('X-Workspace-Id naming the OTHER workspace the caller is a member of: the tool receives that resolved id', async () => {
+    const created = await filled.app.request(
+      '/api/v1/workspaces',
+      json({ name: 'Second' }, { cookie: filledOwner.cookie, 'x-forwarded-for': IP })
+    );
+    expect(created.status).toBe(201);
+    const secondId = (await readJson(created)).workspace.id as string;
+    expect(secondId).not.toBe(filledOwner.workspaceId);
+
+    contribution = async (_db, workspaceId) => [{ name: 'things', rows: [{ workspaceId }] }];
+    const calls = seen.length;
+    const res = await exportAs(filled, filledOwner.cookie, {
+      'x-workspace-id': secondId,
+      'x-forwarded-for': '10.7.0.4'
+    });
+    expect(res.status).toBe(200);
+    expect(seen.length).toBe(calls + 1);
+    // The principal resolved to the second workspace: exactly that id, not the
+    // default one, and not the hostile header/query value riding the same request.
+    expect(seen.at(-1)).toEqual({ workspaceId: secondId });
+    const zip = new AdmZip(Buffer.from(await res.arrayBuffer()));
+    expect(JSON.parse(zip.readAsText('things.json'))).toEqual([{ workspaceId: secondId }]);
+    expect(JSON.parse(zip.readAsText('manifest.json')).workspaceId).toBe(secondId);
   });
 });
 

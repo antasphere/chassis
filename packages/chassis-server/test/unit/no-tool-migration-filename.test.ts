@@ -52,6 +52,16 @@ describe('no chassis test names a migration file', () => {
       }
     });
     expect(files.length).toBeGreaterThan(50);
+    // The walk reaches the fixtures and this guard itself: a walk that skips a
+    // folder would leave the count above the floor and the guard blind there.
+    const walked = files.map((file) => relative(packagesDir, file));
+    expect(walked).toEqual(
+      expect.arrayContaining([
+        join('chassis-server', 'test', 'fixtures', 'onboarding-backfill.sql'),
+        join('chassis-server', 'test', 'fixtures', 'operator-user-id-backfill.sql'),
+        join('chassis-server', 'test', 'unit', 'no-tool-migration-filename.test.ts')
+      ])
+    );
     const offenders = files
       .filter((file) => MIGRATION_FILENAME.test(readFileSync(file, 'utf8')))
       .map((file) => relative(packagesDir, file));
