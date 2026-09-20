@@ -120,6 +120,23 @@ export type BodyLimitVerdict = 'exempt' | MiddlewareHandler | undefined;
 /** The generic files surface's per-blob policy (SL-B1): the tool owns what references a blob. */
 export type FilePolicy = Pick<FileRouteDeps, 'blobInUse' | 'blobReadScope'>;
 
+/**
+ * The tool's WORDING of the chassis refusals that name its domain (slot 21).
+ * Not identity: these sentences say what the tool's resource is called, where
+ * the chassis only knows "a guest" and "a blob in use". Every field is the
+ * complete sentence, sent as written. REQUIRED, no chassis default.
+ */
+export interface ToolCopy {
+  /** 403 `guest_forbidden`, from both sources: the `requireNonGuest()` guard and the workspace creation refusal. */
+  guestForbidden: string;
+  /** 403 `guest_target`: the credential mints under `/members` refuse a guest target. */
+  guestTarget: string;
+  /** 409 `file_in_use`: the message of `DELETE /files/{id}` when the tool's `blobInUse` says yes. */
+  fileInUse: string;
+  /** The same refusal as the OpenAPI document describes it (the 409 of `DELETE /files/{id}`). */
+  fileInUseOpenApi: string;
+}
+
 export interface ToolApiSlots<TEnvShape extends z.ZodRawShape, TDomain, TBuckets extends string, TEvents> {
   /**
    * Origins that are never trusted (slot 9). ONE source for both the
@@ -223,8 +240,13 @@ export interface ToolDefinition<
   api: ToolApiSlots<TEnvShape, TDomain, TBuckets, TEvents>;
   /** Slots 17-19. */
   app?: ToolAppSlots<TEnvShape, TDomain, TBuckets, TEvents>;
-  /** Slot 20: the MCP definition, plus the instance-name fallback of an instance that is not set up. */
-  mcp: McpToolDefinition & { defaultInstanceName: string };
+  /**
+   * Slot 20: the MCP definition. (The server's name, the tool names' prefix and
+   * the name of an instance that is not set up yet come from `identity`.)
+   */
+  mcp: McpToolDefinition;
+  /** Slot 21: the tool's wording of the chassis refusals that name its domain. */
+  copy: ToolCopy;
 }
 
 /** Test seams only — production boot never passes overrides. */
@@ -280,6 +302,15 @@ export interface BootResult<
  * chassis untyped (plain JS, a cast) with a field missing or empty stops the
  * boot here, naming the field. Never a silent fallback name.
  */
+export function assertToolCopy(copy: ToolCopy | undefined): asserts copy is ToolCopy {
+  if (!copy) throw new Error('tool definition: the `copy` slot is required');
+  for (const name of ['guestForbidden', 'guestTarget', 'fileInUse', 'fileInUseOpenApi'] as const) {
+    if (typeof copy[name] !== 'string' || copy[name] === '') {
+      throw new Error(`tool definition: copy.${name} is required (a non-empty sentence)`);
+    }
+  }
+}
+
 export function assertToolIdentity(identity: ToolIdentity | undefined): asserts identity is ToolIdentity {
   if (!identity) throw new Error('tool definition: the `identity` slot is required');
   const i = identity as unknown as Record<string, Record<string, unknown> | undefined> &

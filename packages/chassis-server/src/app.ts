@@ -16,6 +16,8 @@ export interface AppDeps {
   state: RuntimeState;
   /** Directory holding the built dashboard SPA. */
   publicDir: string;
+  /** The tool's name on the no-dashboard page, title and heading alike (`identity.displayName`). */
+  displayName: string;
   /** The versioned API, mounted at /api/v1. */
   api: OpenAPIHono;
   /** The bundled MCP endpoint, mounted at /mcp (M6). */
@@ -75,6 +77,7 @@ export async function createApp({
   logger,
   state,
   publicDir,
+  displayName,
   api,
   mcp,
   wellKnown,
@@ -212,7 +215,7 @@ export async function createApp({
   app.get('*', (c) => {
     if (indexHtml) return c.html(indexHtml);
     return c.html(
-      '<!doctype html><title>Slideless</title><h1>Slideless API is running</h1>' +
+      `<!doctype html><title>${displayName}</title><h1>${displayName} API is running</h1>` +
         '<p>No dashboard build found. API health: <a href="/healthz">/healthz</a></p>'
     );
   });

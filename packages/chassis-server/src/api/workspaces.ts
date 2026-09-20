@@ -107,10 +107,10 @@ export async function workspaceCreationRefusal(
   return owned >= policy.maxPerUser ? 'workspace_limit_reached' : null;
 }
 
-const REFUSAL_MESSAGES: Record<WorkspaceCreationRefusal, string> = {
+/** Every refusal but `guest_forbidden`, whose sentence is the tool's (`WorkspaceRouteDeps.guestForbiddenMessage`). */
+const CHASSIS_REFUSAL_MESSAGES: Record<Exclude<WorkspaceCreationRefusal, 'guest_forbidden'>, string> = {
   session_required: 'Creating a workspace requires a browser session',
   workspace_creation_disabled: 'Workspace creation is closed on this instance',
-  guest_forbidden: 'Guest access is limited to the decks you were invited to',
   workspace_limit_reached: 'This account already owns the maximum number of workspaces',
   hub_link_required: 'Sign in with Antasphere to create an organization'
 };
@@ -212,6 +212,8 @@ export interface WorkspaceRouteDeps {
   wall: WorkspaceCreateWall;
   maxPerUser: number;
   cloud?: WorkspaceCloudDeps | undefined;
+  /** The tool's `guest_forbidden` sentence (`copy.guestForbidden`), the same one the route guard answers with. */
+  guestForbiddenMessage: string;
 }
 
 export function workspaceCreationPolicy(
@@ -223,6 +225,10 @@ export function workspaceCreationPolicy(
 export function registerWorkspaceRoutes(api: OpenAPIHono, deps: WorkspaceRouteDeps): void {
   const { db, auth, audit, registry, logger, cloud } = deps;
   const policy = workspaceCreationPolicy(deps);
+  const REFUSAL_MESSAGES: Record<WorkspaceCreationRefusal, string> = {
+    ...CHASSIS_REFUSAL_MESSAGES,
+    guest_forbidden: deps.guestForbiddenMessage
+  };
 
   api.openapi(workspaceCreateRoute, async (c) => {
     const principal = c.get('principal');

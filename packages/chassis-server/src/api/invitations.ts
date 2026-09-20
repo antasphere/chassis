@@ -42,6 +42,8 @@ export interface InvitationRouteDeps {
   audit: AuditService;
   registry: PlatformRegistry;
   logger: Logger;
+  /** The product's name in the invitation mail (`identity.displayName`). */
+  productName: string;
   /**
    * Cloud edition only (P7, internal/federation.md): when set, invitation
    * MUTATIONS targeting a hub-origin workspace answer 403 `hub_managed`
@@ -162,6 +164,7 @@ export function registerInvitationRoutes(api: OpenAPIHono, deps: InvitationRoute
         .limit(1);
       try {
         const msg = buildInviteEmail({
+          productName: deps.productName,
           inviteeEmail: created.invitation.email,
           inviterName: principal.name,
           workspaceName: ws?.name ?? 'the workspace',

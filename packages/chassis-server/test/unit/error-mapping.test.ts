@@ -30,6 +30,7 @@ async function appThrowing(error: unknown) {
     logger,
     state: createRuntimeState(),
     publicDir: '/nonexistent-public-dir',
+    displayName: 'Things',
     api
   });
   return { app, lines };

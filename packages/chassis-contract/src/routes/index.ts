@@ -559,21 +559,30 @@ export const fileUploadRoute = createRoute({
   }
 });
 
-export const fileDeleteRoute = createRoute({
-  method: 'delete',
-  path: '/files/{id}',
-  tags: ['files'],
-  summary: 'Delete a file (metadata soft-deleted, blob removed)',
-  request: { params: uuidParams },
-  responses: {
-    200: jsonBody(fileSchema, 'Deleted file'),
-    401: errorResponses[401],
-    404: errorResponses[404],
-    // ADR 011 blob-delete guard: a blob referenced by any live presentation
-    // version manifest is not deletable through the generic files surface.
-    409: jsonBody(apiErrorSchema, 'file_in_use: referenced by a presentation version')
-  }
-});
+/**
+ * The delete route, with the tool's wording of its 409. What references a
+ * blob is the tool's to name, so the SERVER registers the contract built from
+ * the tool's copy (`defineFileDeleteRoute(copy.fileInUseOpenApi)`), the same
+ * way as `defineWorkspaceExportRoute`; the static export names no domain.
+ */
+export const defineFileDeleteRoute = (inUseDescription: string) =>
+  createRoute({
+    method: 'delete',
+    path: '/files/{id}',
+    tags: ['files'],
+    summary: 'Delete a file (metadata soft-deleted, blob removed)',
+    request: { params: uuidParams },
+    responses: {
+      200: jsonBody(fileSchema, 'Deleted file'),
+      401: errorResponses[401],
+      404: errorResponses[404],
+      // ADR 011 blob-delete guard: a blob the tool still references is not
+      // deletable through the generic files surface.
+      409: jsonBody(apiErrorSchema, inUseDescription)
+    }
+  });
+
+export const fileDeleteRoute = defineFileDeleteRoute('file_in_use: the tool still references this file');
 
 /**
  * The route contracts that carry the TOOL's scope vocabulary: every route

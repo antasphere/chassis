@@ -5,7 +5,7 @@ import { HTTPException } from 'hono/http-exception';
 import { StreamableHTTPTransport } from '@hono/mcp';
 import type { Principal } from '@antasphere/chassis-contract';
 import { looksLikeJwt } from '../middleware/scopes.js';
-import { buildMcpServer, type McpToolDefinition } from './server.js';
+import { buildMcpServer, type McpIdentity, type McpToolDefinition } from './server.js';
 
 /**
  * The bundled /mcp endpoint (streamable HTTP, STATELESS — see ADR 002).
@@ -33,6 +33,8 @@ export interface McpHttpDeps {
   limiter: MiddlewareHandler;
   /** The tool's MCP definition: its tools, instructions, error hints and scope names. */
   tool: McpToolDefinition;
+  /** The server's name and the tool names' prefix (`identity.mcp`). */
+  identity: McpIdentity;
 }
 
 export function mcpRoutes(deps: McpHttpDeps): Hono {
@@ -85,7 +87,8 @@ export function mcpRoutes(deps: McpHttpDeps): Hono {
         publicBaseUrl: deps.publicBaseUrl
       },
       { version: deps.version, instanceName: await deps.instanceName() },
-      deps.tool
+      deps.tool,
+      deps.identity
     );
     // No sessionIdGenerator = stateless: every POST is self-contained.
     // enableJsonResponse returns plain JSON bodies (no SSE), so the Response

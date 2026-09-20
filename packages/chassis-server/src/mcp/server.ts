@@ -1,3 +1,4 @@
+import type { ToolIdentity } from '@antasphere/chassis-contract';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { jsonText, mergeErrorHints, wrapToolErrors, type ErrorHints } from './errors.js';
@@ -48,11 +49,21 @@ export interface McpToolDefinition {
   scopes: McpScopes;
 }
 
-export function buildMcpServer(ctx: McpToolContext, info: McpServerInfo, tool: McpToolDefinition): McpServer {
+/** The MCP half of the tool's identity (`ToolIdentity['mcp']`): the server's name and the tool names' prefix. */
+export type McpIdentity = ToolIdentity['mcp'];
+
+export function buildMcpServer(
+  ctx: McpToolContext,
+  info: McpServerInfo,
+  tool: McpToolDefinition,
+  identity: McpIdentity
+): McpServer {
+  // The tool registers `<prefix>whoami` (the contract of `toolPrefix`): the two chassis tools point at it.
+  const whoami = `${identity.toolPrefix}whoami`;
   const checkScope = createScopeCheck(tool.scopes);
   const hints = mergeErrorHints(tool.errorHints);
   const server = new McpServer(
-    { name: 'slideless', version: info.version },
+    { name: identity.serverName, version: info.version },
     {
       instructions: tool.instructions(info)
     }
@@ -61,7 +72,7 @@ export function buildMcpServer(ctx: McpToolContext, info: McpServerInfo, tool: M
   const workspaceInput = z
     .uuid()
     .optional()
-    .describe('Target organization (workspace id). Omit to use your default org — see slideless_whoami.');
+    .describe(`Target organization (workspace id). Omit to use your default org — see ${whoami}.`);
 
   // ── Pattern 1: READ tool — the end-to-end whoami proof ────────────────────
   server.registerTool(
@@ -70,7 +81,7 @@ export function buildMcpServer(ctx: McpToolContext, info: McpServerInfo, tool: M
       description:
         'Who is connected: the user this MCP connection acts as, with all their organizations. ' +
         'Returns { user: { id, email, name }, workspace, role, via, scopes, workspaces }. ' +
-        'Everything done through this server happens as this user. (Alias of slideless_whoami.)',
+        `Everything done through this server happens as this user. (Alias of ${whoami}.)`,
       inputSchema: { workspace: workspaceInput },
       annotations: { readOnlyHint: true }
     },

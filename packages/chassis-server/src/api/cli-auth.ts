@@ -84,6 +84,8 @@ export interface CliAuthRouteDeps {
   cliKeyScopes: readonly string[];
   /** The tool's instantiation of the scope-carrying mint route. */
   routes: Pick<ScopeRoutes, 'cliAuthCompleteRoute'>;
+  /** The tool's name in the cloud refusal sentence (`identity.displayName`). */
+  displayName: string;
 }
 
 /** The emailOTP endpoints, present iff the plugin registered (email delivers). */
@@ -114,7 +116,7 @@ export function registerCliAuthRoutes(api: OpenAPIHono, deps: CliAuthRouteDeps):
     err(
       'cli_otp_disabled',
       'This instance signs in through the Antasphere hub — run `antasphere login` once; ' +
-        'the Slideless CLI then connects automatically'
+        `the ${deps.displayName} CLI then connects automatically`
     );
 
   api.openapi(cliAuthRequestRoute, async (c) => {

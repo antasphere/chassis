@@ -73,7 +73,11 @@ function app(): OpenAPIHono {
     // HEAD route shape (PLT-39), not authorization, so it takes the operator
     // view: undefined = unscoped, exactly what an admin/owner principal gets.
     blobReadScope: () => undefined,
-    blobInUse: async () => false
+    blobInUse: async () => false,
+    fileInUse: {
+      message: 'This file is referenced by a thing',
+      openApi: 'file_in_use: referenced by a thing'
+    }
   });
   return api;
 }
@@ -133,7 +137,11 @@ describe('GET/HEAD /files/:id/content (one registration, verb read off the reque
       // HEAD route shape (PLT-39), not authorization, so it takes the operator
       // view: undefined = unscoped, exactly what an admin/owner principal gets.
       blobReadScope: () => undefined,
-      blobInUse: async () => false
+      blobInUse: async () => false,
+      fileInUse: {
+        message: 'This file is referenced by a thing',
+        openApi: 'file_in_use: referenced by a thing'
+      }
     });
 
     await api.request(CONTENT_PATH, { method: 'HEAD' });

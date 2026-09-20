@@ -30,7 +30,6 @@ import type {
 } from '../tool-definition.js';
 import type { ApiKeyService } from '../apikeys/index.js';
 import type { EmailDriver } from '../email/index.js';
-import { isApiKeyToken } from '../apikeys/index.js';
 import { auditMiddleware, type AuditService } from '../audit/index.js';
 import { constantTimeEquals } from '../util/index.js';
 import { isSecureSetupOrigin } from '../util/index.js';
@@ -549,7 +548,7 @@ export function createApiApp<
     '*',
     authContext({
       registry: chassisRegistry,
-      isApiKeyToken,
+      isApiKeyToken: apiKeyService.isToken,
       resolveApiKey: (token, requested) => apiKeyService.resolve(token, requested),
       resolveOauthJwt: (token, requested) => deps.oauthJwt.resolve(token, requested),
       keyFailureLimiter: limiters.apiKeyFailures,
@@ -569,7 +568,8 @@ export function createApiApp<
       // undefined on oss.
       principalGate: deps.principalGate,
       // The composed fail-closed allowlist: chassis rules, then the tool's rules.
-      requiredScopeFor: tool.scopes.requiredScopeFor
+      requiredScopeFor: tool.scopes.requiredScopeFor,
+      guestForbiddenMessage: tool.copy.guestForbidden
     })
   );
 
@@ -596,7 +596,7 @@ export function createApiApp<
     c.header('Cache-Control', 'public, max-age=60');
     return c.json(
       {
-        name: row?.name ?? tool.mcp.defaultInstanceName,
+        name: row?.name ?? tool.identity.displayName,
         instanceId: row?.instanceId ?? null,
         edition: env.EDITION,
         version: env.APP_VERSION,
@@ -953,7 +953,8 @@ export function createApiApp<
     clientIp,
     wall: creationWall,
     maxPerUser: env.MAX_WORKSPACES_PER_USER,
-    cloud: deps.workspaceCloud
+    cloud: deps.workspaceCloud,
+    guestForbiddenMessage: tool.copy.guestForbidden
   });
 
   // ── Platform modules ─────────────────────────────────────────────────────
@@ -982,7 +983,8 @@ export function createApiApp<
     logger,
     hubSso,
     cliKeyScopes: tool.scopes.cliKey,
-    routes: { cliAuthCompleteRoute }
+    routes: { cliAuthCompleteRoute },
+    displayName: tool.identity.displayName
   });
   // CLI cross-tool connect (internal/federation.md P5): PUBLIC exchange of a
   // hub-minted 120 s JWT (+ its H3 offline grant) for a USER-scoped `slk_`
@@ -1023,7 +1025,8 @@ export function createApiApp<
     auth,
     publicBaseUrl: env.PUBLIC_BASE_URL,
     accountDeletion: deps.accountDeletion,
-    hubManaged
+    hubManaged,
+    guestTargetMessage: tool.copy.guestTarget
   });
   registerApiKeyRoutes(api, db, apiKeyService, { apiKeysListRoute, apiKeyCreateRoute, apiKeyRevokeRoute });
   registerInvitationRoutes(api, {
@@ -1034,6 +1037,7 @@ export function createApiApp<
     audit,
     registry: chassisRegistry,
     logger,
+    productName: tool.identity.displayName,
     hubManaged,
     // CLOUD-5: no local-password accounts minted through invitations on cloud.
     ssoOnly: Boolean(deps.hubSso)
@@ -1070,7 +1074,8 @@ export function createApiApp<
     // through the generic files surface; SL-B1: the generic files surface
     // authorizes per DECK, not per workspace — the ADR 013 policy expressed
     // as a WHERE predicate.
-    ...tool.api.filePolicy(deps.domain)
+    ...tool.api.filePolicy(deps.domain),
+    fileInUse: { message: tool.copy.fileInUse, openApi: tool.copy.fileInUseOpenApi }
   });
   // The tool's own routes: AFTER the files routes, BEFORE the OpenAPI
   // document and the JSON 404. The tool keeps its own internal order.

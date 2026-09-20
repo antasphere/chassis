@@ -17,6 +17,7 @@ export type {
   ToolApiSlots,
   ToolAppSlots,
   ToolBuckets,
+  ToolCopy,
   ToolDefinition,
   ToolRateLimiters
 } from './tool-definition.js';

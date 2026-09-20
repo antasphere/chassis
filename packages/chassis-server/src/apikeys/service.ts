@@ -12,8 +12,9 @@ import type { PepperRegistry } from './peppers.js';
 /**
  * API keys: `<prefix>_<keyId8>_<secret>`.
  *
- * The prefix is a template constant — rename it per product (e.g. a product
- * called Acme might use `acm`). The shape is fixed: keyId gives an O(1)
+ * The prefix is the TOOL's (`identity.apiKeyPrefix`, e.g. a product called
+ * Acme might use `acm`): a constructor value with no default, so the chassis
+ * spells none. The shape is fixed: keyId gives an O(1)
  * indexed lookup, the secret is stored as sha256(secret + pepper) and
  * compared constant-time. The pepper defaults to the server auth secret, so
  * a leaked database alone cannot validate keys — and it is VERSIONED
@@ -29,16 +30,15 @@ import type { PepperRegistry } from './peppers.js';
  * pinned key resolves ONLY its pinned workspace, and a request naming a
  * DIFFERENT one is rejected loudly (WorkspaceMismatchError → 403).
  */
-export const API_KEY_PREFIX = 'slk';
-
 const KEY_ID_BYTES = 6; // 8 chars base64url
 const SECRET_BYTES = 32; // 43 chars base64url
 
-const KEY_RE = new RegExp(`^${API_KEY_PREFIX}_([A-Za-z0-9_-]{8})_([A-Za-z0-9_-]{20,})$`);
+/** The prefix is a literal in the pattern: every RegExp metacharacter in it is escaped. */
+const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-export function isApiKeyToken(token: string): boolean {
-  return KEY_RE.test(token);
-}
+/** The key shape for one prefix: `<prefix>_<keyId8>_<secret>`, two capture groups. */
+const keyPattern = (prefix: string): RegExp =>
+  new RegExp(`^${escapeRegExp(prefix)}_([A-Za-z0-9_-]{8})_([A-Za-z0-9_-]{20,})$`);
 
 /**
  * A VALID pinned key presented with an X-Workspace-Id naming a different
@@ -67,12 +67,22 @@ export interface MintedKey {
 }
 
 export class ApiKeyService {
+  private readonly keyRe: RegExp;
+
   constructor(
     private readonly db: Db,
     private readonly peppers: PepperRegistry,
+    /** The tool's key prefix, without the underscore (`identity.apiKeyPrefix`). Required: no chassis default. */
+    private readonly prefix: string,
     /** Cloud only: one cached reconcile on a well-formed selector miss. */
     private readonly onWorkspaceMiss?: OnWorkspaceMiss | undefined
-  ) {}
+  ) {
+    if (!prefix) throw new Error('ApiKeyService: the key prefix is required');
+    this.keyRe = keyPattern(prefix);
+  }
+
+  /** Distinguishes an API-key credential from other bearers (the shape only, no lookup). */
+  readonly isToken = (token: string): boolean => this.keyRe.test(token);
 
   async mint(opts: {
     /** Optional workspace PIN — omitted/null mints a user-scoped key. */
@@ -103,7 +113,7 @@ export class ApiKeyService {
       })
       .returning({ id: apiKeys.id });
     if (!row) throw new Error('api key insert failed');
-    return { id: row.id, keyId, key: `${API_KEY_PREFIX}_${keyId}_${secret}` };
+    return { id: row.id, keyId, key: `${this.prefix}_${keyId}_${secret}` };
   }
 
   /**
@@ -118,7 +128,7 @@ export class ApiKeyService {
    * the pinned one.
    */
   async resolve(token: string, requested: string | null): Promise<Principal | null> {
-    const match = KEY_RE.exec(token);
+    const match = this.keyRe.exec(token);
     if (!match) return null;
     const [, keyId, secret] = match;
     if (!keyId || !secret) return null;

@@ -15,6 +15,8 @@ import { looksLikeJwt } from './scopes.js';
 declare module 'hono' {
   interface ContextVariableMap {
     principal: Principal | null;
+    /** The tool's `guest_forbidden` sentence, set by `authContext` for `requireNonGuest()` to answer with. */
+    guestForbiddenMessage: string;
   }
 }
 
@@ -89,6 +91,12 @@ export interface AuthContextDeps {
    * not open to machine principals. Required: a tool must state its list.
    */
   requiredScopeFor: (path: string, method: string) => string | null;
+  /**
+   * The tool's `guest_forbidden` sentence (`copy.guestForbidden`). Carried on
+   * the request so `requireNonGuest()` keeps its argument-less call sites, in
+   * the chassis and in the tool alike. Required: the chassis has no wording.
+   */
+  guestForbiddenMessage: string;
 }
 
 /**
@@ -114,10 +122,12 @@ export function authContext({
   clientIp,
   requestQuota,
   principalGate,
-  requiredScopeFor
+  requiredScopeFor,
+  guestForbiddenMessage
 }: AuthContextDeps): MiddlewareHandler {
   return async (c, next) => {
     c.set('principal', null);
+    c.set('guestForbiddenMessage', guestForbiddenMessage);
 
     if (isPublicApiPath(c.req.path)) {
       return next();
@@ -268,7 +278,8 @@ export function requireNonGuest(): MiddlewareHandler {
       return apiError(c, 401, 'unauthenticated', 'Authentication required');
     }
     if (principal.origin === 'guest') {
-      return apiError(c, 403, 'guest_forbidden', 'Guest access is limited to the decks you were invited to');
+      // A principal only ever comes out of `authContext`, which set the sentence first.
+      return apiError(c, 403, 'guest_forbidden', c.get('guestForbiddenMessage'));
     }
     return next();
   };

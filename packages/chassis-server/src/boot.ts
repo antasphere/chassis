@@ -28,7 +28,6 @@ import { DEFAULT_FEDERATION_DIALS, HubOrgReconciler, type HubFederationDials } f
 import { OauthJwtVerifier } from './identity/index.js';
 import { preflightSigningKey } from './identity/index.js';
 import type { OnWorkspaceMiss } from './identity/index.js';
-import { isApiKeyToken } from './apikeys/index.js';
 import { mcpRoutes } from './mcp/index.js';
 import { wellKnownRoutes } from './routes/index.js';
 import { instanceSettings, user as userTable, workspaceMembers, workspaces } from '@antasphere/chassis-db';
@@ -50,6 +49,7 @@ import { WorkspaceService } from './platform/index.js';
 import { clearGeneratedSetupToken, resolveAuthSecret, resolveSetupToken } from './util/index.js';
 import { createRuntimeState } from './util/index.js';
 import {
+  assertToolCopy,
   assertToolIdentity,
   type BootOverrides,
   type BootResult,
@@ -74,6 +74,7 @@ export async function bootPlatform<
   overrides: BootOverrides<TToolOverrides> = {}
 ): Promise<BootResult<TEnvShape, TDomain, TEvents>> {
   assertToolIdentity(tool.identity);
+  assertToolCopy(tool.copy);
   const env = parseEnv<TEnvShape>(source, {
     version: tool.runtime.version,
     ...(tool.env ? { extension: tool.env } : {})
@@ -339,6 +340,8 @@ export async function bootPlatform<
   const untrustedOrigins = tool.api.untrustedOrigins?.(env) ?? [];
 
   // Identity + seams: local defaults, swappable at this one point.
+  // The product's name in the four mails Better Auth sends (the fifth, the invitation, is api/invitations.ts).
+  const productName = tool.identity.displayName;
   const auth = createAuth({
     db: db.db,
     env,
@@ -368,13 +371,14 @@ export async function bootPlatform<
     ...(email.delivers
       ? {
           sendOtp: async ({ email: to, otp, type }: { email: string; otp: string; type: string }) => {
-            const msg = buildOtpEmail({ otp, type });
+            const msg = buildOtpEmail({ productName, otp, type });
             await email.send({ to, ...msg });
           },
           sendResetPassword: async ({ email: to, url }: { email: string; url: string; token: string }) => {
             // Better Auth builds `url` as the API callback that 302s to the
             // dashboard reset page with ?token — mail it verbatim.
             const msg = buildPasswordResetEmail({
+              productName,
               resetUrl: url,
               expiresAt: new Date(Date.now() + 3600_000)
             });
@@ -393,6 +397,7 @@ export async function bootPlatform<
             token: string;
           }) => {
             const msg = buildChangeEmailConfirmEmail({
+              productName,
               newEmail,
               confirmUrl: url,
               expiresAt: new Date(Date.now() + 3600_000)
@@ -409,6 +414,7 @@ export async function bootPlatform<
             token: string;
           }) => {
             const msg = buildVerifyEmailEmail({
+              productName,
               verifyUrl: url,
               expiresAt: new Date(Date.now() + 3600_000)
             });
@@ -651,7 +657,7 @@ export async function bootPlatform<
         '(internal/security-runbooks.md).'
     );
   }
-  const apiKeys = new ApiKeyService(db.db, pepperRegistry, onWorkspaceMiss);
+  const apiKeys = new ApiKeyService(db.db, pepperRegistry, tool.identity.apiKeyPrefix, onWorkspaceMiss);
   // Storage: probed at boot — /readyz stays red on an unwritable volume.
   state.reason = 'probing storage';
   const storage = createStorageDriver(env);
@@ -751,7 +757,7 @@ export async function bootPlatform<
   const publicRoutes = tool.app?.publicRoutes?.({ ...core, overrides: undefined }, domain);
 
   // Observability: tracing (exporterless = zero phone-home) + Prometheus.
-  const otel = await createOtel(env, logger, { serviceName: 'slideless' });
+  const otel = await createOtel(env, logger, { serviceName: tool.identity.otelServiceName });
   const metrics = createMetrics(db.db, jobs.boss);
   // Cloud only: the reconcile-pass and grant-refresh counters join the app
   // registry so a degraded hub (or dying grants) is visible on /metrics.
@@ -778,13 +784,14 @@ export async function bootPlatform<
     // where the real per-request selection happens.
     resolveOauthJwt: (token) => oauthJwt.resolve(token, null),
     resolveApiKey: (token) => apiKeys.resolve(token, null),
-    isApiKeyToken,
+    isApiKeyToken: apiKeys.isToken,
     limiter: rateLimit(limiters.mcp, makeClientIp(env.TRUST_PROXY)),
     tool: tool.mcp,
+    identity: tool.identity.mcp,
     instanceName: async () => {
       if (cachedName) return cachedName;
       const [row] = await db.db.select({ name: instanceSettings.name }).from(instanceSettings).limit(1);
-      cachedName = row?.name ?? tool.mcp.defaultInstanceName;
+      cachedName = row?.name ?? tool.identity.displayName;
       return cachedName;
     }
   });
@@ -793,6 +800,7 @@ export async function bootPlatform<
     logger,
     state,
     publicDir: tool.runtime.publicDir,
+    displayName: tool.identity.displayName,
     api,
     mcp,
     wellKnown: wellKnownRoutes({ auth, publicBaseUrl: env.PUBLIC_BASE_URL, oauthScopes: tool.scopes.oauth }),

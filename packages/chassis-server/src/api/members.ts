@@ -27,6 +27,8 @@ export interface MemberRouteDeps {
    * pointer. undefined on oss — zero behavior change there.
    */
   hubManaged?: { manageUrl: string } | undefined;
+  /** The tool's `guest_target` sentence (`copy.guestTarget`). */
+  guestTargetMessage: string;
 }
 
 const err = (code: string, message: string) => ({ error: { code, message } });
@@ -358,8 +360,7 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
     if (target.origin === 'guest') {
       return {
         code: 'guest_target',
-        message:
-          'This member is an external per-deck guest — their account is not this workspace’s to recover'
+        message: deps.guestTargetMessage
       };
     }
     const [foreign] = await db

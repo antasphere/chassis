@@ -9,7 +9,7 @@ import { defineChassisContract } from '@antasphere/chassis-contract';
 import { defineChassisRoutes } from '@antasphere/chassis-contract/routes';
 import { createPlatform, type BootResult, type ToolDefinition } from '../../src/index.js';
 import { createScopeAllowlist } from '../../src/middleware/index.js';
-import { THINGS_IDENTITY } from '../host/identity.js';
+import { THINGS_COPY, THINGS_IDENTITY } from '../host/identity.js';
 
 /**
  * The chassis boots with a MINIMAL tool: no env extension, no services, no
@@ -63,9 +63,9 @@ const emptyTool: ToolDefinition<NoEnv, NoDomain> = {
     registerTools: () => {},
     instructions: (info) => `MCP endpoint of the "${info.instanceName}" instance.`,
     errorHints: {},
-    scopes: { read: 'things:read', write: 'things:write' },
-    defaultInstanceName: 'Things'
-  }
+    scopes: { read: 'things:read', write: 'things:write' }
+  },
+  copy: THINGS_COPY
 };
 
 let container: StartedPostgreSqlContainer;

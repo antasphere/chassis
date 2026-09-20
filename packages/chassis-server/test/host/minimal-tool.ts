@@ -5,7 +5,7 @@ import { defineChassisContract } from '@antasphere/chassis-contract';
 import { defineChassisRoutes } from '@antasphere/chassis-contract/routes';
 import type { BootOverrides, BootResult, ToolDefinition } from '@antasphere/chassis-server';
 import { createScopeAllowlist, requireAuth } from '@antasphere/chassis-server/middleware';
-import { THINGS_IDENTITY } from './identity.js';
+import { THINGS_COPY, THINGS_IDENTITY } from './identity.js';
 
 /**
  * The MINIMAL test tool: the smallest tool that fills the required slots of
@@ -89,7 +89,7 @@ export const minimalTool: ToolDefinition<NoEnv, NoDomain> = {
     registerTools: () => {},
     instructions: (info) => `MCP endpoint of the "${info.instanceName}" instance.`,
     errorHints: {},
-    scopes: { read: THINGS_SCOPES.read, write: THINGS_SCOPES.write },
-    defaultInstanceName: 'Things'
-  }
+    scopes: { read: THINGS_SCOPES.read, write: THINGS_SCOPES.write }
+  },
+  copy: THINGS_COPY
 };
