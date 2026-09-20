@@ -84,6 +84,47 @@ export interface ChassisTestHost<TResult extends BootResultLike, TOverrides> {
   probeRoute: string;
 }
 
+/** Postgres `admin_shutdown`: what a backend answers a still-connected client when the server stops. */
+const ADMIN_SHUTDOWN = '57P01';
+
+/** How long `endPool` waits for the sockets, so that a teardown can never hang on one. */
+const POOL_CLOSE_TIMEOUT_MS = 10_000;
+
+/**
+ * End a pool and wait until every one of its clients has REALLY closed
+ * (PRDCT-2547). `pool.end()` alone does not say that: pg-pool takes each
+ * client off its list and only then calls `client.end()`, so its promise
+ * resolves while the sockets are still open. A suite that stops its container
+ * right after (`await app.stop(); await container.stop()`) then races the
+ * server's shutdown: the backend answers the still-connected client with
+ * `57P01`, the client hands it to the pool, the pool has no `error` listener,
+ * and Node reports an unhandled error: the run fails with every test passed.
+ *
+ * The pool emits `remove` from the callback of `client.end()`, which pg calls
+ * on the connection's `end`, the socket's close. So: count the clients, end
+ * the pool, wait for as many `remove`. The `error` listener is the net under
+ * it (a wait that timed out): it takes `57P01` on this ENDING pool and nothing
+ * else, any other error is thrown as it was before.
+ */
+export async function endPool(pool: pg.Pool): Promise<void> {
+  pool.on('error', (err: Error & { code?: string }) => {
+    if (err.code !== ADMIN_SHUTDOWN) throw err;
+  });
+  let open = pool.totalCount;
+  let timer: NodeJS.Timeout | undefined;
+  const closed = new Promise<void>((resolve) => {
+    if (open === 0) return resolve();
+    pool.on('remove', () => {
+      if (--open === 0) resolve();
+    });
+    timer = setTimeout(resolve, POOL_CLOSE_TIMEOUT_MS);
+    timer.unref();
+  });
+  await pool.end();
+  await closed;
+  clearTimeout(timer);
+}
+
 /**
  * Binds `createTestApp` to a boot function: boots the real app (real
  * migrations, real Better Auth) against a database.
@@ -122,7 +163,7 @@ export function makeCreateTestApp<TResult extends BootResultLike, TOverrides>(
       ...result,
       stop: async () => {
         await result.jobs.stop().catch(() => {});
-        await result.db.pool.end();
+        await endPool(result.db.pool);
       }
     };
   };

@@ -9,6 +9,7 @@ import { defineChassisContract } from '@antasphere/chassis-contract';
 import { defineChassisRoutes } from '@antasphere/chassis-contract/routes';
 import { createPlatform, type BootResult, type ToolDefinition } from '../../src/index.js';
 import { createScopeAllowlist } from '../../src/middleware/index.js';
+import { endPool } from '../../src/testing/index.js';
 import { THINGS_COPY, THINGS_IDENTITY, THINGS_ROUTES_COPY } from '../host/identity.js';
 
 /**
@@ -103,7 +104,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await booted?.jobs.stop().catch(() => {});
-  await booted?.db.pool.end();
+  if (booted) await endPool(booted.db.pool); // the sockets closed, before the container stops (PRDCT-2547)
   await container?.stop();
 });
 
