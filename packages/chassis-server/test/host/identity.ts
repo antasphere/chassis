@@ -26,7 +26,12 @@ export const THINGS_COPY: ToolCopy = {
   guestForbidden: 'Guest access is limited to the things you were invited to',
   guestTarget:
     'This member is an external guest of one thing: their account is not this workspace’s to recover',
-  fileInUse: 'This file is referenced by a thing'
+  fileInUse: 'This file is referenced by a thing',
+  mail: {
+    tagline: 'A place for things. A test tool.',
+    invitePitch: 'Join to see the things the team keeps there, and to add your own.',
+    invitePreheader: 'their things, and a place for yours.'
+  }
 };
 
 /** And its wording of the OpenAPI document (`defineChassisRoutes`' third argument). */

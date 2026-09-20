@@ -134,6 +134,19 @@ export interface ToolCopy {
   guestTarget: string;
   /** 409 `file_in_use`: the message of `DELETE /files/{id}` when the tool's `blobInUse` says yes. */
   fileInUse: string;
+  /**
+   * The words of the account mails that are the tool's own. The layout
+   * (email/shell.ts) and every other sentence of those five mails are the
+   * chassis's; these three say what the tool IS, which the chassis cannot know.
+   */
+  mail: {
+    /** One line under the footer's name: what this product is. */
+    tagline: string;
+    /** Workspace invitation, the sentence after "…a workspace on <name>.": what joining gives. */
+    invitePitch: string;
+    /** Workspace invitation's inbox preview, the end of "Join <workspace> on <name>: …". */
+    invitePreheader: string;
+  };
 }
 
 export interface ToolApiSlots<TEnvShape extends z.ZodRawShape, TDomain, TBuckets extends string, TEvents> {
@@ -320,6 +333,11 @@ export function assertToolCopy(copy: ToolCopy | undefined): asserts copy is Tool
   for (const name of ['guestForbidden', 'guestTarget', 'fileInUse'] as const) {
     if (typeof copy[name] !== 'string' || copy[name] === '') {
       throw new Error(`tool definition: copy.${name} is required (a non-empty sentence)`);
+    }
+  }
+  for (const name of ['tagline', 'invitePitch', 'invitePreheader'] as const) {
+    if (typeof copy.mail?.[name] !== 'string' || copy.mail[name] === '') {
+      throw new Error(`tool definition: copy.mail.${name} is required (non-empty words)`);
     }
   }
 }

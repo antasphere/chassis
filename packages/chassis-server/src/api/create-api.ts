@@ -1037,7 +1037,8 @@ export function createApiApp<
     audit,
     registry: chassisRegistry,
     logger,
-    productName: tool.identity.displayName,
+    mailBrand: { name: tool.identity.displayName, tagline: tool.copy.mail.tagline },
+    inviteMail: { pitch: tool.copy.mail.invitePitch, preheader: tool.copy.mail.invitePreheader },
     hubManaged,
     // CLOUD-5: no local-password accounts minted through invitations on cloud.
     ssoOnly: Boolean(deps.hubSso)

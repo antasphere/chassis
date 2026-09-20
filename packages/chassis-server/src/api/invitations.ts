@@ -15,6 +15,7 @@ import type { Auth } from '../identity/better-auth.js';
 import type { EmailDriver } from '../email/driver.js';
 import type { PlatformRegistry } from '../platform/registry.js';
 import type { AuditService } from '../audit/service.js';
+import type { MailBrand } from '../email/shell.js';
 import { buildInviteEmail } from '../email/templates.js';
 import { InvitationError, InvitationService } from '../invitations/service.js';
 import { cursorRowId, keysetBefore, pageOf } from '../pagination.js';
@@ -42,8 +43,10 @@ export interface InvitationRouteDeps {
   audit: AuditService;
   registry: PlatformRegistry;
   logger: Logger;
-  /** The product's name in the invitation mail (`identity.displayName`). */
-  productName: string;
+  /** The product's name and footer line in the invitation mail (`identity.displayName`, `copy.mail.tagline`). */
+  mailBrand: MailBrand;
+  /** The invitation's two phrases that are the tool's own (`copy.mail.invitePitch`, `copy.mail.invitePreheader`). */
+  inviteMail: { pitch: string; preheader: string };
   /**
    * Cloud edition only (P7, internal/federation.md): when set, invitation
    * MUTATIONS targeting a hub-origin workspace answer 403 `hub_managed`
@@ -164,7 +167,9 @@ export function registerInvitationRoutes(api: OpenAPIHono, deps: InvitationRoute
         .limit(1);
       try {
         const msg = buildInviteEmail({
-          productName: deps.productName,
+          brand: deps.mailBrand,
+          pitch: deps.inviteMail.pitch,
+          preheader: deps.inviteMail.preheader,
           inviteeEmail: created.invitation.email,
           inviterName: principal.name,
           workspaceName: ws?.name ?? 'the workspace',

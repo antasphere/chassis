@@ -11,7 +11,7 @@ import { buildPepperRegistry } from './apikeys/index.js';
 import { ApiKeyService } from './apikeys/index.js';
 import { createApp } from './app.js';
 import { AuditService } from './audit/index.js';
-import { createEmailDriver } from './email/index.js';
+import { createEmailDriver, emailAssetsAt, setEmailAssets } from './email/index.js';
 import {
   buildChangeEmailConfirmEmail,
   buildOtpEmail,
@@ -264,6 +264,8 @@ export async function bootPlatform<
   // Email first: whether it delivers decides whether email-OTP login,
   // self-serve password reset, and self-serve email change exist.
   const email = overrides.email ?? createEmailDriver(env, logger);
+  // the mails' band and mark are served from the dashboard's static folder
+  setEmailAssets(emailAssetsAt(env.PUBLIC_BASE_URL));
 
   // Audit is built before auth so credential events on Better-Auth-native
   // routes (password reset/change) can be recorded through it.
@@ -340,8 +342,8 @@ export async function bootPlatform<
   const untrustedOrigins = tool.api.untrustedOrigins?.(env) ?? [];
 
   // Identity + seams: local defaults, swappable at this one point.
-  // The product's name in the four mails Better Auth sends (the fifth, the invitation, is api/invitations.ts).
-  const productName = tool.identity.displayName;
+  // The product's name and footer line in the four mails Better Auth sends (the fifth, the invitation, is api/invitations.ts).
+  const brand = { name: tool.identity.displayName, tagline: tool.copy.mail.tagline };
   const auth = createAuth({
     db: db.db,
     env,
@@ -371,14 +373,14 @@ export async function bootPlatform<
     ...(email.delivers
       ? {
           sendOtp: async ({ email: to, otp, type }: { email: string; otp: string; type: string }) => {
-            const msg = buildOtpEmail({ productName, otp, type });
+            const msg = buildOtpEmail({ brand, otp, type });
             await email.send({ to, ...msg });
           },
           sendResetPassword: async ({ email: to, url }: { email: string; url: string; token: string }) => {
             // Better Auth builds `url` as the API callback that 302s to the
             // dashboard reset page with ?token — mail it verbatim.
             const msg = buildPasswordResetEmail({
-              productName,
+              brand,
               resetUrl: url,
               expiresAt: new Date(Date.now() + 3600_000)
             });
@@ -397,7 +399,7 @@ export async function bootPlatform<
             token: string;
           }) => {
             const msg = buildChangeEmailConfirmEmail({
-              productName,
+              brand,
               newEmail,
               confirmUrl: url,
               expiresAt: new Date(Date.now() + 3600_000)
@@ -414,7 +416,7 @@ export async function bootPlatform<
             token: string;
           }) => {
             const msg = buildVerifyEmailEmail({
-              productName,
+              brand,
               verifyUrl: url,
               expiresAt: new Date(Date.now() + 3600_000)
             });
