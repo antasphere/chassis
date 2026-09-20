@@ -10,12 +10,17 @@ import { defineScopeSchema, type ScopeSchema, type ScopeTuple } from './schemas/
  * tool's scope enum, so they are BUILT, once per tool, from the scopes the
  * tool names — no module-level state, the returned object is the contract.
  *
- *   const contract = defineChassisContract({ scopes: ['products:read', 'products:write'] });
+ *   const { read, write, dataExport } = IDENTITY.scopes; // the tool's `ToolIdentity` value
+ *   const contract = defineChassisContract({ scopes: [read, write, dataExport] });
  *   export const { scopeSchema, apiKeySchema, meResponseSchema } = contract;
  *   export type Scope = ScopeOf<typeof contract>;
  *
- * The route contracts over these schemas come from `defineChassisRoutes(contract)`
- * on the `./routes` entry (it pulls Hono; this one stays client-safe).
+ * The scopes are a TUPLE, in the order the enum publishes them: a tool with
+ * more scopes than the three parts of its identity appends them here.
+ *
+ * The route contracts over these schemas come from
+ * `defineChassisRoutes(contract, IDENTITY)` on the `./routes` entry (it pulls
+ * Hono; this one stays client-safe).
  */
 export function defineChassisContract<const TScopes extends ScopeTuple>(tool: {
   scopes: TScopes;

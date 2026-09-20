@@ -9,6 +9,7 @@ import { defineChassisContract } from '@antasphere/chassis-contract';
 import { defineChassisRoutes } from '@antasphere/chassis-contract/routes';
 import { createPlatform, type BootResult, type ToolDefinition } from '../../src/index.js';
 import { createScopeAllowlist } from '../../src/middleware/index.js';
+import { THINGS_IDENTITY } from '../host/identity.js';
 
 /**
  * The chassis boots with a MINIMAL tool: no env extension, no services, no
@@ -35,6 +36,7 @@ type NoEnv = {};
 type NoDomain = Record<string, never>;
 
 const emptyTool: ToolDefinition<NoEnv, NoDomain> = {
+  identity: THINGS_IDENTITY,
   runtime: {
     version: '0.0.0-test',
     findMigrationsDir: () => MIGRATIONS_FIXTURE,
@@ -50,7 +52,7 @@ const emptyTool: ToolDefinition<NoEnv, NoDomain> = {
       dataExport: 'things:export',
       rules: []
     }),
-    contractRoutes: defineChassisRoutes(contract)
+    contractRoutes: defineChassisRoutes(contract, THINGS_IDENTITY)
   },
   services: () => ({}),
   api: {

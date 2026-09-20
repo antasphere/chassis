@@ -5,6 +5,7 @@ import { defineChassisContract } from '@antasphere/chassis-contract';
 import { defineChassisRoutes } from '@antasphere/chassis-contract/routes';
 import type { BootOverrides, BootResult, ToolDefinition } from '@antasphere/chassis-server';
 import { createScopeAllowlist, requireAuth } from '@antasphere/chassis-server/middleware';
+import { THINGS_IDENTITY } from './identity.js';
 
 /**
  * The MINIMAL test tool: the smallest tool that fills the required slots of
@@ -21,11 +22,7 @@ import { createScopeAllowlist, requireAuth } from '@antasphere/chassis-server/mi
 const here = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_FIXTURE = join(here, '../../../db/drizzle');
 
-export const THINGS_SCOPES = {
-  read: 'things:read',
-  write: 'things:write',
-  dataExport: 'things:export'
-} as const;
+export const THINGS_SCOPES = THINGS_IDENTITY.scopes;
 type ThingsScope = (typeof THINGS_SCOPES)[keyof typeof THINGS_SCOPES];
 
 /** The probe routes, one per scope: authenticated, workspace-scoped, and empty. */
@@ -44,6 +41,7 @@ export type MinimalBootOverrides = BootOverrides;
 export type MinimalBootResult = BootResult<NoEnv, NoDomain>;
 
 export const minimalTool: ToolDefinition<NoEnv, NoDomain> = {
+  identity: THINGS_IDENTITY,
   runtime: {
     version: '0.0.0-test',
     findMigrationsDir: () => MIGRATIONS_FIXTURE,
@@ -71,7 +69,7 @@ export const minimalTool: ToolDefinition<NoEnv, NoDomain> = {
         }
       ]
     }),
-    contractRoutes: defineChassisRoutes(contract)
+    contractRoutes: defineChassisRoutes(contract, THINGS_IDENTITY)
   },
   services: () => ({}),
   api: {

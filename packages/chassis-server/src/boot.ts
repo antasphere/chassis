@@ -49,12 +49,13 @@ import { NoopUsageSink } from './platform/index.js';
 import { WorkspaceService } from './platform/index.js';
 import { clearGeneratedSetupToken, resolveAuthSecret, resolveSetupToken } from './util/index.js';
 import { createRuntimeState } from './util/index.js';
-import type {
-  BootOverrides,
-  BootResult,
-  PlatformCore,
-  ServiceCore,
-  ToolDefinition
+import {
+  assertToolIdentity,
+  type BootOverrides,
+  type BootResult,
+  type PlatformCore,
+  type ServiceCore,
+  type ToolDefinition
 } from './tool-definition.js';
 
 /**
@@ -72,6 +73,7 @@ export async function bootPlatform<
   source: NodeJS.ProcessEnv = process.env,
   overrides: BootOverrides<TToolOverrides> = {}
 ): Promise<BootResult<TEnvShape, TDomain, TEvents>> {
+  assertToolIdentity(tool.identity);
   const env = parseEnv<TEnvShape>(source, {
     version: tool.runtime.version,
     ...(tool.env ? { extension: tool.env } : {})

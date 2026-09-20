@@ -17,7 +17,7 @@ import { ChassisClient } from '../src/index.js';
  */
 
 const contract = defineChassisContract({ scopes: ['things:read', 'things:write'] });
-const scopedRoutes = chassisRoutes.defineChassisRoutes(contract);
+const scopedRoutes = chassisRoutes.defineChassisRoutes(contract, { cliKeyScopesLabel: 'things:read+write' });
 type ThingsScope = 'things:read' | 'things:write';
 type Client = ChassisClient<ThingsScope>;
 

@@ -39,7 +39,7 @@ describe('defineChassisContract', () => {
 
 describe('defineChassisRoutes', () => {
   it('returns the six route contracts over the instantiated schemas', () => {
-    const routes = defineChassisRoutes(a);
+    const routes = defineChassisRoutes(a, { cliKeyScopesLabel: 'widgets:read+write' });
     expect(Object.entries(routes).map(([name, r]) => `${name} ${r.method} ${r.path}`)).toEqual([
       'meRoute get /me',
       'apiKeysListRoute get /api-keys',

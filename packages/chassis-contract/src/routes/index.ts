@@ -1,5 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import type { ChassisContract } from '../define.js';
+import type { ToolIdentity } from '../identity.js';
 import { apiErrorSchema, cursorPageQuerySchema } from '../schemas/common.js';
 import { instanceInfoSchema } from '../schemas/instance.js';
 import { setupRequestSchema, setupResponseSchema } from '../schemas/setup.js';
@@ -405,20 +406,31 @@ export const ssoLogoutRoute = createRoute({
 
 // ── Workspace ────────────────────────────────────────────────────────────────
 
-export const workspaceExportRoute = createRoute({
-  method: 'get',
-  path: '/workspace/export',
-  tags: ['workspace'],
-  summary: 'Full workspace export as a streamed zip (admin+; keys need data:export)',
-  responses: {
-    // Deliberately NO `content` key on the 200: that is what lets the
-    // api.openapi handler legally return a plain streamed Response.
-    200: { description: 'Zip archive stream (application/zip)' },
-    401: errorResponses[401],
-    403: errorResponses[403],
-    429: errorResponses[429]
-  }
-});
+/**
+ * The export route, with the name of the scope a key needs in its summary.
+ * That name is the tool's, so the SERVER registers the contract built from
+ * the tool's identity (`defineWorkspaceExportRoute(identity.scopes.dataExport)`)
+ * and the OpenAPI document prints the tool's own scope. The static export
+ * below is the same contract with no tool named: what a client-side reader of
+ * the route list (the SDK's coverage guard) sees.
+ */
+export const defineWorkspaceExportRoute = (exportScope: string) =>
+  createRoute({
+    method: 'get',
+    path: '/workspace/export',
+    tags: ['workspace'],
+    summary: `Full workspace export as a streamed zip (admin+; keys need ${exportScope})`,
+    responses: {
+      // Deliberately NO `content` key on the 200: that is what lets the
+      // api.openapi handler legally return a plain streamed Response.
+      200: { description: 'Zip archive stream (application/zip)' },
+      401: errorResponses[401],
+      403: errorResponses[403],
+      429: errorResponses[429]
+    }
+  });
+
+export const workspaceExportRoute = defineWorkspaceExportRoute('the export scope');
 
 // ── Break-glass (superadmin recovery, ADR 010) ──────────────────────────────
 // Session-only by construction: both paths are deliberately UNLISTED in the
@@ -566,10 +578,14 @@ export const fileDeleteRoute = createRoute({
 /**
  * The route contracts that carry the TOOL's scope vocabulary: every route
  * whose request or response schema transitively holds `scopeSchema`. Built
- * from the contract `defineChassisContract({ scopes })` returned — no
+ * from the contract `defineChassisContract({ scopes })` returned and from the
+ * tool's identity (the one summary that names the CLI key's grant) — no
  * module-level state, one instantiation per tool.
  */
-export function defineChassisRoutes<TScope extends string>(contract: ChassisContract<TScope>) {
+export function defineChassisRoutes<TScope extends string>(
+  contract: ChassisContract<TScope>,
+  identity: Pick<ToolIdentity, 'cliKeyScopesLabel'>
+) {
   const {
     meResponseSchema,
     apiKeyCreatedSchema,
@@ -638,7 +654,7 @@ export function defineChassisRoutes<TScope extends string>(contract: ChassisCont
     method: 'post',
     path: '/cli/auth/complete',
     tags: ['cli-auth'],
-    summary: 'Verify a sign-in code and mint an API key (shown once, presentations:read+write)',
+    summary: `Verify a sign-in code and mint an API key (shown once, ${identity.cliKeyScopesLabel})`,
     request: { body: jsonRequestBody(cliAuthCompleteSchema, 'Email + code (+ optional key name/TTL)') },
     responses: {
       201: jsonBody(cliAuthCompletedSchema, 'Key minted; the full key appears only here'),

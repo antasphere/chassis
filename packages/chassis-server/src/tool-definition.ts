@@ -1,5 +1,5 @@
 import type { Db, DbHandle } from '@antasphere/chassis-db';
-import type { UsageSink } from '@antasphere/chassis-contract';
+import type { ToolIdentity, UsageSink } from '@antasphere/chassis-contract';
 import type { OpenAPIHono } from '@hono/zod-openapi';
 import type { Hono, MiddlewareHandler } from 'hono';
 import type { RateLimiterAbstract } from 'rate-limiter-flexible';
@@ -178,6 +178,13 @@ export interface ToolDefinition<
   TEvents = {},
   TToolOverrides = never
 > {
+  /**
+   * Slot 0: the tool's identity, the ONE value that names it (`ToolIdentity`,
+   * written in the tool's contract package). REQUIRED, and the chassis has no
+   * default for any of its fields: a tool that leaves one out fails to compile,
+   * and fails to boot (`assertToolIdentity`).
+   */
+  identity: ToolIdentity;
   /** Slot 1: facts of the APP's packaging, computed from the app's own entry file. */
   runtime: {
     /** The tool's package version: the default of APP_VERSION. */
@@ -266,4 +273,36 @@ export interface BootResult<
   email: EmailDriver;
   otel: Otel;
   authSecret: string;
+}
+
+/**
+ * The boot-time half of "identity is required": a definition that reached the
+ * chassis untyped (plain JS, a cast) with a field missing or empty stops the
+ * boot here, naming the field. Never a silent fallback name.
+ */
+export function assertToolIdentity(identity: ToolIdentity | undefined): asserts identity is ToolIdentity {
+  if (!identity) throw new Error('tool definition: the `identity` slot is required');
+  const i = identity as unknown as Record<string, Record<string, unknown> | undefined> &
+    Record<string, unknown>;
+  const fields: Array<[string, unknown]> = [
+    ['slug', i.slug],
+    ['displayName', i.displayName],
+    ['apiKeyPrefix', i.apiKeyPrefix],
+    ['scopes.read', i.scopes?.read],
+    ['scopes.write', i.scopes?.write],
+    ['scopes.dataExport', i.scopes?.dataExport],
+    ['cliKeyScopesLabel', i.cliKeyScopesLabel],
+    ['cli.bin', i.cli?.bin],
+    ['cli.envPrefix', i.cli?.envPrefix],
+    ['cli.legacyConfigDir', i.cli?.legacyConfigDir],
+    ['mcp.serverName', i.mcp?.serverName],
+    ['mcp.toolPrefix', i.mcp?.toolPrefix],
+    ['otelServiceName', i.otelServiceName],
+    ['imageName', i.imageName]
+  ];
+  for (const [name, value] of fields) {
+    if (typeof value !== 'string' || value === '') {
+      throw new Error(`tool definition: identity.${name} is required (a non-empty string)`);
+    }
+  }
 }

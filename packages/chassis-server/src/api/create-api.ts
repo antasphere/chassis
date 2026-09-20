@@ -1046,7 +1046,8 @@ export function createApiApp<
     audit,
     limiters,
     clientIp,
-    logger
+    logger,
+    exportScope: tool.identity.scopes.dataExport
   });
 
   // Instance id for usage-event sources, cached after first read.

@@ -3,7 +3,8 @@
 //
 // The generic half of the platform contract. Everything is a static export
 // EXCEPT what carries the tool's scope vocabulary: that comes out of
-// `defineChassisContract({ scopes })`, instantiated once by the tool.
+// `defineChassisContract({ scopes })`, instantiated once by the tool from its
+// identity (`ToolIdentity`, ./identity.ts: the type only, the value is the tool's).
 export * from './schemas/common.js';
 export * from './schemas/scope.js';
 export * from './schemas/instance.js';
@@ -29,3 +30,4 @@ export * from './schemas/break-glass.js';
 export * from './schemas/files.js';
 export * from './seams.js';
 export * from './define.js';
+export type { ToolIdentity } from './identity.js';

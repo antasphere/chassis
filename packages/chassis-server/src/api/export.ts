@@ -3,7 +3,7 @@ import { Readable } from 'node:stream';
 import { finished } from 'node:stream/promises';
 import { and, asc, eq, gt, isNull, sql } from 'drizzle-orm';
 import { ZipFile } from 'yazl';
-import { workspaceExportRoute } from '@antasphere/chassis-contract/routes';
+import { defineWorkspaceExportRoute } from '@antasphere/chassis-contract/routes';
 import {
   apiKeys,
   auditLog,
@@ -40,6 +40,8 @@ export interface ExportRouteDeps {
   limiters: RateLimiters;
   clientIp: ClientIpFn;
   logger: Logger;
+  /** The tool's export scope, as the route's OpenAPI summary names it (`identity.scopes.dataExport`). */
+  exportScope: string;
 }
 
 /**
@@ -99,7 +101,7 @@ export function registerExportRoutes(api: OpenAPIHono, deps: ExportRouteDeps): v
   api.use('/workspace/export', requireNonGuest());
   api.use('/workspace/export', requireRole('admin'));
 
-  api.openapi(workspaceExportRoute, async (c) => {
+  api.openapi(defineWorkspaceExportRoute(deps.exportScope), async (c) => {
     const principal = c.get('principal')!;
     const workspaceId = principal.workspaceId;
 
