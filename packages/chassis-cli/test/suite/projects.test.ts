@@ -442,6 +442,14 @@ describe(`${bin} projects`, () => {
     });
   }
 
+  it('insufficient_project_role names the role the wire names: a tool route may gate on editor', async () => {
+    const h = harness([
+      refusal(403, 'insufficient_project_role', 'This needs the editor role on the project')
+    ]);
+    expect(await run(['projects', 'update', 'p-1', '--name', 'x', ...WIRED], h.io)).toBe(1);
+    expect(h.err()).toContain('You need the editor role on this project to do that.');
+  });
+
   it('member_not_found on a member route names the PROJECT, not the workspace', async () => {
     const h = harness([refusal(404, 'member_not_found')]);
     expect(await run(['projects', 'members', 'remove', 'p-1', 'u9', ...WIRED], h.io)).toBe(1);

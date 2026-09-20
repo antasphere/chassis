@@ -88,8 +88,13 @@ export function explainProjectRefusal(e: PlatformApiError, what: ProjectLookup):
   switch (e.code) {
     case 'not_found':
       return 'No such project, or it is not yours to read. (A project you are not a member of answers the same way: its existence is not probeable.)';
-    case 'insufficient_project_role':
-      return 'You need the manager role on this project to do that.';
+    case 'insufficient_project_role': {
+      // The chassis routes all gate on `manager`; a tool's route may gate on
+      // `editor` (linking a resource). The wire sentence names the role, so
+      // read it from there rather than assume.
+      const role = /needs the (\w+) role/.exec(e.message)?.[1] ?? 'manager';
+      return `You need the ${role} role on this project to do that.`;
+    }
     case 'guest_forbidden':
       return 'You are a guest of this workspace, and guests do not take part in projects.';
     case 'project_archived':
