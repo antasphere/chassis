@@ -6,6 +6,7 @@ import type { Cli, CliDefinition, CliKit, RegisterTool } from './kit.js';
 import { readSecretFromStdin } from './stdin.js';
 import { registerAuthCommands } from './commands/auth.js';
 import { registerWorkspaceCommands } from './commands/workspaces.js';
+import { registerProjectCommands } from './commands/projects.js';
 import { registerFileCommands } from './commands/files.js';
 import { registerCompletionCommand } from './commands/completion.js';
 
@@ -43,6 +44,8 @@ export function createProgram<TClient extends ChassisClient<string>>(
     registerAuthCommands(kit, program, io);
     // Which workspace the commands run in: workspaces, workspace use.
     registerWorkspaceCommands(kit, program, io);
+    // The subgroups of the workspace: projects *, projects members *.
+    registerProjectCommands(kit, program, io);
     // The tool's own groups, where they have always sat in `--help`.
     registerTool(program, io);
     // Platform substrate (template heritage): instance, export, files *.
