@@ -176,6 +176,12 @@ describe(`${bin} projects`, () => {
 
   // ── create ─────────────────────────────────────────────────────────────────
 
+  it('create --json prints the project payload byte-exactly', async () => {
+    const h = harness([{ status: 201, body: RAW_PROJECT }]);
+    expect(await run(['projects', 'create', 'Atlas', '--json', ...WIRED], h.io)).toBe(0);
+    expect(h.out()).toBe(`${JSON.stringify(RAW_PROJECT, null, 2)}\n`);
+  });
+
   it('create → POST /api/v1/projects with the name', async () => {
     const h = harness([{ status: 201, body: PROJECT }]);
     expect(await run(['projects', 'create', 'Atlas', ...WIRED], h.io)).toBe(0);
@@ -264,6 +270,12 @@ describe(`${bin} projects`, () => {
     expect(await run(['projects', 'archive', 'p-2', ...WIRED], h.io)).toBe(0);
     expect(h.calls).toEqual([{ method: 'POST', path: '/api/v1/projects/p-2/archive', body: undefined }]);
     expect(h.out()).toContain('Archived "Borealis"');
+  });
+
+  it('unarchive --json prints the project payload byte-exactly', async () => {
+    const h = harness([{ body: RAW_PROJECT }]);
+    expect(await run(['projects', 'unarchive', 'p-1', '--json', ...WIRED], h.io)).toBe(0);
+    expect(h.out()).toBe(`${JSON.stringify(RAW_PROJECT, null, 2)}\n`);
   });
 
   it('unarchive → POST /api/v1/projects/:id/unarchive', async () => {
@@ -356,6 +368,14 @@ describe(`${bin} projects`, () => {
     );
     expect(code).toBe(0);
     expect(h.out()).toBe(`${JSON.stringify(RAW_MEMBER, null, 2)}\n`);
+  });
+
+  it('members role --json prints the member payload byte-exactly', async () => {
+    const h = harness([{ body: { ...RAW_MEMBER, role: 'manager' } }]);
+    expect(await run(['projects', 'members', 'role', 'p-1', 'u2', 'manager', '--json', ...WIRED], h.io)).toBe(
+      0
+    );
+    expect(h.out()).toBe(`${JSON.stringify({ ...RAW_MEMBER, role: 'manager' }, null, 2)}\n`);
   });
 
   it('members role → PATCH /api/v1/projects/:id/members/:userId', async () => {

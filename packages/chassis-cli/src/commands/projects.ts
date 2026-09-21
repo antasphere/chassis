@@ -80,6 +80,15 @@ export function memberRef(value: string): { email: string } | { userId: string }
 export type ProjectLookup = 'project' | 'workspace-member' | 'project-member';
 
 /**
+ * The role an `insufficient_project_role` answer names (`This needs the
+ * editor role on the project`), or null when the wire says none: the one
+ * place the sentence is parsed, for the chassis verbs and a tool's own.
+ */
+export function roleNamedBy(e: PlatformApiError): string | null {
+  return /needs the (\w+) role/.exec(e.message)?.[1] ?? null;
+}
+
+/**
  * The server's project refusals as sentences. Returns the line, or null when
  * the error is not one of them (the runner's generic handling is then the
  * honest answer).
@@ -88,13 +97,10 @@ export function explainProjectRefusal(e: PlatformApiError, what: ProjectLookup):
   switch (e.code) {
     case 'not_found':
       return 'No such project, or it is not yours to read. (A project you are not a member of answers the same way: its existence is not probeable.)';
-    case 'insufficient_project_role': {
+    case 'insufficient_project_role':
       // The chassis routes all gate on `manager`; a tool's route may gate on
-      // `editor` (linking a resource). The wire sentence names the role, so
-      // read it from there rather than assume.
-      const role = /needs the (\w+) role/.exec(e.message)?.[1] ?? 'manager';
-      return `You need the ${role} role on this project to do that.`;
-    }
+      // `editor` (linking a resource). The wire sentence names the role.
+      return `You need the ${roleNamedBy(e) ?? 'manager'} role on this project to do that.`;
     case 'guest_forbidden':
       return 'You are a guest of this workspace, and guests do not take part in projects.';
     case 'project_archived':
