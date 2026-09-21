@@ -52,13 +52,28 @@ describe('mcpInputs, the shared MCP inputs', () => {
     expect(mcpInputs({ toolPrefix: 'other_' }).workspaceInput.description).toContain('see other_whoami.');
   });
 
-  it('are the inputs the three chassis tools are listed with', async () => {
+  it('are the inputs every chassis tool is listed with, projects included', async () => {
     const tools = await listedTools();
-    expect(tools.map((t) => t.name)).toEqual(['get_me', 'list_files', 'things_whoami']);
+    // The order `tools/list` keeps: the two examples, whoami, then the nine
+    // project tools the chassis registers before a tool's own set.
+    expect(tools.map((t) => t.name)).toEqual([
+      'get_me',
+      'list_files',
+      'things_whoami',
+      'things_list_projects',
+      'things_get_project',
+      'things_list_project_members',
+      'things_create_project',
+      'things_update_project',
+      'things_archive_project',
+      'things_add_project_member',
+      'things_set_project_member_role',
+      'things_remove_project_member'
+    ]);
     const props = (name: string) =>
       tools.find((t) => t.name === name)!.inputSchema.properties as Record<string, Record<string, unknown>>;
 
-    for (const name of ['get_me', 'list_files', 'things_whoami']) {
+    for (const name of tools.map((t) => t.name)) {
       expect(props(name).workspace).toEqual(listed(inputs.workspaceInput));
       expect(props(name).workspace!.description).toBe(inputs.workspaceInput.description);
     }
@@ -67,6 +82,12 @@ describe('mcpInputs, the shared MCP inputs', () => {
     expect(props('list_files').cursor!.description).toBe(inputs.cursorInput.description);
     expect(props('list_files').limit!.description).toBe(inputs.limitInput.description);
     expect(Object.keys(props('list_files')).sort()).toEqual(['cursor', 'limit', 'workspace']);
+
+    // The paginated project lists take the same two, from the same factory.
+    for (const name of ['things_list_projects', 'things_list_project_members']) {
+      expect(props(name).cursor).toEqual(listed(inputs.cursorInput));
+      expect(props(name).limit).toEqual(listed(inputs.limitInput));
+    }
   });
 
   it('validate as the API expects: a uuid, a string, an integer from 1 to 100, all optional', () => {

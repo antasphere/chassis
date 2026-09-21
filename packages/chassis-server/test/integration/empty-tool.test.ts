@@ -161,7 +161,9 @@ describe('the chassis with an empty tool', () => {
     expect(foreign.status).toBe(400);
 
     // /mcp lists exactly the generic tools: the chassis registers `<toolPrefix>whoami`
-    // itself, third, so the name its other tools point at exists for every tool.
+    // itself, third, so the name its other tools point at exists for every tool,
+    // then the nine project tools (projects are a chassis concept, so a tool
+    // that declares none of its own still serves them).
     const rpc = (body: unknown) =>
       booted.app.request('/mcp', {
         method: 'POST',
@@ -175,7 +177,20 @@ describe('the chassis with an empty tool', () => {
     const mcp = await rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
     expect(mcp.status).toBe(200);
     const listed = (await mcp.json()) as { result: { tools: Array<{ name: string }> } };
-    expect(listed.result.tools.map((t) => t.name)).toEqual(['get_me', 'list_files', 'things_whoami']);
+    expect(listed.result.tools.map((t) => t.name)).toEqual([
+      'get_me',
+      'list_files',
+      'things_whoami',
+      'things_list_projects',
+      'things_get_project',
+      'things_list_project_members',
+      'things_create_project',
+      'things_update_project',
+      'things_archive_project',
+      'things_add_project_member',
+      'things_set_project_member_role',
+      'things_remove_project_member'
+    ]);
 
     // …and it answers `/me`, as the key it was called with.
     const called = await rpc({

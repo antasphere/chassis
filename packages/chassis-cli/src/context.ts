@@ -28,6 +28,21 @@ import {
 export { CliUsageError } from '@antasphere/cli-core';
 
 /**
+ * A refusal of the API that a command turned into a sentence (the project
+ * verbs do), thrown as the usage error it reads as, with the wire status
+ * kept: the runner adds what only it knows, the workspace a 404 was asked of.
+ */
+export class CliApiRefusal extends CliUsageError {
+  constructor(
+    message: string,
+    public readonly status: number
+  ) {
+    super(message);
+    this.name = 'CliApiRefusal';
+  }
+}
+
+/**
  * The tool's I/O seam: cli-core's, plus an injectable stdin reader so the
  * `--*-stdin` secret flags (stdin.ts) stay testable in-process. The bin
  * leaves it unset and the default reads `process.stdin`.
@@ -393,6 +408,27 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
     explainWorkspaceRefusal,
     workspaceNotFoundHint
   };
+}
+
+/**
+ * `--all` for a cursor-paginated list: the first page, then every next page
+ * while the server hands a cursor, the rows in order. The one loop behind
+ * every `--all`; a server that repeats a cursor is stopped here, once.
+ */
+export async function drainPages<T>(
+  first: { rows: T[]; nextCursor: string | null },
+  fetchPage: (cursor: string) => Promise<{ rows: T[]; nextCursor: string | null }>
+): Promise<T[]> {
+  const rows = [...first.rows];
+  const seen = new Set<string>();
+  let cursor = first.nextCursor;
+  while (cursor && !seen.has(cursor)) {
+    seen.add(cursor);
+    const page = await fetchPage(cursor);
+    rows.push(...page.rows);
+    cursor = page.nextCursor;
+  }
+  return rows;
 }
 
 /** Human-readable size (B / KB / MB) for the listing commands. */
