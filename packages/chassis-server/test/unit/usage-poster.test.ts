@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { UsageEvent } from '@antasphere/chassis-contract';
 import { HubMachineToken, HubUsagePoster } from '@antasphere/chassis-server';
-import { DEFAULT_FAILURE_HOLD_MS } from '../../src/entitlements/index.js';
+import { DEFAULT_FAILURE_HOLD_MS, DEFAULT_INVALID_CLIENT_HOLD_MS } from '../../src/entitlements/index.js';
 import { DEFAULT_USAGE_RETRY, PgBossUsageSink } from '../../src/jobs/index.js';
 import type { Logger } from '@antasphere/chassis-server/logger';
 
@@ -10,7 +10,10 @@ import type { Logger } from '@antasphere/chassis-server/logger';
  * rail spec, §6): the machine token is minted once and shared, a dead token
  * is minted again exactly once, an outage (404, 5xx, network, 403) fails the
  * batch back to the queue, a malformed batch (400) and a rejected event are
- * dropped with an error log, and the hub's per-event answer is read.
+ * dropped with an error log, a 2xx that is not the hub's answer is an outage
+ * (PRDCT-2629), every outcome is counted (PRDCT-2635), the hub's per-event
+ * answer is read, and a configuration-error mint is held minutes, a
+ * transient one seconds (PRDCT-2637).
  */
 
 const logs: Array<{ level: string; msg: string; ctx?: unknown }> = [];
@@ -35,7 +38,6 @@ function event(id: string): UsageEvent {
     accountRef: 'acct-1',
     userId: 'user-1',
     via: 'api_key',
-    toolSlug: 'things',
     source: { instanceId: 'inst', edition: 'cloud', version: 'test' }
   };
 }
@@ -78,6 +80,15 @@ function hub(script: Script) {
 }
 
 const accepted = (ids: string[]) => Response.json({ results: ids.map((id) => ({ id, status: 'accepted' })) });
+
+/** A prom-client counter's values by its `outcome` label, zero rows omitted. */
+async function counts(counter: {
+  get(): Promise<{ values: Array<{ labels: Record<string, unknown>; value: number }> }>;
+}) {
+  const out: Record<string, number> = {};
+  for (const v of (await counter.get()).values) if (v.value > 0) out[String(v.labels.outcome)] = v.value;
+  return out;
+}
 
 describe('HubUsagePoster', () => {
   it('posts the batch whole with the machine token, and two batches share one mint', async () => {
@@ -159,12 +170,41 @@ describe('HubUsagePoster', () => {
         rejected: 2
       })
     );
-    await expect(h.poster.emitBatch([event('a'), event('b')])).resolves.toBeUndefined();
+    await expect(h.poster.emitBatch([event('a'), event('b'), event('c')])).resolves.toBeUndefined();
     const rejected = logs.filter((l) => l.level === 'error' && /rejected/.test(l.msg));
     expect(rejected.map((l) => l.ctx)).toEqual([
       expect.objectContaining({ id: 'b', reason: 'unknown_account' }),
       expect.objectContaining({ id: null, reason: 'invalid_event' })
     ]);
+    // Every outcome is counted where an operator can see it (PRDCT-2635).
+    expect(await counts(h.poster.events)).toEqual({ duplicate: 1, rejected: 2 });
+    expect(await counts(h.poster.batches)).toEqual({ delivered: 1 });
+  });
+
+  it('a 2xx that is not the hub’s answer is an outage the queue retries, never a delivery (PRDCT-2629)', async () => {
+    logs.length = 0;
+    const h = hub(() => new Response('<html>a proxy page</html>', { status: 200 }));
+    await expect(h.poster.emitBatch([event('a')])).rejects.toThrow(/readable results/);
+    expect(logs.some((l) => l.level === 'warn' && /retried/.test(l.msg))).toBe(true);
+    expect(await counts(h.poster.batches)).toEqual({ retried: 1 });
+    expect(await counts(h.poster.events)).toEqual({});
+  });
+
+  it('a hub answer with fewer results than events posted is an outage too, never a partial delivery', async () => {
+    const h = hub(() => accepted(['a']));
+    await expect(h.poster.emitBatch([event('a'), event('b')])).rejects.toThrow(/different number/);
+    expect(await counts(h.poster.batches)).toEqual({ retried: 1 });
+    expect(await counts(h.poster.events)).toEqual({});
+  });
+
+  it('counts a dropped batch per event and a retried outage per batch', async () => {
+    const dropped = hub(() => Response.json({ error: { code: 'validation_error' } }, { status: 400 }));
+    await dropped.poster.emitBatch([event('a'), event('b'), event('c')]);
+    expect(await counts(dropped.poster.events)).toEqual({ dropped: 3 });
+    expect(await counts(dropped.poster.batches)).toEqual({ dropped: 1 });
+    const outage = hub(() => Response.json({ error: { code: 'internal' } }, { status: 503 }));
+    await expect(outage.poster.emitBatch([event('a')])).rejects.toThrow(/503/);
+    expect(await counts(outage.poster.batches)).toEqual({ retried: 1 });
   });
 
   it.each(['invalid_client', 'unauthorized_client', 'invalid_scope', 'invalid_target'])(
@@ -257,6 +297,53 @@ describe('HubMachineToken', () => {
   });
 });
 
+describe('HubMachineToken, the two holds (PRDCT-2637)', () => {
+  it('a mint the hub refuses as a configuration error is held five minutes, a transient failure five seconds', async () => {
+    let now = 1_000_000;
+    let attempts = 0;
+    let mode: 'invalid_client' | 'down' | 'ok' = 'invalid_client';
+    const fetchImpl = (async () => {
+      attempts += 1;
+      if (mode === 'down') throw new TypeError('fetch failed');
+      if (mode === 'invalid_client') return Response.json({ error: 'invalid_client' }, { status: 401 });
+      return Response.json({ access_token: `mach_${attempts}`, expires_in: 900 });
+    }) as unknown as typeof fetch;
+    const token = new HubMachineToken({
+      issuerUrl: ISSUER,
+      clientId: 'tool-things',
+      clientSecret: 's'.repeat(20),
+      resource: `${ISSUER}/mcp`,
+      logger,
+      fetchImpl,
+      now: () => now
+    });
+    expect(DEFAULT_INVALID_CLIENT_HOLD_MS).toBe(5 * 60_000);
+    await expect(token.get()).rejects.toThrow(/invalid_client/);
+    now += DEFAULT_FAILURE_HOLD_MS + 1; // past the transient hold: still held
+    await expect(token.get()).rejects.toThrow(/invalid_client/);
+    expect(attempts).toBe(1);
+    now += DEFAULT_INVALID_CLIENT_HOLD_MS; // past the configuration hold: asked again
+    await expect(token.get()).rejects.toThrow(/invalid_client/);
+    expect(attempts).toBe(2);
+    // A transient failure keeps its short hold.
+    mode = 'down';
+    now += DEFAULT_INVALID_CLIENT_HOLD_MS + 1;
+    await expect(token.get()).rejects.toThrow(/unreachable/);
+    expect(attempts).toBe(3);
+    now += DEFAULT_FAILURE_HOLD_MS + 1;
+    await expect(token.get()).rejects.toThrow(/unreachable/);
+    expect(attempts).toBe(4);
+    // invalidate() (a 401 from the hub on a live token) clears either hold.
+    mode = 'invalid_client';
+    now += DEFAULT_FAILURE_HOLD_MS + 1;
+    await expect(token.get()).rejects.toThrow(/invalid_client/);
+    token.invalidate();
+    mode = 'ok';
+    const minted = attempts + 1;
+    expect(await token.get()).toBe(`mach_${minted}`);
+  });
+});
+
 describe('HubMachineToken, the default hold and the skew window', () => {
   it('a token built with no dials holds a failed mint five seconds (the outage posture rests on the default)', async () => {
     let now = 1_000_000;
@@ -331,17 +418,24 @@ describe('PgBossUsageSink', () => {
     const sink = new PgBossUsageSink(boss as never, logger);
     const e = event('01JZZZZZZZZZZZZZZZZZZZZZZ9');
     await sink.emit(e);
-    expect(DEFAULT_USAGE_RETRY).toEqual({ limit: 10, delaySeconds: 30 });
+    expect(DEFAULT_USAGE_RETRY).toEqual({ limit: 10, delaySeconds: 30, heldDelaySeconds: 3600 });
     expect(sends).toEqual([
       {
         queue: 'usage-events',
         data: e,
+        // The budget's end is a hold (the QUEUE's dead letter, set at install,
+        // never named on a send), never a drop (PRDCT-2635).
         options: { singletonKey: e.id, retryLimit: 10, retryDelay: 30, retryBackoff: true }
       }
     ]);
     // A shrunk budget (a test seam) is passed through as given.
-    const fast = new PgBossUsageSink(boss as never, logger, { limit: 2, delaySeconds: 1 });
+    const fast = new PgBossUsageSink(boss as never, logger, {
+      limit: 2,
+      delaySeconds: 1,
+      heldDelaySeconds: 1
+    });
     await fast.emit(e);
     expect(sends[1]!.options).toMatchObject({ retryLimit: 2, retryDelay: 1 });
+    expect(sends[1]!.options).not.toHaveProperty('deadLetter');
   });
 });

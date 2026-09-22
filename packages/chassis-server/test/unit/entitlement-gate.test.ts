@@ -95,6 +95,8 @@ function fixture(opts: {
   decision?: EntitlementDecision;
   hubProfile?: unknown;
   handler?: (c: Context) => Response | Promise<Response>;
+  /** A size refusal the cap deferred to the gate (PRDCT-2632), parked on every request. */
+  deferredRefusal?: boolean;
 }): Fixture {
   const app = new OpenAPIHono();
   const emitted: UsageEvent[] = [];
@@ -102,13 +104,24 @@ function fixture(opts: {
   const hub = { profile: opts.hubProfile ?? { plan: 'free' }, reads: 0 };
   app.use('*', async (c, next) => {
     c.set('principal', opts.principal);
+    if (opts.deferredRefusal) {
+      c.set('bodyRefusal', () => c.json({ error: { code: 'file_too_large', message: 'the cap' } }, 413));
+    }
     await next();
   });
   const fetchImpl = (async (input: string | URL | Request) => {
     if (String(input).includes('/oauth2/token'))
       return Response.json({ access_token: 'mach', expires_in: 900 });
     hub.reads += 1;
-    return Response.json(hub.profile);
+    // The hub's whole answer shape (mirrored verbatim in the contract): the
+    // test's `hubProfile` overrides its fields.
+    return Response.json({
+      accountRef: '77777777-aaaa-4bbb-8ccc-000000000001',
+      planUntil: null,
+      limits: {},
+      features: [],
+      ...(hub.profile as object)
+    });
   }) as typeof fetch;
   const token = new HubMachineToken({
     issuerUrl: 'https://hub.test',
@@ -138,7 +151,6 @@ function fixture(opts: {
     usage: { emit: async (e) => void emitted.push(e) },
     cloud,
     source: async () => ({ instanceId: 'inst', edition: opts.cloud ? 'cloud' : 'oss', version: 'test' }),
-    toolSlug: 'things',
     logger
   });
   const handler =
@@ -203,9 +215,10 @@ describe('the gate on cloud, a hub-projected workspace', () => {
       via: 'api_key',
       resourceType: 'thing',
       resourceId: 'thing-9',
-      toolSlug: 'things',
       source: { instanceId: 'inst', edition: 'cloud', version: 'test' }
     });
+    // The body never names the tool: the hub takes it from the token (PRDCT-2629).
+    expect(f.emitted[0]).not.toHaveProperty('toolSlug');
     expect(f.emitted[0]!.id).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
     // The check saw the DECLARED size, the emit the stored one.
     expect(f.checks).toEqual([{ key: 'files.upload', quantity: 40, unit: 'bytes' }]);
@@ -351,11 +364,60 @@ describe('the gate on cloud, a hub-projected workspace', () => {
     expect(f.emitted[1]).toMatchObject({ userId: null, workspaceId: 'ws-1', accountRef: 'acct-1' });
   });
 
+  it('a deferred size refusal fires AFTER the plan check on a metered account: over the plan is 403 with the upgrade link, within the plan is the cap’s 413, and nothing is checked or emitted', async () => {
+    // Over the free cap (50): the plan refusal, not the cap's.
+    const free = fixture({ cloud: true, principal: principal(), deferredRefusal: true });
+    const over = await free.app.request('/files', {
+      method: 'POST',
+      headers: { 'content-length': '60' },
+      body: 'x'.repeat(60)
+    });
+    expect(over.status).toBe(403);
+    expect((await errorOf(over)).error.details).toMatchObject({ key: 'files.maxBytes', requiredPlan: 'pro' });
+    // The plan allows it (pro, 500): the instance's hard ceiling answers.
+    const pro = fixture({
+      cloud: true,
+      principal: principal(),
+      hubProfile: { plan: 'pro' },
+      deferredRefusal: true
+    });
+    const capped = await pro.app.request('/files', {
+      method: 'POST',
+      headers: { 'content-length': '400' },
+      body: 'x'.repeat(400)
+    });
+    expect(capped.status).toBe(413);
+    expect((await errorOf(capped)).error.code).toBe('file_too_large');
+    expect(pro.checks).toEqual([]);
+    await tick();
+    expect(pro.emitted).toEqual([]);
+  });
+
   it('an OAuth bearer reports via oauth', async () => {
     const f = fixture({ cloud: true, principal: principal({ via: 'oauth' }) });
     await f.app.request('/things', { method: 'POST' });
     await tick();
     expect(f.emitted[0]).toMatchObject({ via: 'oauth' });
+  });
+
+  it('a deferred size refusal fires before anything else when no plan applies: no principal, or a cloud-local workspace', async () => {
+    const anonymous = fixture({ cloud: true, principal: null, deferredRefusal: true });
+    const res = await anonymous.app.request('/files', {
+      method: 'POST',
+      headers: { 'content-length': '9' },
+      body: 'x'.repeat(9)
+    });
+    expect(res.status).toBe(413);
+    expect((await errorOf(res)).error.code).toBe('file_too_large');
+    const local = fixture({ cloud: true, principal: localPrincipal(), deferredRefusal: true });
+    const localRes = await local.app.request('/files', {
+      method: 'POST',
+      headers: { 'content-length': '9' },
+      body: 'x'.repeat(9)
+    });
+    expect(localRes.status).toBe(413);
+    expect(local.checks).toEqual([]);
+    expect(local.hub.reads).toBe(0);
   });
 
   it('a request with no principal is left to the route’s own auth', async () => {

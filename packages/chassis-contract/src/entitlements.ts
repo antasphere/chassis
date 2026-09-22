@@ -34,28 +34,43 @@ export const BILLING_PLANS = ENTITLEMENT_TIERS;
 export const USAGE_WRITE_SCOPE = 'usage:write';
 
 /**
- * The wire shape of one usage event as the hub ingests it (the hub's
- * `usageEventSchema`, PRDCT-2625): `userId` is the HUB user (the SSO `sub`),
- * never the tool's local id, and null when the actor is a resource owner
- * the tool could not name; `accountRef` is the hub organization id the
- * tool carries as its workspace's central account id.
+ * The wire shape of one usage event as the hub ingests it: the hub's
+ * `usageEventSchema` (`packages/contract/src/schemas/billing.ts` of the hub,
+ * PRDCT-2625) MIRRORED VERBATIM, so the fake hub of the test kit refuses
+ * exactly what the real hub refuses (PRDCT-2629). `userId` is the HUB user
+ * (the SSO `sub`), never the tool's local id, and null when the actor is a
+ * resource owner the tool could not name; `accountRef` is the hub
+ * organization id (a uuid) the tool carries as its workspace's central
+ * account id. `toolSlug` is accepted by the hub only when it equals the
+ * calling token's registry slug — the chassis NEVER sends it: the token is
+ * the only authority on the tool's name, the body never names the tool
+ * (PRDCT-2629; `UsageEvent` in seams.ts has no such field).
  */
-export const usageEventSchema = z.object({
-  id: z.string().regex(/^[0-9A-HJKMNP-TV-Z]{26}$/, 'a ULID'),
-  meter: z.string().min(1),
-  actionKey: z.string().min(1),
-  quantity: z.number().int().min(0),
-  unit: z.string().min(1),
-  occurredAt: z.string().datetime({ offset: true }),
-  workspaceId: z.string().min(1),
-  accountRef: z.string().min(1),
-  userId: z.string().min(1).nullable(),
-  via: z.enum(['session', 'api_key', 'oauth']),
-  resourceType: z.string().optional(),
-  resourceId: z.string().optional(),
-  toolSlug: z.string().min(1),
-  source: z.object({ instanceId: z.string(), edition: z.string(), version: z.string() })
-});
+export const usageEventSchema = z
+  .object({
+    id: z.string().regex(/^[0-9A-HJKMNP-TV-Z]{26}$/, 'a ULID'),
+    actionKey: z.string().min(1).max(120).optional(),
+    meter: z.string().min(1).max(120).optional(),
+    quantity: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    unit: z.string().min(1).max(40),
+    occurredAt: z.iso.datetime({ offset: true }),
+    workspaceId: z.string().min(1).max(128),
+    accountRef: z.uuid(),
+    userId: z.string().min(1).max(128).nullable().optional(),
+    via: z.enum(['session', 'api_key', 'oauth']),
+    resourceType: z.string().min(1).max(80).nullable().optional(),
+    resourceId: z.string().min(1).max(256).nullable().optional(),
+    toolSlug: z.string().min(1).max(64).optional(),
+    source: z.object({
+      instanceId: z.string().min(1).max(128),
+      edition: z.string().min(1).max(32),
+      version: z.string().min(1).max(64)
+    })
+  })
+  .refine((e) => e.actionKey !== undefined || e.meter !== undefined, {
+    message: 'actionKey (or its legacy alias meter) is required',
+    path: ['actionKey']
+  });
 
 /** The hub's answer to `POST /usage/events`: one result per element, in the batch's order. */
 export const usageIngestResultSchema = z.object({
@@ -187,14 +202,39 @@ export function auditedSizeBytes(ctx: EntitlementRequest): number {
 
 // ── The tool's declared defaults, as `GET /instance` shows them ────────────
 
-/** A priced action: the default the hub seeds its price book from (§7); the hub's rows win afterwards. */
+/**
+ * A priced action: the default the hub seeds its price book from (§7); the
+ * hub's rows win afterwards. `creditsPerUnit` credits buy `per` units of
+ * `unit` (`per` defaults to 1): an action metered in bytes and priced per
+ * mebibyte declares `{ creditsPerUnit: 5, unit: 'bytes', per: 1048576 }`,
+ * so the meter stays exact, the price reads as the seed table says it, and
+ * the two agree by construction (PRDCT-2627: the boot refuses a route whose
+ * meter unit differs from its action's). The hub prices an event as
+ * `creditsPerUnit × quantity / per`; rounding a fraction of a credit is the
+ * hub's rule, not the tool's.
+ */
 export const entitlementActionSchema = z.object({
   key: z.string().min(1),
   creditsPerUnit: z.number().int().min(0),
   unit: z.string().min(1),
+  /** How many units one `creditsPerUnit` buys; 1 when absent. */
+  per: z.number().int().min(1).optional(),
   label: z.string().min(1)
 });
 export type EntitlementAction = z.infer<typeof entitlementActionSchema>;
+
+/**
+ * The credits an action declares for a quantity: `creditsPerUnit × quantity
+ * / per`, exact (a fraction is the hub's to round). A test pins the seed
+ * values with it, so a unit slip (5 per byte where 5 per MB was meant)
+ * fails before the price book is seeded from discovery.
+ */
+export function declaredCredits(
+  action: Pick<EntitlementAction, 'creditsPerUnit' | 'per'>,
+  quantity: number
+): number {
+  return (action.creditsPerUnit * quantity) / (action.per ?? 1);
+}
 
 /** A limit's value per tier plus the oss value (the operator's own knob); null = unlimited. */
 export const tierLimitSchema = z.object({
@@ -219,17 +259,21 @@ export const toolEntitlementsSchema = z.object({
 export type ToolEntitlements = z.infer<typeof toolEntitlementsSchema>;
 
 /**
- * The hub's answer to `GET /usage/entitlements?accountRef=` (§5): the
- * account's plan, resolved from the tier's defaults and the account's
- * overrides. `limits` and `features` are optional: a hub that only knows
- * the plan (phase 1) answers the plan alone and the tool's own declared
- * values fill the numbers.
+ * The hub's answer to `GET /usage/entitlements?accountRef=` (§5): the hub's
+ * `usageEntitlementsSchema` MIRRORED VERBATIM (PRDCT-2636). The account's
+ * plan, resolved from the tier's defaults and the account's overrides; in
+ * phase 1 `limits` and `features` are empty and the tool's own declared
+ * values fill the numbers. A limit's value is a number or a boolean: the
+ * hub may switch a numeric limit off or on per account (`true` = unlimited,
+ * `false` = nothing allowed; `profiles.ts` resolves it so).
  */
 export const entitlementProfileSchema = z.object({
+  accountRef: z.uuid(),
   plan: entitlementTierSchema,
-  planUntil: z.string().nullable().optional(),
-  limits: z.record(z.string(), z.number().nullable()).optional(),
-  features: z.array(z.string()).optional()
+  /** Until when the plan is paid for (ISO 8601); null on `free` and on a live subscription. */
+  planUntil: z.string().nullable(),
+  limits: z.record(z.string(), z.union([z.number(), z.boolean()])),
+  features: z.array(z.string())
 });
 export type EntitlementProfile = z.infer<typeof entitlementProfileSchema>;
 

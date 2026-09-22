@@ -1,5 +1,6 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
-import { bodyLimit } from 'hono/body-limit';
+import type { Context, MiddlewareHandler } from 'hono';
+import { matchedRoutes } from 'hono/route';
 import { createEmailVerificationToken } from 'better-auth/api';
 import { jwtVerify } from 'jose';
 import { registerOpenApiDoc } from './index.js';
@@ -25,6 +26,7 @@ import type {
   ApiContext,
   ApiRateLimitContext,
   ApiRoutesContext,
+  BodyCap,
   ToolDefinition,
   ToolRateLimiters
 } from '../tool-definition.js';
@@ -32,6 +34,7 @@ import type { ApiKeyService } from '../apikeys/index.js';
 import type { EmailDriver } from '../email/index.js';
 import { auditMiddleware, type AuditService } from '../audit/index.js';
 import {
+  isDeferringGate,
   registerEntitlementGate,
   type EntitlementCloud,
   type ToolEntitlementDeclaration
@@ -43,6 +46,7 @@ import { authContext, type PrincipalGate } from '../middleware/index.js';
 import { idempotency } from '../middleware/index.js';
 import { crossSiteGuard } from '../middleware/index.js';
 import { jsonDepthLimit } from '../middleware/index.js';
+import { deferrableBodyCap } from '../middleware/body-cap.js';
 import { noStoreAuthenticated } from '../middleware/index.js';
 import { oauthPublicEndpoints } from '../middleware/index.js';
 import { createRequestQuota, emailKeyOf, makeClientIp, rateLimit } from '../middleware/index.js';
@@ -399,21 +403,43 @@ export function createApiApp<
   //  - the rest of the tool's routes, which are JSON, but commit manifests are legal up to
   //    5000 entries × 1 KiB paths — a 16 MiB cap fits any contract-valid
   //    manifest while still bounding abuse.
-  const jsonBodyLimit = bodyLimit({
-    maxSize: 1024 * 1024,
+  const jsonBodyCap: BodyCap = {
+    maxBytes: 1024 * 1024,
     onError: (c) => c.json(err('payload_too_large', 'Request body exceeds the 1 MiB limit'), 413)
-  });
-  // The tool's own caps, built ONCE here (never per request).
+  };
+  // The tool's own caps, declared ONCE (the slot's factory runs here, never
+  // per request) and built into middleware per cap object below.
   const toolBodyLimit = tool.api.bodyLimit?.(hookContext);
   //  - the viewer's form file upload (PRDCT-2403): one raw streamed file per
   //    request, capped MID-STREAM by the form-upload ceiling in its handler.
+  //
+  // A declared Content-Length over a cap on a route whose gate judges a
+  // PLAN LIMIT is not refused here (PRDCT-2632): the entitlement gate must
+  // see the declared size first, so a metered account meets 403
+  // `plan_required` with its upgrade link at any size and the cap's 413
+  // answers only when the plan allows the size. `deferrableBodyCap`
+  // (middleware/body-cap.ts) parks the refusal on the context and DROPS the
+  // request's body, keyed on the gate itself being on the matched route;
+  // the gate fires it. Every cap goes through it, the tool's and the
+  // default JSON one alike, so a future declared-limit route left under
+  // the default cap is never shadowed either. An undeclared body is still
+  // counted and cut by the cap.
+  const deferring = (c: Context) => matchedRoutes(c).some((route) => isDeferringGate(route.handler));
+  const capMiddleware = new WeakMap<BodyCap, MiddlewareHandler>();
+  const capped = (cap: BodyCap): MiddlewareHandler => {
+    let built = capMiddleware.get(cap);
+    if (!built) {
+      built = deferrableBodyCap(cap, deferring);
+      capMiddleware.set(cap, built);
+    }
+    return built;
+  };
   api.use('*', (c, next) => {
     const path = c.req.path;
     if (path.startsWith('/api/v1/files')) return next();
     const verdict = toolBodyLimit?.(path);
     if (verdict === 'exempt') return next();
-    if (verdict) return verdict(c, next);
-    return jsonBodyLimit(c, next);
+    return capped(verdict ?? jsonBodyCap)(c, next);
   });
 
   // ── JSON nesting cap, right after the size cap (so the scan is bounded by
@@ -631,7 +657,6 @@ export function createApiApp<
     usage: registry.usage,
     cloud: deps.entitlementCloud,
     source: async () => ({ instanceId: await instanceId(), edition: env.EDITION, version: env.APP_VERSION }),
-    toolSlug: tool.identity.slug,
     logger
   });
 

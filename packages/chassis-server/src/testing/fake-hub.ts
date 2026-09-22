@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { usageEventSchema } from '@antasphere/chassis-contract';
 import { randomUUID } from 'node:crypto';
 import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
 
@@ -113,6 +114,10 @@ interface RefreshTokenRecord {
   scope: string;
 }
 
+/** The hub's `z.uuid()` on an account reference, as zod 4 spells it (the nil and max uuids included). */
+const UUID_RE =
+  /^([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/i;
+
 export class FakeHub {
   readonly codes = new Map<string, HubUserFixture>();
   /** code → the scope string the grant will carry (see mintCode). */
@@ -199,7 +204,7 @@ export class FakeHub {
   /** accountRef → the profile the hub answers; an account not set here is `free` with no overrides. */
   private readonly entitlementProfiles = new Map<
     string,
-    { plan: 'free' | 'pro'; limits?: Record<string, number | null>; features?: string[] }
+    { plan: 'free' | 'pro'; limits?: Record<string, number | boolean>; features?: string[] }
   >();
 
   private constructor(
@@ -207,7 +212,8 @@ export class FakeHub {
     readonly issuer: string,
     private keys: HubKey[],
     private readonly configuredClientId: string | undefined,
-    private readonly configuredClientSecret: string | undefined
+    private readonly configuredClientSecret: string | undefined,
+    private readonly configuredToolSlug: string | undefined
   ) {}
 
   /**
@@ -218,7 +224,20 @@ export class FakeHub {
    * issuer may omit it.
    */
   static async start(
-    options: { clientId?: string | undefined; clientSecret?: string | undefined } = {}
+    options: {
+      clientId?: string | undefined;
+      clientSecret?: string | undefined;
+      /**
+       * The tool's REGISTRY slug at the hub (`TOOL_REGISTRY[].slug`, the
+       * name the hub records on every usage row and judges a body's
+       * `toolSlug` against). Defaults to the client id without its `tool-`
+       * prefix (`tool-slideless-cloud` → `slideless-cloud`), which is what
+       * the production recipe and the drill harness name it — and NOT the
+       * tool's identity slug, so a body that stamps its own name is refused
+       * here exactly as the real hub refuses it (PRDCT-2629).
+       */
+      toolSlug?: string | undefined;
+    } = {}
   ): Promise<FakeHub> {
     const key = await newKey();
     const server = createServer();
@@ -230,7 +249,8 @@ export class FakeHub {
       `http://127.0.0.1:${address.port}`,
       [key],
       options.clientId,
-      options.clientSecret
+      options.clientSecret,
+      options.toolSlug
     );
     server.on('request', (req, res) => void hub.handle(req, res));
     return hub;
@@ -258,6 +278,11 @@ export class FakeHub {
   /** The hub's own API resource identifier — the aud /api/v1 requires. */
   get apiResource(): string {
     return `${this.issuer}/mcp`;
+  }
+
+  /** The tool's registry slug: what every usage row carries, from the token, never from the body. */
+  get toolSlug(): string {
+    return this.configuredToolSlug ?? this.clientId.replace(/^tool-/, '');
   }
 
   // ── The org registry (what GET /orgs serves per sub) ──────────────────
@@ -438,12 +463,17 @@ export class FakeHub {
   /** Set what `GET /usage/entitlements` answers for one account (the tier's defaults plus overrides). */
   setEntitlements(
     accountRef: string,
-    profile: { plan: 'free' | 'pro'; limits?: Record<string, number | null>; features?: string[] }
+    profile: { plan: 'free' | 'pro'; limits?: Record<string, number | boolean>; features?: string[] }
   ): void {
     this.entitlementProfiles.set(accountRef, profile);
   }
 
-  /** Forget every machine token (a hub restart, a revoked client): the next post answers 401 until re-minted. */
+  /**
+   * Forget every machine token: the next post answers 401 until re-minted.
+   * Models a REGISTRY REMOVAL or a rotated client secret, not a restart —
+   * the real hub persists its signing keys and never refuses a live JWT on
+   * restart (proven on the pair, lane C of the billing rail wave).
+   */
   revokeMachineTokens(): void {
     this.machineTokens.clear();
   }
@@ -484,30 +514,41 @@ export class FakeHub {
     if (!Array.isArray(events) || events.length === 0 || events.length > 500) {
       return sendJson(res, 400, { error: { code: 'validation_error', message: '1 to 500 events' } });
     }
-    // The real hub's per-element judgement (PRDCT-2625): each element parses
-    // on its own; the account must be an organization this hub holds; a
-    // named user must be a hub user; a duplicate id is never an error.
+    // The real hub's per-element judgement (PRDCT-2625, `classifyBatch` in
+    // its api/usage.ts), in its order: each element parses on its own
+    // against the hub's schema (mirrored verbatim in chassis-contract: the
+    // uuid account reference, the maximum lengths, the action key or its
+    // alias — PRDCT-2629), a body that names a tool other than the token's
+    // registry slug is `tool_mismatch`, the account must be an organization
+    // this hub holds, a named user must be a hub user, a duplicate id is
+    // never an error.
     const knownOrgs = new Set<string>();
     for (const orgs of this.userOrgs.values()) for (const id of orgs.keys()) knownOrgs.add(id);
     const results = events.map((raw: unknown) => {
-      const e = raw as Record<string, unknown>;
-      const id = typeof e?.id === 'string' && /^[0-9A-HJKMNP-TV-Z]{26}$/.test(e.id) ? e.id : null;
-      if (
-        !id ||
-        typeof e.accountRef !== 'string' ||
-        typeof e.actionKey !== 'string' ||
-        typeof e.quantity !== 'number' ||
-        typeof e.occurredAt !== 'string' ||
-        !['session', 'api_key', 'oauth'].includes(String(e.via))
-      ) {
-        return { id, status: 'rejected' as const, reason: 'invalid_event', details: [] };
+      const parsed = usageEventSchema.safeParse(raw);
+      if (!parsed.success) {
+        const rawId = (raw as { id?: unknown } | null)?.id;
+        return {
+          id: typeof rawId === 'string' ? rawId : null,
+          status: 'rejected' as const,
+          reason: 'invalid_event',
+          details: parsed.error.issues.map((issue) => ({
+            path: issue.path.join('.'),
+            message: issue.message
+          }))
+        };
+      }
+      const e = parsed.data;
+      const id = e.id;
+      if (e.toolSlug !== undefined && e.toolSlug !== this.toolSlug) {
+        return { id, status: 'rejected' as const, reason: 'tool_mismatch' };
       }
       if (!knownOrgs.has(e.accountRef)) return { id, status: 'rejected' as const, reason: 'unknown_account' };
-      if (e.userId != null && !this.userOrgs.has(String(e.userId))) {
+      if (e.userId != null && !this.userOrgs.has(e.userId)) {
         return { id, status: 'rejected' as const, reason: 'unknown_user' };
       }
       if (this.usageEvents.has(id)) return { id, status: 'duplicate' as const };
-      this.usageEvents.set(id, e);
+      this.usageEvents.set(id, { ...(raw as Record<string, unknown>), toolSlug: this.toolSlug });
       return { id, status: 'accepted' as const };
     });
     const count = (status: string) => results.filter((r) => r.status === status).length;
@@ -532,8 +573,11 @@ export class FakeHub {
     if (!this.machineBearer(req)) {
       return sendJson(res, 401, { error: { code: 'invalid_token', message: 'Unauthorized' } });
     }
-    if (!accountRef)
-      return sendJson(res, 400, { error: { code: 'validation_error', message: 'accountRef' } });
+    // The real hub validates the query (`accountRef` a uuid): 400, not 404.
+    if (!accountRef || !UUID_RE.test(accountRef))
+      return sendJson(res, 400, {
+        error: { code: 'validation_error', message: 'accountRef must be a uuid' }
+      });
     const knownOrgs = new Set<string>();
     for (const orgs of this.userOrgs.values()) for (const id of orgs.keys()) knownOrgs.add(id);
     if (!knownOrgs.has(accountRef) && !this.entitlementProfiles.has(accountRef)) {

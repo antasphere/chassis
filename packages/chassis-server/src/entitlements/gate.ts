@@ -1,5 +1,6 @@
 import type { OpenAPIHono } from '@hono/zod-openapi';
 import type { Context, MiddlewareHandler } from 'hono';
+import { COMPOSED_HANDLER } from 'hono/utils/constants';
 import { ulid } from 'ulid';
 import {
   ENTITLEMENT_TIERS,
@@ -11,6 +12,7 @@ import {
   type MeterDeclaration,
   type PlanRequiredDetails,
   type Principal,
+  routeEntitlementKey,
   type RouteEntitlementDeclarations,
   type RouteEntitlementEntry,
   type ToolEntitlements,
@@ -18,6 +20,7 @@ import {
   type UsageSink
 } from '@antasphere/chassis-contract';
 import type { Logger } from '../logger.js';
+import { pendingBodyRefusal } from '../middleware/body-refusal.js';
 import { defaultProfile, type EntitlementProfiles, type ResolvedProfile } from './profiles.js';
 
 /**
@@ -35,8 +38,10 @@ import { defaultProfile, type EntitlementProfiles, type ResolvedProfile } from '
  *      cached 30 s, the tool's declared values for the tier): a refusal is
  *      403 `plan_required` + `details: { key, plan, requiredPlan, upgradeUrl }`;
  *   3. the credit check (`entitlements.check`, phase 1: the local env cap);
- *   4. after a 2xx, one usage event, enriched with the user, the `via`, the
- *      resource the handler recorded for its audit row, and the tool slug.
+ *   4. after a 2xx, one usage event, enriched with the user, the `via` and
+ *      the resource the handler recorded for its audit row. The event never
+ *      names the tool: the hub takes the tool from the machine token, the
+ *      only authority on its name (PRDCT-2629).
  *
  *  oss, and a cloud-LOCAL workspace (no account): no plan exists. The credit
  *  check runs first (today's refusal, byte for byte), then a declared limit
@@ -47,6 +52,18 @@ import { defaultProfile, type EntitlementProfiles, type ResolvedProfile } from '
  * The idempotency middleware sits before this one, so a replayed request is
  * never metered twice; the audit middleware wraps it, so what the handler
  * records for its audit row is what the emit reads.
+ *
+ * A body-size refusal the size cap deferred (`bodyRefusal`, PRDCT-2632: a
+ * declared Content-Length over the tool's cap on a route that declares a
+ * limit) fires HERE: after the plan check on a metered account, so the plan
+ * refusal with its upgrade link is what an oversize upload meets and the
+ * instance cap answers only when the plan allows the size; before anything
+ * else when no plan applies (no principal, oss, a cloud-local workspace), so
+ * a resolved request no plan applies to answers byte for byte as before.
+ * What changed for such a request: the credential resolves and the scope
+ * gate answers before the cap does (a key without the scope meets 403
+ * insufficient_scope where the cap's 413 came first), and the refusal
+ * costs a lookup and a quota token (verifier round 1, accepted).
  */
 /** The cloud edition's half of the gate: the plan source, the upgrade link, the hub-subject resolver. */
 export interface EntitlementCloud {
@@ -69,7 +86,6 @@ export interface EntitlementGateDeps {
   cloud: EntitlementCloud | undefined;
   /** The `source` of every event (the instance id is read lazily, cached by the caller). */
   source: () => Promise<UsageEvent['source']>;
-  toolSlug: string;
   logger: Logger;
 }
 
@@ -82,10 +98,32 @@ export function honoPath(path: string): string {
   return path.replaceAll(/\{([^}]+)\}/g, ':$1');
 }
 
+/**
+ * The gate handlers of the routes that declare a PLAN LIMIT: the size cap
+ * (api/create-api.ts) defers a declared-oversize refusal exactly when one of
+ * these is on the request's matched route, so the deferral is keyed on the
+ * gate itself, never on a re-reading of the path (PRDCT-2632).
+ */
+const deferringGates = new WeakSet<MiddlewareHandler>();
+
+/**
+ * Whether a matched handler is a gate that judges a plan limit before the
+ * size cap may refuse. Hono's `route()` wraps a sub-app's handlers when that
+ * sub-app has its own `onError` (`COMPOSED_HANDLER` points at the original),
+ * so the wrapper is unwrapped first: otherwise an `api.onError` added one day
+ * would switch every deferral off (verifier round 2).
+ */
+export function isDeferringGate(handler: unknown): boolean {
+  const target = (handler as { [COMPOSED_HANDLER]?: unknown } | null)?.[COMPOSED_HANDLER] ?? handler;
+  return typeof target === 'function' && deferringGates.has(target as MiddlewareHandler);
+}
+
 /** Register the gate on every declared route, at the caller's place in the chain. */
 export function registerEntitlementGate(api: OpenAPIHono, deps: EntitlementGateDeps): void {
   for (const entry of deps.declarations.values()) {
-    api.on(entry.route.method.toUpperCase(), honoPath(entry.route.path), entitlementGate(entry, deps));
+    const gate = entitlementGate(entry, deps);
+    if (entry.limit) deferringGates.add(gate);
+    api.on(entry.route.method.toUpperCase(), honoPath(entry.route.path), gate);
   }
 }
 
@@ -216,10 +254,13 @@ function ossLimitCheck(
 }
 
 export function entitlementGate(entry: RouteEntitlementEntry, deps: EntitlementGateDeps): MiddlewareHandler {
-  const meterKey = entry.meter ? routeKeyOf(entry) : null;
+  const meterKey = entry.meter ? routeEntitlementKey(entry.route) : null;
   return async (c, next) => {
     const principal = c.get('principal');
-    if (!principal) return next(); // the route's own auth answers (401); nothing to meter
+    const deferredRefusal = pendingBodyRefusal(c);
+    // No principal: the route's own auth answers (401); nothing to meter. A
+    // deferred size refusal still fires first, as the cap did before.
+    if (!principal) return deferredRefusal ? deferredRefusal() : next();
     const ctx = requestOf(c, principal);
     const actor = await actorOf(entry, ctx, principal);
     const metered = Boolean(deps.cloud && actor.accountRef);
@@ -232,6 +273,9 @@ export function entitlementGate(entry: RouteEntitlementEntry, deps: EntitlementG
       const refused = planCheck(c, entry, ctx, profile, deps);
       if (refused) return refused;
     }
+    // The size cap's deferred refusal: the plan has had its say (or none
+    // applies), the instance's hard ceiling answers now.
+    if (deferredRefusal) return deferredRefusal();
     if (entry.meter) {
       const decision = await deps.entitlements.check(
         principal,
@@ -266,14 +310,9 @@ export function entitlementGate(entry: RouteEntitlementEntry, deps: EntitlementG
       via: principal.via,
       ...(audit?.resourceType ? { resourceType: audit.resourceType } : {}),
       ...(audit?.resourceId ? { resourceId: audit.resourceId } : {}),
-      toolSlug: deps.toolSlug,
       source: await deps.source()
     };
     // Fire and forget: the queue write is durable and the request never waits on billing.
     void deps.usage.emit(event);
   };
-}
-
-function routeKeyOf(entry: RouteEntitlementEntry): string {
-  return `${entry.route.method.toUpperCase()} ${entry.route.path}`;
 }

@@ -242,9 +242,13 @@ describe('cloud: every metered action of a hub organization lands in the hub', (
       via: 'session',
       resourceType: 'file',
       resourceId: fileId,
-      toolSlug: host.identity.slug,
+      // The hub records the token's registry slug; the body never named the tool (PRDCT-2629).
+      toolSlug: hub.toolSlug,
       source: { edition: 'cloud' }
     });
+    expect(hub.toolSlug).not.toBe(host.identity.slug);
+    const posted = (hub.usageRequests[0]!.body as { events: Array<Record<string, unknown>> }).events;
+    expect(posted.every((e) => !('toolSlug' in e))).toBe(true);
     expect(event!.userId).not.toBe(hubUserId); // the hub's sub, never the tool's local id
     // The machine channel: one client_credentials token, minted once, on every hub call.
     expect(hub.machineTokenMints).toBe(1);
@@ -332,6 +336,51 @@ describe('cloud: every metered action of a hub organization lands in the hub', (
     expect(hub.machineTokenMints).toBe(mints + 1);
   }, 60_000);
 
+  it('the fake hub judges a body as the real hub does (PRDCT-2629): a stamped slug is tool_mismatch, a non-uuid account is invalid_event, a long unit is invalid_event', async () => {
+    const mint = await fetch(`${hub.issuer}/api/v1/auth/oauth2/token`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        authorization: `Basic ${Buffer.from(`${host.hubClientId}:${HUB_SECRET}`).toString('base64')}`
+      },
+      body: new URLSearchParams({
+        grant_type: 'client_credentials',
+        scope: 'usage:write',
+        resource: hub.apiResource
+      })
+    });
+    const { access_token } = (await mint.json()) as { access_token: string };
+    const base = [...hub.usageEvents.values()][0]!;
+    const post = async (events: unknown[]) => {
+      const res = await fetch(`${hub.issuer}/api/v1/usage/events`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${access_token}` },
+        body: JSON.stringify({ events })
+      });
+      expect(res.status).toBe(200);
+      return (
+        (await res.json()) as { results: Array<{ id: string | null; status: string; reason?: string }> }
+      ).results;
+    };
+    // The registry slug is the client id without its prefix — under either host.
+    expect(hub.toolSlug).toBe(host.hubClientId.replace(/^tool-/, ''));
+    const [stamped, own, notUuid, longUnit] = await post([
+      { ...base, id: '01JZZZZZZZZZZZZZZZZZZZZZZ1', toolSlug: 'not-the-registry-slug' },
+      { ...base, id: '01JZZZZZZZZZZZZZZZZZZZZZZ2', toolSlug: hub.toolSlug },
+      { ...base, id: '01JZZZZZZZZZZZZZZZZZZZZZZ3', accountRef: 'acct-1' },
+      { ...base, id: '01JZZZZZZZZZZZZZZZZZZZZZZ4', unit: 'x'.repeat(41) }
+    ]);
+    expect(stamped).toMatchObject({ status: 'rejected', reason: 'tool_mismatch' });
+    expect(own).toMatchObject({ status: 'accepted' });
+    expect(notUuid).toMatchObject({ status: 'rejected', reason: 'invalid_event' });
+    expect(longUnit).toMatchObject({ status: 'rejected', reason: 'invalid_event' });
+    // And the plan read of a non-uuid account is 400, as the real hub's query validator answers.
+    const bad = await fetch(`${hub.issuer}/api/v1/usage/entitlements?accountRef=acct-1`, {
+      headers: { authorization: `Bearer ${access_token}` }
+    });
+    expect(bad.status).toBe(400);
+  });
+
   it('the upload over the operator’s cap on a cloud account still answers the credit check’s 413 (phase 1)', async () => {
     // free = the cap by construction (1 MiB here): the limit refuses first at
     // the same threshold, as the spec orders — with the plan refusal.
@@ -343,4 +392,86 @@ describe('cloud: every metered action of a hub organization lands in the hub', (
     expect(res.status).toBe(403);
     expect((await readJson(res)).error.code).toBe('plan_required');
   });
+});
+
+describe('cloud: the retry budget’s end is a hold, never a loss (PRDCT-2635)', () => {
+  let hub: FakeHub;
+  let app: TestApp;
+  let cookie: string;
+  let workspaceId: string;
+  const METRICS_TOKEN = 'integration-metrics-token-1';
+  const ORG_HELD = '77777777-aaaa-4bbb-8ccc-00000000e003';
+
+  const metric = async (name: string): Promise<number> => {
+    const res = await app.app.request('/metrics', { headers: { authorization: `Bearer ${METRICS_TOKEN}` } });
+    expect(res.status).toBe(200);
+    const line = (await res.text())
+      .split('\n')
+      .find((l) => l.startsWith(`${name} `) || l.startsWith(`${name}{`));
+    return line ? Number(line.split(' ').at(-1)) : 0;
+  };
+
+  beforeAll(async () => {
+    hub = await FakeHub.start({ clientId: host.hubClientId, clientSecret: HUB_SECRET });
+    app = await createTestApp(
+      await createDatabase(container, 'ent_held'),
+      {
+        EDITION: 'cloud',
+        HUB_ISSUER_URL: hub.issuer,
+        HUB_CLIENT_ID: host.hubClientId,
+        HUB_CLIENT_SECRET: HUB_SECRET,
+        METRICS_TOKEN
+      },
+      // One retry a second later, then held; a held event comes back a second after.
+      { usageRetry: { limit: 1, delaySeconds: 1, heldDelaySeconds: 1 }, entitlementDials: { ttlMs: 60_000 } }
+    );
+    await app.app.request(
+      '/api/v1/setup',
+      json({ setupToken: 'integration-test-setup-token', instanceName: 'Ent Held', owner: OPERATOR })
+    );
+    cookie = await sso.ssoLogin(app, hub, {
+      sub: 'hub-user-held',
+      email: 'held@ent.test',
+      name: 'Held User',
+      workspaceId: ORG_HELD,
+      role: 'owner',
+      workspaceName: 'Org Held'
+    });
+    const me = await readJson(await app.app.request('/api/v1/me', { headers: { cookie } }));
+    workspaceId = me.activeWorkspaceId;
+  }, 180_000);
+
+  afterAll(async () => {
+    await app?.stop();
+    await hub?.stop();
+  });
+
+  it('an outage that outlasts the budget holds the event, counts it on /metrics, and re-drives it until the hub takes it', async () => {
+    hub.usageMode = 'network';
+    const res = await upload(app, { cookie, 'x-workspace-id': workspaceId }, PAYLOAD + '!');
+    expect(res.status).toBe(201);
+    const fileId = (await readJson(res)).file.id as string;
+    // The budget runs out (one attempt, one retry), the batch is held and counted.
+    await until(
+      () => metric('usage_events_held_total'),
+      (n) => n >= 1,
+      60_000
+    );
+    expect(await metric('usage_events_held_total')).toBe(1);
+    expect(hub.usageEvents.size).toBe(0);
+    // The hub comes back: the held event comes round again and lands, exactly once.
+    hub.usageMode = 'ok';
+    await until(
+      () => landed(hub, fileId),
+      (ok) => ok,
+      60_000
+    );
+    expect([...hub.usageEvents.values()].filter((e) => e.resourceId === fileId)).toHaveLength(1);
+    // The poster's outcomes are on /metrics too: the retried batches, then the accepted event.
+    expect(await metric('usage_poster_batches_total{outcome="retried"}')).toBeGreaterThanOrEqual(2);
+    await until(
+      () => metric('usage_poster_events_total{outcome="accepted"}'),
+      (n) => n >= 1
+    );
+  }, 120_000);
 });

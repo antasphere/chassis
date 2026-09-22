@@ -1,7 +1,7 @@
 import type { Db, DbHandle } from '@antasphere/chassis-db';
 import type { ToolIdentity, UsageDownstream } from '@antasphere/chassis-contract';
 import type { OpenAPIHono } from '@hono/zod-openapi';
-import type { Hono, MiddlewareHandler } from 'hono';
+import type { Hono, MiddlewareHandler, Context } from 'hono';
 import type { RateLimiterAbstract } from 'rate-limiter-flexible';
 import type { z } from 'zod';
 import type { ExportEntriesFn } from './api/export.js';
@@ -12,6 +12,7 @@ import type { AuditService } from './audit/service.js';
 import type { EmailDriver } from './email/driver.js';
 import type { ToolEntitlementDeclaration } from './entitlements/slot.js';
 import type { EntitlementProfileDials } from './entitlements/profiles.js';
+import type { UsageRetry } from './jobs/pgboss.js';
 import type { EnvExtension, ToolEnv } from './env.js';
 import type { FileService } from './files/service.js';
 import type { Auth } from './identity/better-auth.js';
@@ -118,7 +119,22 @@ export interface ApiRoutesContext<
 }
 
 /** The answer of the body-limit slot for one path: no cap here, this cap, or (undefined) the 1 MiB default. */
-export type BodyLimitVerdict = 'exempt' | MiddlewareHandler | undefined;
+/**
+ * A body-size cap the tool declares for a path (PRDCT-2632): the ceiling in
+ * bytes and the refusal it answers. The chassis builds the middleware from it
+ * (hono's `bodyLimit`: a declared Content-Length over the cap is refused
+ * before a byte is read, an undeclared body is counted and cut mid-stream),
+ * and DEFERS the declared-size refusal on a route that declares a plan limit
+ * so the entitlement gate judges the size first — a metered account meets
+ * the plan refusal with its upgrade link, the cap answers only when the
+ * plan allows the size. Declare the object ONCE (the slot's factory runs
+ * once at boot; the middleware is built per object).
+ */
+export interface BodyCap {
+  maxBytes: number;
+  onError: (c: Context) => Response;
+}
+export type BodyLimitVerdict = 'exempt' | BodyCap | undefined;
 
 /** The generic files surface's per-blob policy (SL-B1): the tool owns what references a blob. */
 export type FilePolicy = Pick<FileRouteDeps, 'blobInUse' | 'blobReadScope'>;
@@ -294,11 +310,12 @@ export interface BootOverrides<TToolOverrides = never> {
   usageDownstream?: UsageDownstream;
   /**
    * The usage queue's retry budget (`retryLimit`, `retryDelay` in seconds,
-   * exponential backoff): production runs ten retries from thirty seconds,
-   * about eight hours in all, so a hub deploy loses nothing; a test shrinks
-   * it to watch a retried batch land in milliseconds.
+   * exponential backoff) and the hold before a held batch is re-driven:
+   * production runs ten retries from thirty seconds, about eight hours in
+   * all, then holds and re-drives hourly; a test shrinks them to watch a
+   * retried or a held batch land in milliseconds.
    */
-  usageRetry?: { limit: number; delaySeconds: number };
+  usageRetry?: Partial<UsageRetry>;
   /** Shrinks the entitlement profile cache dials (30 s TTL, 15 min stale window) for the cloud tests. */
   entitlementDials?: Partial<EntitlementProfileDials>;
   /**

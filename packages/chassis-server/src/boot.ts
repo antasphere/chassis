@@ -33,7 +33,7 @@ import { mcpRoutes } from './mcp/index.js';
 import { wellKnownRoutes } from './routes/index.js';
 import { instanceSettings, user as userTable, workspaceMembers, workspaces } from '@antasphere/chassis-db';
 import { FileService } from './files/index.js';
-import { createJobs, DEFAULT_USAGE_RETRY, PgBossUsageSink } from './jobs/index.js';
+import { createJobs, DEFAULT_USAGE_RETRY, PgBossUsageSink, type UsageRetry } from './jobs/index.js';
 import {
   assertToolEntitlements,
   EMPTY_TOOL_ENTITLEMENTS,
@@ -638,6 +638,9 @@ export async function bootPlatform<
   const hubUsagePoster = hubMachineToken
     ? new HubUsagePoster({ issuerUrl: hub!.issuerUrl, token: hubMachineToken, logger })
     : undefined;
+  // The usage queue's retry budget and its hold (PRDCT-2635): stated once,
+  // shared by the sink that sends and the held queue that re-drives.
+  const usageRetry: UsageRetry = { ...DEFAULT_USAGE_RETRY, ...overrides.usageRetry };
   const jobs = await createJobs(
     env,
     db.db,
@@ -645,7 +648,8 @@ export async function bootPlatform<
     overrides.usageDownstream ?? hubUsagePoster ?? new NoopUsageSink(),
     auth,
     audit,
-    tool.jobs?.({ env, db: db.db, logger, getTool: () => domainRef.current }) ?? []
+    tool.jobs?.({ env, db: db.db, logger, getTool: () => domainRef.current }) ?? [],
+    usageRetry
   );
   // The tool's billing-rail declarations (slot 22), asserted once here: a
   // route that meters an action the price book does not know, or a limit no
@@ -694,7 +698,7 @@ export async function bootPlatform<
         apiRequestsPerMinute: env.API_RATE_LIMIT_PER_MINUTE,
         apiRequestsBurstPerSecond: env.API_RATE_LIMIT_BURST
       }),
-      usage: new PgBossUsageSink(jobs.boss, logger, overrides.usageRetry ?? DEFAULT_USAGE_RETRY)
+      usage: new PgBossUsageSink(jobs.boss, logger, usageRetry)
     },
     logger,
     { db: db.db, reconciler: hubReconciler }
@@ -821,9 +825,16 @@ export async function bootPlatform<
   // Observability: tracing (exporterless = zero phone-home) + Prometheus.
   const otel = await createOtel(env, logger, { serviceName: tool.identity.otelServiceName });
   const metrics = createMetrics(db.db, jobs.boss);
-  // Cloud only: the reconcile-pass and grant-refresh counters join the app
-  // registry so a degraded hub (or dying grants) is visible on /metrics.
-  for (const metric of [...(hubReconciler?.promMetrics ?? []), ...(hubGrant?.promMetrics ?? [])]) {
+  // The counters of the seams that talk to the hub join the app registry so
+  // a degraded hub, dying grants, a rail that rejects everything or usage
+  // held past its retry budget is visible on /metrics (the poster's are
+  // cloud only: oss never builds one).
+  for (const metric of [
+    ...(hubReconciler?.promMetrics ?? []),
+    ...(hubGrant?.promMetrics ?? []),
+    ...(hubUsagePoster?.promMetrics ?? []),
+    ...jobs.promMetrics
+  ]) {
     metrics.registry.registerMetric(metric);
   }
 

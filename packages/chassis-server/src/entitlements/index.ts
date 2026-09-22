@@ -1,12 +1,14 @@
 export {
   entitlementGate,
   honoPath,
+  isDeferringGate,
   registerEntitlementGate,
   type EntitlementCloud,
   type EntitlementGateDeps
 } from './gate.js';
 export {
   DEFAULT_FAILURE_HOLD_MS,
+  DEFAULT_INVALID_CLIENT_HOLD_MS,
   HUB_USAGE_SCOPE,
   HubMachineToken,
   HubMachineTokenError,

@@ -14,6 +14,7 @@ import type { HubMachineToken } from './hub-machine-token.js';
  */
 export interface ResolvedProfile {
   plan: EntitlementTier;
+  /** null = unlimited (a tier's null, or a hub `true`); 0 = nothing allowed (a hub `false`). */
   limits: Record<string, number | null>;
   features: ReadonlySet<string>;
   /** Where the plan came from: the hub, the last known answer, or the default. */
@@ -30,14 +31,27 @@ export interface EntitlementProfileDials {
    * hub blip.
    */
   staleMs: number;
-  /** Hub request budget. */
+  /** Hub request budget (the read runs off the request path; this bounds the background fetch). */
   timeoutMs: number;
+  /**
+   * How long a request waits for the FIRST read of an account nobody asked
+   * the hub about yet (PRDCT-2633). A warm cache never waits: a fresh entry
+   * is served, a stale one is served while a refresh runs behind it. A cold
+   * account waits at most this long, then gets the default (`free`) while the
+   * read finishes in the background — so a pro account is judged right on
+   * its first request whenever the hub answers in time. Every request for a
+   * cold account that arrives while that first read is in flight waits up
+   * to this budget too (each against the one flight), bounded overall by
+   * `timeoutMs`, after which the miss is cached and served at once.
+   */
+  coldWaitMs: number;
 }
 
 export const DEFAULT_PROFILE_DIALS: EntitlementProfileDials = {
   ttlMs: 30_000,
   staleMs: 15 * 60_000,
-  timeoutMs: 5_000
+  timeoutMs: 5_000,
+  coldWaitMs: 1_500
 };
 
 export interface EntitlementProfilesOptions {
@@ -51,7 +65,8 @@ export interface EntitlementProfilesOptions {
 
 interface CacheEntry {
   plan: EntitlementTier;
-  hubLimits: Record<string, number | null>;
+  /** The hub's overrides as sent: a number, or a boolean switch (`true` unlimited, `false` nothing). */
+  hubLimits: Record<string, number | boolean>;
   hubFeatures: string[] | null;
   /** When the hub last answered. */
   answeredAtMs: number;
@@ -64,6 +79,13 @@ interface CacheEntry {
  * `GET /usage/entitlements?accountRef=` with the machine token and cached
  * 30 s per account. Resolution against the tool's declared tier values
  * (`resolve`): the hub's rows win over the defaults whenever it sent them.
+ *
+ * The read is OFF the request path (PRDCT-2633, stale-while-revalidate):
+ * a fresh entry is served as it is; an entry past its TTL is served at once
+ * and refreshed behind the request, single-flight per account; only an
+ * account the cache has never seen waits, and at most `coldWaitMs`. A hub
+ * that is slow but alive therefore costs a metered request nothing once the
+ * account is known.
  *
  * Failure posture: a hub that does not answer (a 404 from an older hub, a
  * 5xx, a timeout) keeps the last known plan for `staleMs`, then `free`; an
@@ -98,6 +120,11 @@ export class EntitlementProfiles {
     this.cache.clear();
   }
 
+  /** Wait for every background refresh in flight (a test seam). */
+  async settle(): Promise<void> {
+    await Promise.all([...this.inflight.values()]);
+  }
+
   private async entry(accountRef: string): Promise<CacheEntry | null> {
     const cached = this.cache.get(accountRef);
     if (cached && cached.freshUntilMs > this.now()) return cached;
@@ -108,19 +135,29 @@ export class EntitlementProfiles {
       });
       this.inflight.set(accountRef, flight);
     }
-    await flight;
+    // Stale: served now, the refresh runs behind the request.
+    if (cached) return cached;
+    // Cold: wait for the first read, but never longer than the cold budget.
+    await withinBudget(flight, this.dials.coldWaitMs);
     return this.cache.get(accountRef) ?? null;
   }
 
   private async refresh(accountRef: string, previous: CacheEntry | null): Promise<void> {
     this.hubReads += 1;
+    this.sweep();
     const answered = await this.read(accountRef);
     const now = this.now();
     if (answered) {
+      // The hub's phase-1 answer carries EMPTY limits and features by
+      // contract ("the tool applies its own tier defaults for the plan named
+      // here"): an empty list is no override, never "nothing on". When the
+      // hub starts serving plan_entitlements (phase 2), an explicit empty
+      // must become distinguishable from the phase-1 empty — a point for
+      // that contract change, noted on the record.
       this.cache.set(accountRef, {
         plan: answered.plan,
-        hubLimits: answered.limits ?? {},
-        hubFeatures: answered.features ?? null,
+        hubLimits: answered.limits,
+        hubFeatures: answered.features.length > 0 ? answered.features : null,
         answeredAtMs: now,
         freshUntilMs: now + this.dials.ttlMs
       });
@@ -140,6 +177,21 @@ export class EntitlementProfiles {
             freshUntilMs: now + this.dials.ttlMs
           }
     );
+  }
+
+  /**
+   * Keep the cache bounded on a long-lived replica: once it holds more than
+   * `SWEEP_ABOVE` accounts, drop every entry that is neither fresh nor
+   * inside its stale window (nothing would be served from it any more).
+   */
+  private sweep(): void {
+    if (this.cache.size <= SWEEP_ABOVE) return;
+    const now = this.now();
+    for (const [key, entry] of this.cache) {
+      const servable =
+        entry.freshUntilMs > now || (entry.answeredAtMs > 0 && entry.answeredAtMs + this.dials.staleMs > now);
+      if (!servable) this.cache.delete(key);
+    }
   }
 
   /** One hub read; null on any failure (logged, never thrown). */
@@ -194,7 +246,7 @@ export function resolve(
   const limits: Record<string, number | null> = {};
   for (const [key, tiers] of Object.entries(tool.limits)) {
     const override = known && !stale ? entry.hubLimits[key] : undefined;
-    limits[key] = override !== undefined ? override : tiers[plan];
+    limits[key] = override !== undefined ? limitValue(override) : tiers[plan];
   }
   const features = new Set<string>();
   const hubFeatures = known && !stale ? entry.hubFeatures : null;
@@ -202,6 +254,32 @@ export function resolve(
     if (hubFeatures ? hubFeatures.includes(key) : tiers[plan]) features.add(key);
   }
   return { plan, limits, features, source };
+}
+
+/**
+ * A hub limit value as the gate compares it (PRDCT-2636): the hub's contract
+ * allows a boolean beside a number — `true` switches the limit off
+ * (unlimited, null), `false` allows nothing (0).
+ */
+function limitValue(value: number | boolean): number | null {
+  if (value === true) return null;
+  if (value === false) return 0;
+  return value;
+}
+
+/** How many accounts the cache may hold before a refresh sweeps the unservable entries. */
+const SWEEP_ABOVE = 5_000;
+
+/** Resolve when `flight` settles or `ms` elapse, whichever first; the timer never outlives the wait. */
+function withinBudget(flight: Promise<void>, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.(); // a pending wait must never keep the process alive
+    void flight.finally(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
 }
 
 /** The profile of an account nobody asked the hub about: the tool's `free` tier. */
