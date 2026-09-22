@@ -58,7 +58,11 @@ import { defaultProfile, type EntitlementProfiles, type ResolvedProfile } from '
  * refusal with its upgrade link is what an oversize upload meets and the
  * instance cap answers only when the plan allows the size; before anything
  * else when no plan applies (no principal, oss, a cloud-local workspace), so
- * a self-hosted instance answers byte for byte as before.
+ * a resolved request no plan applies to answers byte for byte as before.
+ * What changed for such a request: the credential resolves and the scope
+ * gate answers before the cap does (a key without the scope meets 403
+ * insufficient_scope where the cap's 413 came first), and the refusal
+ * costs a lookup and a quota token (verifier round 1, accepted).
  */
 /** The cloud edition's half of the gate: the plan source, the upgrade link, the hub-subject resolver. */
 export interface EntitlementCloud {

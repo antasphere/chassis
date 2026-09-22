@@ -160,9 +160,14 @@ export async function createJobs(
       // names, so a per-send dead letter would fail every send until the
       // held queue exists (/code-review, lane D). The queue's setting covers
       // every job in it, whoever sent it; `updateQueue` sets it on an
-      // installation that predates the held queue. The held queue's own
-      // retry covers the re-drive's local insert, so a database blip never
-      // drops a held batch either.
+      // installation that predates the held queue. What pg-boss 10 gives a
+      // held job: the dead-letter copy carries the ORIGINAL retry limit (ten)
+      // and no delay, so a re-send that throws (a local insert refused while
+      // fetches still succeed) is retried ten times back to back, then that
+      // held job fails for good; the retry options on the held queue below
+      // apply to jobs sent to it, not to the copies pg-boss makes (verifier
+      // round 1, accepted: the path needs the database to refuse eleven
+      // inserts in a row while serving the fetches).
       await boss.createQueue(USAGE_HELD_QUEUE, {
         name: USAGE_HELD_QUEUE,
         retryLimit: 10,
@@ -229,13 +234,17 @@ export async function createJobs(
         { count: jobs.length, ids, retryAfterSeconds: usageRetry.heldDelaySeconds },
         'usage: events exhausted the retry budget — held, re-driven after the hold; check the hub, HUB_CLIENT_ID/HUB_CLIENT_SECRET and the instance’s registry entry (usage_events_held_total)'
       );
-      held.inc(jobs.length);
       for (const job of jobs) {
         await boss.send(USAGE_QUEUE, job.data, {
           ...usageSendOptions(job.data, usageRetry),
           startAfter: usageRetry.heldDelaySeconds
         });
       }
+      // Counted once the re-sends are in: a re-send that throws midway
+      // fails the held batch back to its own retries, which re-send the
+      // whole batch (the hub answers duplicate for what already went) and
+      // would count it again if the count came first.
+      held.inc(jobs.length);
     });
 
     // Audit retention: a nightly purge keeps audit_log from growing without
@@ -480,8 +489,9 @@ export const DEFAULT_USAGE_RETRY: UsageRetry = { limit: 10, delaySeconds: 30, he
  */
 export function usageSendOptions(event: UsageEvent, retry: UsageRetry): PgBoss.SendOptions {
   return {
-    // Guards against re-enqueueing the same PENDING event only; true
-    // idempotency is the receiver's job (dedupe by ULID, per contract).
+    // The event's ULID, for a reader of the queue table; on a standard
+    // pg-boss queue a singleton key enforces nothing (verifier round 1), and
+    // idempotency is the receiver's job anyway (dedupe by ULID, per contract).
     singletonKey: event.id,
     retryLimit: retry.limit,
     retryDelay: retry.delaySeconds,

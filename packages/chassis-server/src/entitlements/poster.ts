@@ -173,6 +173,16 @@ export class HubUsagePoster implements UsageDownstream {
         );
         throw new HubUsagePostError('hub answered 2xx without readable results');
       }
+      // One answer per posted element, in the batch's order (the hub's
+      // contract): a shorter or longer answer is not the hub's, and a tail
+      // it does not name would otherwise be neither counted nor retried.
+      if (parsed.data.results.length !== events.length) {
+        this.opts.logger.warn(
+          { answered: parsed.data.results.length, posted: events.length },
+          'usage poster: the hub answered for a different number of events than posted — the batch is retried'
+        );
+        throw new HubUsagePostError('hub answered a different number of events than posted');
+      }
       return parsed.data.results;
     }
     if (res.status === 400 || res.status === 422) {

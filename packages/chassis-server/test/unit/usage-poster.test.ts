@@ -170,7 +170,7 @@ describe('HubUsagePoster', () => {
         rejected: 2
       })
     );
-    await expect(h.poster.emitBatch([event('a'), event('b')])).resolves.toBeUndefined();
+    await expect(h.poster.emitBatch([event('a'), event('b'), event('c')])).resolves.toBeUndefined();
     const rejected = logs.filter((l) => l.level === 'error' && /rejected/.test(l.msg));
     expect(rejected.map((l) => l.ctx)).toEqual([
       expect.objectContaining({ id: 'b', reason: 'unknown_account' }),
@@ -186,6 +186,13 @@ describe('HubUsagePoster', () => {
     const h = hub(() => new Response('<html>a proxy page</html>', { status: 200 }));
     await expect(h.poster.emitBatch([event('a')])).rejects.toThrow(/readable results/);
     expect(logs.some((l) => l.level === 'warn' && /retried/.test(l.msg))).toBe(true);
+    expect(await counts(h.poster.batches)).toEqual({ retried: 1 });
+    expect(await counts(h.poster.events)).toEqual({});
+  });
+
+  it('a hub answer with fewer results than events posted is an outage too, never a partial delivery', async () => {
+    const h = hub(() => accepted(['a']));
+    await expect(h.poster.emitBatch([event('a'), event('b')])).rejects.toThrow(/different number/);
     expect(await counts(h.poster.batches)).toEqual({ retried: 1 });
     expect(await counts(h.poster.events)).toEqual({});
   });

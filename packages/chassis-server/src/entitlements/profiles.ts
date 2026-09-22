@@ -39,8 +39,10 @@ export interface EntitlementProfileDials {
    * is served, a stale one is served while a refresh runs behind it. A cold
    * account waits at most this long, then gets the default (`free`) while the
    * read finishes in the background — so a pro account is judged right on
-   * its first request whenever the hub answers in time, and a slow hub is
-   * bounded to this budget once per account per process.
+   * its first request whenever the hub answers in time. Every request for a
+   * cold account that arrives while that first read is in flight waits up
+   * to this budget too (each against the one flight), bounded overall by
+   * `timeoutMs`, after which the miss is cached and served at once.
    */
   coldWaitMs: number;
 }
