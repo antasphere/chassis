@@ -1,5 +1,4 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
-import { pendingBodyRefusal } from './body-refusal.js';
 import type { MiddlewareHandler } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { and, eq } from 'drizzle-orm';
@@ -143,10 +142,6 @@ export function idempotency({ db, authSecret, toolTargets }: IdempotencyDeps): M
     }
     const principal = c.get('principal');
     if (!principal) return next(); // the route gates 401 downstream
-    // A size refusal the cap deferred to the entitlement gate is pending:
-    // nothing reads this body, and a refused request claims no key
-    // (PRDCT-2632; the gate refuses it).
-    if (pendingBodyRefusal(c)) return next();
 
     // Hono caches the body: the zod validator's later c.req.json() re-reads
     // from the same cache (verified on hono 4.12), so this text() is safe.

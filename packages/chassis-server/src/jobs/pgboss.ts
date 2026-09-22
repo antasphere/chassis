@@ -153,9 +153,16 @@ export async function createJobs(
     // must never hold the lock.
     await withInstallLock(env.DATABASE_URL, logger, async () => {
       await boss.start();
-      // The held queue first: every usage job names it as its dead letter
-      // (a foreign key on the job row). Its own retry covers the re-drive's
-      // local insert, so a database blip never drops a held batch either.
+      // The held queue first, then the usage queue pointed at it as its dead
+      // letter — ON THE QUEUE, never on a send: an api-role replica sends
+      // without DDL rights and may roll before the worker of this release,
+      // and pg-boss's job row holds a foreign key on the dead letter it
+      // names, so a per-send dead letter would fail every send until the
+      // held queue exists (/code-review, lane D). The queue's setting covers
+      // every job in it, whoever sent it; `updateQueue` sets it on an
+      // installation that predates the held queue. The held queue's own
+      // retry covers the re-drive's local insert, so a database blip never
+      // drops a held batch either.
       await boss.createQueue(USAGE_HELD_QUEUE, {
         name: USAGE_HELD_QUEUE,
         retryLimit: 10,
@@ -163,6 +170,7 @@ export async function createJobs(
         retryBackoff: true
       });
       await boss.createQueue(USAGE_QUEUE);
+      await boss.updateQueue(USAGE_QUEUE, { name: USAGE_QUEUE, deadLetter: USAGE_HELD_QUEUE });
       // Audit retention queue: 0 = keep forever; the queue always exists so
       // the schedule can be flipped later.
       await boss.createQueue(AUDIT_PURGE_QUEUE);
@@ -463,7 +471,13 @@ export interface UsageRetry {
  */
 export const DEFAULT_USAGE_RETRY: UsageRetry = { limit: 10, delaySeconds: 30, heldDelaySeconds: 3600 };
 
-/** The ONE statement of how a usage event is sent: the sink and the held queue's re-drive share it. */
+/**
+ * The ONE statement of how a usage event is sent: the sink and the held
+ * queue's re-drive share it. The dead letter (where the batch goes when the
+ * budget runs out: held, never dropped) is the QUEUE's setting, installed
+ * by the worker boot, so a send names none and an api-role replica needs
+ * nothing to exist beyond the usage queue itself.
+ */
 export function usageSendOptions(event: UsageEvent, retry: UsageRetry): PgBoss.SendOptions {
   return {
     // Guards against re-enqueueing the same PENDING event only; true
@@ -471,9 +485,7 @@ export function usageSendOptions(event: UsageEvent, retry: UsageRetry): PgBoss.S
     singletonKey: event.id,
     retryLimit: retry.limit,
     retryDelay: retry.delaySeconds,
-    retryBackoff: true,
-    // Where the batch goes when the budget runs out: held, never dropped.
-    deadLetter: USAGE_HELD_QUEUE
+    retryBackoff: true
   };
 }
 

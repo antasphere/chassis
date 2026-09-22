@@ -1,6 +1,7 @@
 export {
   entitlementGate,
   honoPath,
+  isDeferringGate,
   registerEntitlementGate,
   type EntitlementCloud,
   type EntitlementGateDeps

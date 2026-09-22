@@ -11,6 +11,7 @@ import {
   type MeterDeclaration,
   type PlanRequiredDetails,
   type Principal,
+  routeEntitlementKey,
   type RouteEntitlementDeclarations,
   type RouteEntitlementEntry,
   type ToolEntitlements,
@@ -92,10 +93,25 @@ export function honoPath(path: string): string {
   return path.replaceAll(/\{([^}]+)\}/g, ':$1');
 }
 
+/**
+ * The gate handlers of the routes that declare a PLAN LIMIT: the size cap
+ * (api/create-api.ts) defers a declared-oversize refusal exactly when one of
+ * these is on the request's matched route, so the deferral is keyed on the
+ * gate itself, never on a re-reading of the path (PRDCT-2632).
+ */
+const deferringGates = new WeakSet<MiddlewareHandler>();
+
+/** Whether a matched handler is a gate that judges a plan limit before the size cap may refuse. */
+export function isDeferringGate(handler: unknown): boolean {
+  return typeof handler === 'function' && deferringGates.has(handler as MiddlewareHandler);
+}
+
 /** Register the gate on every declared route, at the caller's place in the chain. */
 export function registerEntitlementGate(api: OpenAPIHono, deps: EntitlementGateDeps): void {
   for (const entry of deps.declarations.values()) {
-    api.on(entry.route.method.toUpperCase(), honoPath(entry.route.path), entitlementGate(entry, deps));
+    const gate = entitlementGate(entry, deps);
+    if (entry.limit) deferringGates.add(gate);
+    api.on(entry.route.method.toUpperCase(), honoPath(entry.route.path), gate);
   }
 }
 
@@ -226,7 +242,7 @@ function ossLimitCheck(
 }
 
 export function entitlementGate(entry: RouteEntitlementEntry, deps: EntitlementGateDeps): MiddlewareHandler {
-  const meterKey = entry.meter ? routeKeyOf(entry) : null;
+  const meterKey = entry.meter ? routeEntitlementKey(entry.route) : null;
   return async (c, next) => {
     const principal = c.get('principal');
     const deferredRefusal = pendingBodyRefusal(c);
@@ -287,8 +303,4 @@ export function entitlementGate(entry: RouteEntitlementEntry, deps: EntitlementG
     // Fire and forget: the queue write is durable and the request never waits on billing.
     void deps.usage.emit(event);
   };
-}
-
-function routeKeyOf(entry: RouteEntitlementEntry): string {
-  return `${entry.route.method.toUpperCase()} ${entry.route.path}`;
 }

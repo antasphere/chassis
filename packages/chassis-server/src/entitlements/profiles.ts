@@ -136,12 +136,13 @@ export class EntitlementProfiles {
     // Stale: served now, the refresh runs behind the request.
     if (cached) return cached;
     // Cold: wait for the first read, but never longer than the cold budget.
-    await Promise.race([flight, sleep(this.dials.coldWaitMs)]);
+    await withinBudget(flight, this.dials.coldWaitMs);
     return this.cache.get(accountRef) ?? null;
   }
 
   private async refresh(accountRef: string, previous: CacheEntry | null): Promise<void> {
     this.hubReads += 1;
+    this.sweep();
     const answered = await this.read(accountRef);
     const now = this.now();
     if (answered) {
@@ -174,6 +175,21 @@ export class EntitlementProfiles {
             freshUntilMs: now + this.dials.ttlMs
           }
     );
+  }
+
+  /**
+   * Keep the cache bounded on a long-lived replica: once it holds more than
+   * `SWEEP_ABOVE` accounts, drop every entry that is neither fresh nor
+   * inside its stale window (nothing would be served from it any more).
+   */
+  private sweep(): void {
+    if (this.cache.size <= SWEEP_ABOVE) return;
+    const now = this.now();
+    for (const [key, entry] of this.cache) {
+      const servable =
+        entry.freshUntilMs > now || (entry.answeredAtMs > 0 && entry.answeredAtMs + this.dials.staleMs > now);
+      if (!servable) this.cache.delete(key);
+    }
   }
 
   /** One hub read; null on any failure (logged, never thrown). */
@@ -249,11 +265,18 @@ function limitValue(value: number | boolean): number | null {
   return value;
 }
 
-function sleep(ms: number): Promise<void> {
+/** How many accounts the cache may hold before a refresh sweeps the unservable entries. */
+const SWEEP_ABOVE = 5_000;
+
+/** Resolve when `flight` settles or `ms` elapse, whichever first; the timer never outlives the wait. */
+function withinBudget(flight: Promise<void>, ms: number): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
-    // A pending wait must never keep the process alive.
-    timer.unref?.();
+    timer.unref?.(); // a pending wait must never keep the process alive
+    void flight.finally(() => {
+      clearTimeout(timer);
+      resolve();
+    });
   });
 }
 

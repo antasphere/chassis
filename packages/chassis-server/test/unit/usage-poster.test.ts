@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { UsageEvent } from '@antasphere/chassis-contract';
 import { HubMachineToken, HubUsagePoster } from '@antasphere/chassis-server';
 import { DEFAULT_FAILURE_HOLD_MS, DEFAULT_INVALID_CLIENT_HOLD_MS } from '../../src/entitlements/index.js';
-import { DEFAULT_USAGE_RETRY, PgBossUsageSink, USAGE_HELD_QUEUE } from '../../src/jobs/index.js';
+import { DEFAULT_USAGE_RETRY, PgBossUsageSink } from '../../src/jobs/index.js';
 import type { Logger } from '@antasphere/chassis-server/logger';
 
 /**
@@ -416,14 +416,9 @@ describe('PgBossUsageSink', () => {
       {
         queue: 'usage-events',
         data: e,
-        // The budget's end is a hold (the dead letter), never a drop (PRDCT-2635).
-        options: {
-          singletonKey: e.id,
-          retryLimit: 10,
-          retryDelay: 30,
-          retryBackoff: true,
-          deadLetter: USAGE_HELD_QUEUE
-        }
+        // The budget's end is a hold (the QUEUE's dead letter, set at install,
+        // never named on a send), never a drop (PRDCT-2635).
+        options: { singletonKey: e.id, retryLimit: 10, retryDelay: 30, retryBackoff: true }
       }
     ]);
     // A shrunk budget (a test seam) is passed through as given.
@@ -433,10 +428,7 @@ describe('PgBossUsageSink', () => {
       heldDelaySeconds: 1
     });
     await fast.emit(e);
-    expect(sends[1]!.options).toMatchObject({
-      retryLimit: 2,
-      retryDelay: 1,
-      deadLetter: 'usage-events-held'
-    });
+    expect(sends[1]!.options).toMatchObject({ retryLimit: 2, retryDelay: 1 });
+    expect(sends[1]!.options).not.toHaveProperty('deadLetter');
   });
 });
