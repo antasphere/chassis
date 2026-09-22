@@ -1,5 +1,6 @@
 import type { OpenAPIHono } from '@hono/zod-openapi';
 import type { Context, MiddlewareHandler } from 'hono';
+import { COMPOSED_HANDLER } from 'hono/utils/constants';
 import { ulid } from 'ulid';
 import {
   ENTITLEMENT_TIERS,
@@ -105,9 +106,16 @@ export function honoPath(path: string): string {
  */
 const deferringGates = new WeakSet<MiddlewareHandler>();
 
-/** Whether a matched handler is a gate that judges a plan limit before the size cap may refuse. */
+/**
+ * Whether a matched handler is a gate that judges a plan limit before the
+ * size cap may refuse. Hono's `route()` wraps a sub-app's handlers when that
+ * sub-app has its own `onError` (`COMPOSED_HANDLER` points at the original),
+ * so the wrapper is unwrapped first: otherwise an `api.onError` added one day
+ * would switch every deferral off (verifier round 2).
+ */
 export function isDeferringGate(handler: unknown): boolean {
-  return typeof handler === 'function' && deferringGates.has(handler as MiddlewareHandler);
+  const target = (handler as { [COMPOSED_HANDLER]?: unknown } | null)?.[COMPOSED_HANDLER] ?? handler;
+  return typeof target === 'function' && deferringGates.has(target as MiddlewareHandler);
 }
 
 /** Register the gate on every declared route, at the caller's place in the chain. */

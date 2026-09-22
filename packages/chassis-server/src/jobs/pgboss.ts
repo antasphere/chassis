@@ -158,9 +158,13 @@ export async function createJobs(
       // without DDL rights and may roll before the worker of this release,
       // and pg-boss's job row holds a foreign key on the dead letter it
       // names, so a per-send dead letter would fail every send until the
-      // held queue exists (/code-review, lane D). The queue's setting covers
-      // every job in it, whoever sent it; `updateQueue` sets it on an
-      // installation that predates the held queue. What pg-boss 10 gives a
+      // held queue exists (/code-review, lane D). pg-boss stamps the queue's
+      // dead letter on each job row at insert, so it covers every job sent
+      // after `updateQueue` ran, whoever sent it; on an installation that
+      // predates the held queue, a job an api-role replica sends between its
+      // own boot and this worker's install carries none (verifier round 2,
+      // accepted: one rollout's gap, and only a long outage on top would end
+      // it in a terminal failure). What pg-boss 10 gives a
       // held job: the dead-letter copy carries the ORIGINAL retry limit (ten)
       // and no delay, so a re-send that throws (a local insert refused while
       // fetches still succeed) is retried ten times back to back, then that
