@@ -1,4 +1,5 @@
 import type { MiddlewareHandler } from 'hono';
+import { pendingBodyRefusal } from './body-refusal.js';
 import { apiError } from '../api/errors.js';
 
 /**
@@ -58,6 +59,9 @@ export function jsonDepthLimit(maxDepth: number = MAX_JSON_DEPTH): MiddlewareHan
   return async (c, next) => {
     const raw = c.req.raw;
     if (!raw.body) return next();
+    // A size refusal the cap deferred to the entitlement gate is pending:
+    // nothing reads this body (PRDCT-2632; the gate refuses it).
+    if (pendingBodyRefusal(c)) return next();
     if (!JSON_CONTENT_TYPE.test(raw.headers.get('content-type') ?? '')) return next();
     let text: string;
     try {

@@ -1,11 +1,12 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
+import type { MiddlewareHandler } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { createEmailVerificationToken } from 'better-auth/api';
 import { jwtVerify } from 'jose';
 import { registerOpenApiDoc } from './index.js';
 import { ulid } from 'ulid';
 import { and, asc, desc, eq } from 'drizzle-orm';
-import { ACTIVE_WORKSPACE_HEADER } from '@antasphere/chassis-contract';
+import { ACTIVE_WORKSPACE_HEADER, type RouteEntitlementDeclarations } from '@antasphere/chassis-contract';
 import { instanceRoute, setupRoute } from '@antasphere/chassis-contract/routes';
 import {
   account,
@@ -25,6 +26,7 @@ import type {
   ApiContext,
   ApiRateLimitContext,
   ApiRoutesContext,
+  BodyCap,
   ToolDefinition,
   ToolRateLimiters
 } from '../tool-definition.js';
@@ -32,6 +34,7 @@ import type { ApiKeyService } from '../apikeys/index.js';
 import type { EmailDriver } from '../email/index.js';
 import { auditMiddleware, type AuditService } from '../audit/index.js';
 import {
+  honoPath,
   registerEntitlementGate,
   type EntitlementCloud,
   type ToolEntitlementDeclaration
@@ -403,16 +406,48 @@ export function createApiApp<
     maxSize: 1024 * 1024,
     onError: (c) => c.json(err('payload_too_large', 'Request body exceeds the 1 MiB limit'), 413)
   });
-  // The tool's own caps, built ONCE here (never per request).
+  // The tool's own caps, declared ONCE (the slot's factory runs here, never
+  // per request) and built into middleware per cap object below.
   const toolBodyLimit = tool.api.bodyLimit?.(hookContext);
   //  - the viewer's form file upload (PRDCT-2403): one raw streamed file per
   //    request, capped MID-STREAM by the form-upload ceiling in its handler.
+  //
+  // A declared Content-Length over a tool cap on a route that declares a
+  // PLAN LIMIT is not refused here (PRDCT-2632): the entitlement gate must
+  // see the declared size first, so a metered account meets 403
+  // `plan_required` with its upgrade link at any size and the cap's 413
+  // answers only when the plan allows the size. The refusal is parked on
+  // the context (`bodyRefusal`), nothing reads the body meanwhile (the depth
+  // scan and the idempotency claim step aside), and the gate fires it. An
+  // undeclared body is still counted and cut mid-stream by the cap.
+  const isDeclaredLimitRoute = declaredLimitRouteMatcher(deps.entitlements.routes);
+  const capMiddleware = new WeakMap<BodyCap, MiddlewareHandler>();
+  const capped = (cap: BodyCap): MiddlewareHandler => {
+    let built = capMiddleware.get(cap);
+    if (!built) {
+      const streamCap = bodyLimit({ maxSize: cap.maxBytes, onError: cap.onError });
+      built = (c, next) => {
+        const declared = Number(c.req.header('content-length') ?? '');
+        if (
+          Number.isFinite(declared) &&
+          declared > cap.maxBytes &&
+          isDeclaredLimitRoute(c.req.method, c.req.path)
+        ) {
+          c.set('bodyRefusal', () => cap.onError(c));
+          return next();
+        }
+        return streamCap(c, next);
+      };
+      capMiddleware.set(cap, built);
+    }
+    return built;
+  };
   api.use('*', (c, next) => {
     const path = c.req.path;
     if (path.startsWith('/api/v1/files')) return next();
     const verdict = toolBodyLimit?.(path);
     if (verdict === 'exempt') return next();
-    if (verdict) return verdict(c, next);
+    if (verdict) return capped(verdict)(c, next);
     return jsonBodyLimit(c, next);
   });
 
@@ -631,7 +666,6 @@ export function createApiApp<
     usage: registry.usage,
     cloud: deps.entitlementCloud,
     source: async () => ({ instanceId: await instanceId(), edition: env.EDITION, version: env.APP_VERSION }),
-    toolSlug: tool.identity.slug,
     logger
   });
 
@@ -1152,4 +1186,34 @@ export function createApiApp<
   api.all('*', (c) => c.json(err('not_found', 'Not found'), 404));
 
   return api;
+}
+
+/**
+ * `(method, path) → whether the request lands on a route that declares a
+ * plan limit`, over the tool's declarations: the routes the size cap defers
+ * its declared-size refusal on (PRDCT-2632). Paths are matched as Hono
+ * registers them under the `/api/v1` mount (`{id}` → one segment).
+ */
+export function declaredLimitRouteMatcher(
+  declarations: RouteEntitlementDeclarations
+): (method: string, path: string) => boolean {
+  const routes = [...declarations.values()]
+    .filter((entry) => entry.limit)
+    .map((entry) => ({
+      method: entry.route.method.toUpperCase(),
+      pattern: new RegExp(
+        '^/api/v1' +
+          honoPath(entry.route.path)
+            .split('/')
+            .map((segment) =>
+              segment.startsWith(':') ? '[^/]+' : segment.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&')
+            )
+            .join('/') +
+          '$'
+      )
+    }));
+  return (method, path) => {
+    const m = method.toUpperCase();
+    return routes.some((r) => r.method === m && r.pattern.test(path));
+  };
 }

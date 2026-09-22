@@ -169,7 +169,6 @@ describe('usage pipeline end-to-end (seam proof)', () => {
       accountRef: '77777777-aaaa-4bbb-8ccc-000000000obs',
       userId: null,
       via: 'session',
-      toolSlug: 'test',
       source: { instanceId: '01JZZZZZZZZZZZZZZZZZZZZZZ1', edition: 'oss', version: 'test' }
     };
     await app.registry.usage.emit(event);

@@ -161,8 +161,6 @@ export interface UsageEvent {
   /** The resource the handler recorded (its audit `resourceType` / `resourceId`), when it recorded one. */
   resourceType?: string;
   resourceId?: string;
-  /** The tool's slug, from its identity. */
-  toolSlug: string;
   source: {
     instanceId: string;
     edition: string;

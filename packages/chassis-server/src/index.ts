@@ -17,6 +17,7 @@ export type {
   ApiContext,
   ApiRateLimitContext,
   ApiRoutesContext,
+  BodyCap,
   BodyLimitVerdict,
   BootOverrides,
   BootResult,

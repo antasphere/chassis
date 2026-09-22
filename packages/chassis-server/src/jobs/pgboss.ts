@@ -1,5 +1,6 @@
 import PgBoss from 'pg-boss';
 import pg from 'pg';
+import { Counter } from 'prom-client';
 import { sql } from 'drizzle-orm';
 import type { Db } from '@antasphere/chassis-db';
 import type { UsageDownstream, UsageEvent, UsageSink } from '@antasphere/chassis-contract';
@@ -22,6 +23,13 @@ import { parseSuperadminEmails } from '../accounts/superadmin.js';
  */
 export const USAGE_QUEUE = 'usage-events';
 export const AUDIT_PURGE_QUEUE = 'audit-purge';
+/**
+ * Where a usage batch goes when the retry budget of `USAGE_QUEUE` runs out
+ * (pg-boss's dead letter, PRDCT-2635): a worker logs it at error level,
+ * counts it, and re-sends every event to `USAGE_QUEUE` after
+ * `heldDelaySeconds` — forever. Failed usage is held, never lost.
+ */
+export const USAGE_HELD_QUEUE = 'usage-events-held';
 export const APIKEY_EXPIRY_QUEUE = 'apikey-expiry-sweep';
 export const IDEMPOTENCY_PURGE_QUEUE = 'idempotency-purge';
 export const ORPHAN_USER_PURGE_QUEUE = 'orphan-user-purge';
@@ -89,6 +97,8 @@ async function withInstallLock(
 export interface Jobs {
   boss: PgBoss;
   stop: () => Promise<void>;
+  /** The counters boot registers on the app's /metrics registry. */
+  promMetrics: Counter<string>[];
 }
 
 export async function createJobs(
@@ -108,9 +118,17 @@ export async function createJobs(
   /** System-actor audit rows for the orphan purge. */
   audit: AuditService,
   /** The tool's own jobs, installed and polled between the chassis ones. */
-  toolJobs: readonly JobDeclaration[] = []
+  toolJobs: readonly JobDeclaration[] = [],
+  /** The usage queue's retry budget and the hold before a re-drive (a test shrinks both). */
+  usageRetry: UsageRetry = DEFAULT_USAGE_RETRY
 ): Promise<Jobs> {
   const isWorker = env.SERVICE_ROLE === 'all' || env.SERVICE_ROLE === 'worker';
+  // registers: [] — boot attaches it to the app registry.
+  const held = new Counter({
+    name: 'usage_events_held_total',
+    help: 'Usage events that exhausted the retry budget and were held for an hourly re-drive (the hub, or HUB_CLIENT_ID/HUB_CLIENT_SECRET, needs an operator)',
+    registers: []
+  });
 
   const boss = new PgBoss({
     connectionString: env.DATABASE_URL,
@@ -135,6 +153,15 @@ export async function createJobs(
     // must never hold the lock.
     await withInstallLock(env.DATABASE_URL, logger, async () => {
       await boss.start();
+      // The held queue first: every usage job names it as its dead letter
+      // (a foreign key on the job row). Its own retry covers the re-drive's
+      // local insert, so a database blip never drops a held batch either.
+      await boss.createQueue(USAGE_HELD_QUEUE, {
+        name: USAGE_HELD_QUEUE,
+        retryLimit: 10,
+        retryDelay: 60,
+        retryBackoff: true
+      });
       await boss.createQueue(USAGE_QUEUE);
       // Audit retention queue: 0 = keep forever; the queue always exists so
       // the schedule can be flipped later.
@@ -181,6 +208,26 @@ export async function createJobs(
         }
       }
       logger.debug({ count: jobs.length }, 'usage events flushed');
+    });
+
+    // The budget's end is a HOLD, never a drop (PRDCT-2635): pg-boss moves a
+    // batch that exhausted its retries here; each event is logged where an
+    // operator sees it, counted on /metrics, and re-sent to the usage queue
+    // after the hold — round after round, until the hub accepts it. An
+    // outage of a day, an older hub, a wrong secret: the usage waits.
+    await boss.work<UsageEvent>(USAGE_HELD_QUEUE, { batchSize: 50 }, async (jobs) => {
+      const ids = jobs.map((job) => job.data.id);
+      logger.error(
+        { count: jobs.length, ids, retryAfterSeconds: usageRetry.heldDelaySeconds },
+        'usage: events exhausted the retry budget — held, re-driven after the hold; check the hub, HUB_CLIENT_ID/HUB_CLIENT_SECRET and the instance’s registry entry (usage_events_held_total)'
+      );
+      held.inc(jobs.length);
+      for (const job of jobs) {
+        await boss.send(USAGE_QUEUE, job.data, {
+          ...usageSendOptions(job.data, usageRetry),
+          startAfter: usageRetry.heldDelaySeconds
+        });
+      }
     });
 
     // Audit retention: a nightly purge keeps audit_log from growing without
@@ -386,7 +433,8 @@ export async function createJobs(
     boss,
     stop: async () => {
       await boss.stop({ graceful: true, wait: true });
-    }
+    },
+    promMetrics: [held]
   };
 }
 
@@ -394,31 +442,51 @@ export async function createJobs(
  * The UsageSink bound into the registry: durable, batched emission via
  * pg-boss. Domain code calls emit() and never blocks on the downstream.
  */
+export interface UsageRetry {
+  /** Retries before a batch is held (pg-boss `retryLimit`). */
+  limit: number;
+  /** The first retry's delay in seconds, doubled at each retry (`retryDelay` + `retryBackoff`). */
+  delaySeconds: number;
+  /** How long a held event waits before its next round through the queue. */
+  heldDelaySeconds: number;
+}
+
 /**
  * The queue's retry budget: ten retries with exponential backoff from thirty
  * seconds, about eight and a half hours in all — a hub deploy (the hub
  * deploys first, and answers 404 until it has) or an outage of an afternoon
- * loses nothing. At-least-once is the posture; the hub dedupes by ULID.
+ * costs nothing but time. The budget's END is a hold, not a loss
+ * (PRDCT-2635): the batch moves to `USAGE_HELD_QUEUE`, is logged and
+ * counted, and comes back through the queue an hour later, and an hour
+ * after that, until the hub accepts it. At-least-once is the posture; the
+ * hub dedupes by ULID.
  */
-export const DEFAULT_USAGE_RETRY = { limit: 10, delaySeconds: 30 } as const;
+export const DEFAULT_USAGE_RETRY: UsageRetry = { limit: 10, delaySeconds: 30, heldDelaySeconds: 3600 };
+
+/** The ONE statement of how a usage event is sent: the sink and the held queue's re-drive share it. */
+export function usageSendOptions(event: UsageEvent, retry: UsageRetry): PgBoss.SendOptions {
+  return {
+    // Guards against re-enqueueing the same PENDING event only; true
+    // idempotency is the receiver's job (dedupe by ULID, per contract).
+    singletonKey: event.id,
+    retryLimit: retry.limit,
+    retryDelay: retry.delaySeconds,
+    retryBackoff: true,
+    // Where the batch goes when the budget runs out: held, never dropped.
+    deadLetter: USAGE_HELD_QUEUE
+  };
+}
 
 export class PgBossUsageSink implements UsageSink {
   constructor(
     private readonly boss: PgBoss,
     private readonly logger: Logger,
-    private readonly retry: { limit: number; delaySeconds: number } = DEFAULT_USAGE_RETRY
+    private readonly retry: UsageRetry = DEFAULT_USAGE_RETRY
   ) {}
 
   async emit(event: UsageEvent): Promise<void> {
     try {
-      await this.boss.send(USAGE_QUEUE, event, {
-        // Guards against re-enqueueing the same PENDING event only; true
-        // idempotency is the receiver's job (dedupe by ULID, per contract).
-        singletonKey: event.id,
-        retryLimit: this.retry.limit,
-        retryDelay: this.retry.delaySeconds,
-        retryBackoff: true
-      });
+      await this.boss.send(USAGE_QUEUE, event, usageSendOptions(event, this.retry));
     } catch (err) {
       // Usage must never break the request path.
       this.logger.error({ err, meter: event.meter }, 'usage emit failed');

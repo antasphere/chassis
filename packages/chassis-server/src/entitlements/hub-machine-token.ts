@@ -16,8 +16,19 @@ import type { Logger } from '../logger.js';
  */
 export const HUB_USAGE_SCOPE = USAGE_WRITE_SCOPE;
 
-/** How long a failed mint is held before the hub is asked again: one attempt per instance per window during an outage. */
+/** How long a TRANSIENT mint failure is held before the hub is asked again: one attempt per instance per window during an outage. */
 export const DEFAULT_FAILURE_HOLD_MS = 5_000;
+/**
+ * How long a mint the hub refused as a CONFIGURATION error (`invalid_client`
+ * and its kin) is held (PRDCT-2637). It heals only by an operator's change,
+ * so asking again in five seconds buys nothing and costs the hub's per-IP
+ * token wall, the one bucket people's sign-ins from this instance's
+ * address share: a few replicas with a stale secret would start answering
+ * 429 to a person signing in. Five minutes bounds a fleet to a handful of
+ * mints an hour; `invalidate()` (a 401 from the hub on a live token) still
+ * clears the hold, since the hub then changed its mind.
+ */
+export const DEFAULT_INVALID_CLIENT_HOLD_MS = 5 * 60_000;
 
 export interface HubMachineTokenOptions {
   issuerUrl: string;
@@ -30,8 +41,10 @@ export interface HubMachineTokenOptions {
   timeoutMs?: number | undefined;
   /** Re-mint this many ms before the hub's `expires_in` runs out. */
   refreshSkewMs?: number | undefined;
-  /** How long a failed mint is held before the hub is asked again (the negative cache). */
+  /** How long a transient mint failure is held before the hub is asked again (the negative cache). */
   failureHoldMs?: number | undefined;
+  /** How long an `invalid_client`-kind refusal is held (the configuration-error hold, PRDCT-2637). */
+  invalidClientHoldMs?: number | undefined;
   fetchImpl?: typeof fetch | undefined;
   now?: (() => number) | undefined;
 }
@@ -54,13 +67,15 @@ export class HubMachineToken {
   private readonly timeoutMs: number;
   private readonly refreshSkewMs: number;
   private readonly failureHoldMs: number;
+  private readonly invalidClientHoldMs: number;
   private cached: { token: string; expiresAtMs: number } | null = null;
   private inflight: Promise<string> | null = null;
   /**
    * The negative cache: after a mint fails, `get()` throws at once until this
    * moment instead of re-asking the hub. During an outage the first metered
    * request of every account per TTL would otherwise pay the token timeout
-   * again; with it, one attempt per `failureHoldMs` for the whole instance.
+   * again; with it, one attempt per `failureHoldMs` for the whole instance,
+   * and one per `invalidClientHoldMs` when the hub refused the client itself.
    */
   private failedUntilMs = 0;
   private lastFailure: HubMachineTokenError | null = null;
@@ -74,6 +89,7 @@ export class HubMachineToken {
     this.timeoutMs = opts.timeoutMs ?? 10_000;
     this.refreshSkewMs = opts.refreshSkewMs ?? 60_000;
     this.failureHoldMs = opts.failureHoldMs ?? DEFAULT_FAILURE_HOLD_MS;
+    this.invalidClientHoldMs = opts.invalidClientHoldMs ?? DEFAULT_INVALID_CLIENT_HOLD_MS;
   }
 
   /** The current token, minted or refreshed as needed. Throws `HubMachineTokenError`. */
@@ -98,7 +114,10 @@ export class HubMachineToken {
               ? cause
               : new HubMachineTokenError(String(cause), 'transient');
           this.lastFailure = failure;
-          this.failedUntilMs = this.now() + this.failureHoldMs;
+          // A configuration error is held minutes, a transient one seconds
+          // (PRDCT-2637): the former never heals by asking again.
+          this.failedUntilMs =
+            this.now() + (failure.kind === 'invalid_client' ? this.invalidClientHoldMs : this.failureHoldMs);
           throw failure;
         })
         .finally(() => {

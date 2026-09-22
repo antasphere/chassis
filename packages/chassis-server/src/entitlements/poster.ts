@@ -1,3 +1,4 @@
+import { Counter } from 'prom-client';
 import { usageIngestResultSchema, type UsageDownstream, type UsageEvent } from '@antasphere/chassis-contract';
 import type { Logger } from '../logger.js';
 import { HubMachineTokenError, type HubMachineToken } from './hub-machine-token.js';
@@ -19,8 +20,16 @@ import { HubMachineTokenError, type HubMachineToken } from './hub-machine-token.
  *    logged at error level and dropped, per the events' ids;
  *  - 403 (a client without the scope): logged at error level and treated as
  *    an outage, so the events wait for the operator rather than vanish;
+ *  - a 2xx whose body is not the hub's answer: an OUTAGE too (PRDCT-2629) —
+ *    a proxy page or a hub regression must never read as delivery;
  *  - a `rejected` event in a 2xx answer: logged with the hub's reason and
  *    dropped (the hub judged it).
+ *
+ * The queue's retry budget never ends in a loss: a batch it gives up on is
+ * held and re-driven hourly (jobs/pgboss.ts, PRDCT-2635). What the poster
+ * saw is counted on /metrics (`usage_poster_events_total` per event
+ * outcome, `usage_poster_batches_total` per batch outcome), so a rail that
+ * rejects everything is one scrape away, not one log line nobody reads.
  */
 export interface HubUsagePosterOptions {
   issuerUrl: string;
@@ -45,17 +54,41 @@ interface EventResult {
   details?: unknown;
 }
 
+/** The sentinel `results()` answers for a batch the hub refused as malformed: dropped whole, never retried. */
+const DROPPED: EventResult[] = [];
+
 export class HubUsagePoster implements UsageDownstream {
   private readonly url: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
   /** How many POSTs reached the hub — a test seam. */
   posts = 0;
+  /** Per-event outcomes as the hub answered them (or as the poster dropped them). */
+  readonly events: Counter<'outcome'>;
+  /** Per-batch outcomes: delivered (a hub answer read), retried (an outage), dropped (malformed). */
+  readonly batches: Counter<'outcome'>;
+  /** The counters boot registers on the app's /metrics registry (cloud only: oss never builds a poster). */
+  readonly promMetrics: Counter<string>[];
 
   constructor(private readonly opts: HubUsagePosterOptions) {
     this.url = opts.issuerUrl.replace(/\/+$/, '') + '/api/v1/usage/events';
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
     this.timeoutMs = opts.timeoutMs ?? 15_000;
+    // registers: [] — boot attaches these to the app registry; a test builds
+    // a poster without one.
+    this.events = new Counter({
+      name: 'usage_poster_events_total',
+      help: 'Usage events by outcome at the hub: accepted, duplicate, rejected (the hub judged it), dropped (malformed batch)',
+      labelNames: ['outcome'] as const,
+      registers: []
+    });
+    this.batches = new Counter({
+      name: 'usage_poster_batches_total',
+      help: 'Usage batches by outcome: delivered, retried (an outage, the queue retries), dropped (malformed)',
+      labelNames: ['outcome'] as const,
+      registers: []
+    });
+    this.promMetrics = [this.events, this.batches];
   }
 
   async emit(event: UsageEvent): Promise<void> {
@@ -64,13 +97,26 @@ export class HubUsagePoster implements UsageDownstream {
 
   async emitBatch(events: readonly UsageEvent[]): Promise<void> {
     if (events.length === 0) return;
-    const res = await this.post(events, true);
-    const results = await this.results(res, events);
+    let results: EventResult[];
+    try {
+      const res = await this.post(events, true);
+      results = await this.results(res, events);
+    } catch (err) {
+      this.batches.inc({ outcome: 'retried' });
+      throw err;
+    }
+    if (results === DROPPED) {
+      this.batches.inc({ outcome: 'dropped' });
+      this.events.inc({ outcome: 'dropped' }, events.length);
+      return;
+    }
+    this.batches.inc({ outcome: 'delivered' });
     for (const r of results) {
+      this.events.inc({ outcome: r.status });
       if (r.status === 'rejected') {
         this.opts.logger.error(
           { id: r.id, reason: r.reason, details: r.details },
-          'usage poster: the hub rejected an event — dropped'
+          'usage poster: the hub rejected an event — dropped (the hub judged it; counted on usage_poster_events_total{outcome="rejected"})'
         );
       }
     }
@@ -119,10 +165,13 @@ export class HubUsagePoster implements UsageDownstream {
     if (res.ok) {
       const parsed = usageIngestResultSchema.safeParse(await res.json().catch(() => null));
       if (!parsed.success) {
+        // Not the hub's answer (a proxy page, a hub regression): an outage,
+        // never a delivery — the batch is retried (PRDCT-2629).
         this.opts.logger.warn(
-          'usage poster: the hub answered 2xx without readable results — treated as accepted'
+          { status: res.status },
+          'usage poster: the hub answered 2xx without readable results — the batch is retried'
         );
-        return events.map((e) => ({ id: e.id, status: 'accepted' as const }));
+        throw new HubUsagePostError('hub answered 2xx without readable results');
       }
       return parsed.data.results;
     }
@@ -130,9 +179,9 @@ export class HubUsagePoster implements UsageDownstream {
       const body = await res.text().catch(() => '');
       this.opts.logger.error(
         { status: res.status, ids: events.map((e) => e.id), body: body.slice(0, 500) },
-        'usage poster: the hub refused the batch as malformed — dropped (a bug, never healed by a retry)'
+        'usage poster: the hub refused the batch as malformed — dropped (a bug, never healed by a retry; counted on usage_poster_events_total{outcome="dropped"})'
       );
-      return [];
+      return DROPPED;
     }
     if (res.status === 403) {
       this.opts.logger.error(

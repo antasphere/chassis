@@ -9,6 +9,10 @@ import type { Logger } from '@antasphere/chassis-server/logger';
  * tool's tier values, the last known plan kept through an outage for the
  * stale window and then `free`, a never-answered account `free` from the
  * start, and a failure cached like an answer so a storm stays one read.
+ * The read is off the request path (PRDCT-2633): a stale entry is served at
+ * once while the refresh runs behind it, a cold account waits at most the
+ * cold budget. The hub's answer shape is mirrored verbatim, a boolean limit
+ * included (PRDCT-2636).
  */
 
 const logger = { error: () => {}, warn: () => {}, info: () => {}, debug: () => {} } as unknown as Logger;
@@ -19,7 +23,22 @@ const TOOL: ToolEntitlements = {
   features: { sso: { free: false, pro: true }, basic: { free: true, pro: true } }
 };
 
-function profiles(answer: () => Response | Promise<Response>, clock: { now: number }) {
+/** The hub's whole answer (the shape the contract mirrors verbatim), with the test's fields over it. */
+const answerOf = (over: Record<string, unknown>) =>
+  Response.json({
+    accountRef: '77777777-aaaa-4bbb-8ccc-000000000001',
+    plan: 'free',
+    planUntil: null,
+    limits: {},
+    features: [],
+    ...over
+  });
+
+function profiles(
+  answer: () => Response | Promise<Response>,
+  clock: { now: number },
+  dials: { coldWaitMs?: number } = {}
+) {
   let reads = 0;
   const fetchImpl = (async (input: string | URL | Request) => {
     const url = String(input);
@@ -44,7 +63,7 @@ function profiles(answer: () => Response | Promise<Response>, clock: { now: numb
     logger,
     fetchImpl,
     now: () => clock.now,
-    dials: { ttlMs: 30_000, staleMs: 15 * 60_000 }
+    dials: { ttlMs: 30_000, staleMs: 15 * 60_000, ...dials }
   });
   return { p, reads: () => reads };
 }
@@ -52,7 +71,7 @@ function profiles(answer: () => Response | Promise<Response>, clock: { now: numb
 describe('EntitlementProfiles', () => {
   it('reads once per account per TTL, single-flight, and resolves the tier values', async () => {
     const clock = { now: 1_000_000 };
-    const { p, reads } = profiles(() => Response.json({ plan: 'pro' }), clock);
+    const { p, reads } = profiles(() => answerOf({ plan: 'pro' }), clock);
     const [a, b] = await Promise.all([p.get('acct', TOOL), p.get('acct', TOOL)]);
     expect(reads()).toBe(1);
     expect(a).toEqual(b);
@@ -64,14 +83,19 @@ describe('EntitlementProfiles', () => {
     await p.get('acct', TOOL);
     expect(reads()).toBe(1);
     clock.now += 2_000;
-    await p.get('acct', TOOL);
+    // Past the TTL: served at once from the last answer, the refresh behind it.
+    const served = await p.get('acct', TOOL);
+    expect(served.plan).toBe('pro');
+    expect(served.source).toBe('stale');
+    await p.settle();
     expect(reads()).toBe(2);
+    expect((await p.get('acct', TOOL)).source).toBe('hub');
   });
 
   it('the hub’s overrides win over the tier’s values, features included', async () => {
     const clock = { now: 1_000_000 };
     const { p } = profiles(
-      () => Response.json({ plan: 'free', limits: { 'files.maxBytes': 250 }, features: ['sso'] }),
+      () => answerOf({ plan: 'free', limits: { 'files.maxBytes': 250 }, features: ['sso'] }),
       clock
     );
     const profile = await p.get('acct', TOOL);
@@ -98,26 +122,125 @@ describe('EntitlementProfiles', () => {
     const clock = { now: 1_000_000 };
     let mode: 'ok' | 'down' = 'ok';
     const { p, reads } = profiles(
-      () => (mode === 'ok' ? Response.json({ plan: 'pro' }) : Response.json({ error: {} }, { status: 500 })),
+      () => (mode === 'ok' ? answerOf({ plan: 'pro' }) : Response.json({ error: {} }, { status: 500 })),
       clock
     );
     expect((await p.get('acct', TOOL)).plan).toBe('pro');
     mode = 'down';
     clock.now += 31_000;
     const stale = await p.get('acct', TOOL);
-    expect(reads()).toBe(2);
     expect(stale.plan).toBe('pro');
-    expect(stale.source).toBe('hub'); // freshly re-cached from the last answer for another TTL
+    expect(stale.source).toBe('stale'); // served now, the refresh behind it
+    await p.settle();
+    expect(reads()).toBe(2);
+    expect((await p.get('acct', TOOL)).source).toBe('hub'); // re-cached from the last answer for another TTL
     clock.now += 14 * 60_000; // 14.5 min after the answer: still inside the window
     expect((await p.get('acct', TOOL)).plan).toBe('pro');
+    await p.settle();
     clock.now += 61_000; // past 15 min
     const fallen = await p.get('acct', TOOL);
     expect(fallen.plan).toBe('free');
     expect(fallen.source).toBe('default');
     expect(fallen.limits['files.maxBytes']).toBe(100);
+    await p.settle(); // the miss the fallen read started, behind the request
     mode = 'ok';
     clock.now += 31_000;
+    await p.get('acct', TOOL);
+    await p.settle();
     expect((await p.get('acct', TOOL)).plan).toBe('pro');
+  });
+
+  it('a slow hub costs a warm request nothing (PRDCT-2633): the stale plan is served at once, the refresh lands behind it', async () => {
+    const clock = { now: 1_000_000 };
+    let release: (() => void) | null = null;
+    let slow = false;
+    const { p, reads } = profiles(async () => {
+      if (slow) await new Promise<void>((r) => (release = r));
+      return answerOf({ plan: 'pro' });
+    }, clock);
+    expect((await p.get('acct', TOOL)).plan).toBe('pro');
+    slow = true;
+    clock.now += 31_000;
+    const started = Date.now();
+    const served = await p.get('acct', TOOL);
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(served.plan).toBe('pro');
+    expect(served.source).toBe('stale');
+    expect(reads()).toBe(2); // the refresh is in flight, single-flight
+    await p.get('acct', TOOL);
+    expect(reads()).toBe(2);
+    release!();
+    await p.settle();
+    expect((await p.get('acct', TOOL)).source).toBe('hub');
+  });
+
+  it('a cold account waits for its first read up to the cold budget, then is served the default while the read finishes', async () => {
+    const clock = { now: 1_000_000 };
+    let release: (() => void) | null = null;
+    const { p, reads } = profiles(
+      async () => {
+        await new Promise<void>((r) => (release = r));
+        return answerOf({ plan: 'pro' });
+      },
+      clock,
+      { coldWaitMs: 50 }
+    );
+    const started = Date.now();
+    const cold = await p.get('acct', TOOL);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(45);
+    expect(cold.plan).toBe('free');
+    expect(cold.source).toBe('default');
+    expect(reads()).toBe(1);
+    release!();
+    await p.settle();
+    const warm = await p.get('acct', TOOL);
+    expect(warm.plan).toBe('pro');
+    expect(warm.source).toBe('hub');
+    expect(reads()).toBe(1);
+  });
+
+  it('a cold read that answers within the budget is judged right on the first request', async () => {
+    const clock = { now: 1_000_000 };
+    const { p } = profiles(() => answerOf({ plan: 'pro' }), clock, { coldWaitMs: 1_000 });
+    expect((await p.get('acct', TOOL)).plan).toBe('pro');
+  });
+
+  it('every shape the hub’s contract allows parses, a boolean limit included (PRDCT-2636)', async () => {
+    const clock = { now: 1_000_000 };
+    const shapes: Array<[Record<string, unknown>, Record<string, number | null>]> = [
+      [
+        { plan: 'pro', planUntil: '2026-12-31T00:00:00.000Z', limits: {}, features: [] },
+        { 'files.maxBytes': 500, seats: null }
+      ],
+      [
+        { plan: 'free', limits: { 'files.maxBytes': true }, features: [] },
+        { 'files.maxBytes': null, seats: 3 }
+      ],
+      [
+        { plan: 'pro', limits: { seats: false, 'files.maxBytes': 42 }, features: ['sso'] },
+        { 'files.maxBytes': 42, seats: 0 }
+      ],
+      [
+        { plan: 'free', limits: { unknown: true }, features: ['sso', 'basic'] },
+        { 'files.maxBytes': 100, seats: 3 }
+      ]
+    ];
+    for (const [over, limits] of shapes) {
+      const { p } = profiles(() => answerOf(over), clock);
+      const profile = await p.get('acct', TOOL);
+      expect(profile.source, JSON.stringify(over)).toBe('hub');
+      expect(profile.plan).toBe(over.plan);
+      expect(profile.limits, JSON.stringify(over)).toEqual(limits);
+    }
+    // A shape the hub's contract does NOT allow reads as a miss: the mirror is verbatim.
+    for (const bad of [
+      { plan: 'pro', limits: { seats: 'many' } },
+      { plan: 'pro', limits: undefined },
+      { plan: 'pro', accountRef: 'not-a-uuid' }
+    ]) {
+      const { p } = profiles(() => answerOf(bad as Record<string, unknown>), clock);
+      expect((await p.get('acct', TOOL)).source, JSON.stringify(bad)).toBe('default');
+    }
   });
 
   it('a malformed profile and an unreachable hub read as a miss', async () => {
@@ -125,7 +248,7 @@ describe('EntitlementProfiles', () => {
     let kind: 'malformed' | 'network' = 'malformed';
     const { p } = profiles(() => {
       if (kind === 'network') throw new TypeError('fetch failed');
-      return Response.json({ plan: 'platinum' });
+      return answerOf({ plan: 'platinum' });
     }, clock);
     expect((await p.get('a', TOOL)).plan).toBe('free');
     kind = 'network';

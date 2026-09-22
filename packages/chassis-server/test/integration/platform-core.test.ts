@@ -296,7 +296,6 @@ describe('jobs runtime', () => {
       workspaceId: '00000000-0000-0000-0000-000000000000',
       userId: null,
       via: 'session',
-      toolSlug: 'test',
       source: { instanceId: 'test', edition: 'oss', version: 'dev' }
     });
     // send() throwing would have been logged + swallowed; assert the queue exists.
