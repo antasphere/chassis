@@ -10,6 +10,7 @@ import { createApiApp } from './api/create-api.js';
 import { buildPepperRegistry } from './apikeys/index.js';
 import { ApiKeyService } from './apikeys/index.js';
 import { createApp } from './app.js';
+import { hubSubjectResolver } from './entitlements/hub-subject.js';
 import { AuditService } from './audit/index.js';
 import { createEmailDriver, emailAssetsAt, setEmailAssets } from './email/index.js';
 import {
@@ -32,7 +33,14 @@ import { mcpRoutes } from './mcp/index.js';
 import { wellKnownRoutes } from './routes/index.js';
 import { instanceSettings, user as userTable, workspaceMembers, workspaces } from '@antasphere/chassis-db';
 import { FileService } from './files/index.js';
-import { createJobs, PgBossUsageSink } from './jobs/index.js';
+import { createJobs, DEFAULT_USAGE_RETRY, PgBossUsageSink } from './jobs/index.js';
+import {
+  assertToolEntitlements,
+  EMPTY_TOOL_ENTITLEMENTS,
+  EntitlementProfiles,
+  HubMachineToken,
+  HubUsagePoster
+} from './entitlements/index.js';
 import { createLogger } from './logger.js';
 import { createStorageDriver } from './storage/index.js';
 import { createRateLimiters, makeClientIp, rateLimit } from './middleware/index.js';
@@ -612,15 +620,57 @@ export async function bootPlatform<
   // A tool job may need a service built further down (the storage driver is
   // probed later); it reads the domain through this holder at RUN time (nightly).
   const domainRef: { current: TDomain | null } = { current: null };
+  // The billing rail's tool → hub machine channel (the spec, §6), cloud
+  // only: one client_credentials token on the instance's own hub client
+  // (scope usage:write), shared by the usage poster (the queue's downstream)
+  // and the entitlement profile reads. An oss boot constructs none of it.
+  const hubMachineToken =
+    hub && hubTokenResource
+      ? new HubMachineToken({
+          issuerUrl: hub.issuerUrl,
+          clientId: hub.clientId,
+          clientSecret: hub.clientSecret,
+          resource: hubTokenResource,
+          logger,
+          timeoutMs: hubDials.tokenTimeoutMs
+        })
+      : undefined;
+  const hubUsagePoster = hubMachineToken
+    ? new HubUsagePoster({ issuerUrl: hub!.issuerUrl, token: hubMachineToken, logger })
+    : undefined;
   const jobs = await createJobs(
     env,
     db.db,
     logger,
-    overrides.usageDownstream ?? new NoopUsageSink(),
+    overrides.usageDownstream ?? hubUsagePoster ?? new NoopUsageSink(),
     auth,
     audit,
     tool.jobs?.({ env, db: db.db, logger, getTool: () => domainRef.current }) ?? []
   );
+  // The tool's billing-rail declarations (slot 22), asserted once here: a
+  // route that meters an action the price book does not know, or a limit no
+  // tier values, stops the boot naming the route.
+  const entitlements = tool.entitlements?.(env) ?? EMPTY_TOOL_ENTITLEMENTS;
+  assertToolEntitlements(entitlements);
+  const entitlementCloud =
+    hub && hubMachineToken
+      ? {
+          profiles: new EntitlementProfiles({
+            issuerUrl: hub.issuerUrl,
+            token: hubMachineToken,
+            logger,
+            dials: overrides.entitlementDials
+          }),
+          // The upgrade link of a plan refusal: the hub's organization page,
+          // the same target the dashboard shows for a hub-managed workspace.
+          upgradeUrl: hub.issuerUrl,
+          // The reported user of an event is the HUB user (the SSO `sub` on
+          // the account row), never the tool's local id; a user with no hub
+          // link (the operator) reports null. Cached per user for five
+          // minutes: an upload burst is one read, not one per event.
+          hubSubject: hubSubjectResolver(db.db)
+        }
+      : undefined;
 
   // The edition split (internal/federation.md): the local defaults below are the
   // oss binding, passed through bindEditionSeams — the ONE place EDITION
@@ -644,7 +694,7 @@ export async function bootPlatform<
         apiRequestsPerMinute: env.API_RATE_LIMIT_PER_MINUTE,
         apiRequestsBurstPerSecond: env.API_RATE_LIMIT_BURST
       }),
-      usage: new PgBossUsageSink(jobs.boss, logger)
+      usage: new PgBossUsageSink(jobs.boss, logger, overrides.usageRetry ?? DEFAULT_USAGE_RETRY)
     },
     logger,
     { db: db.db, reconciler: hubReconciler }
@@ -748,6 +798,8 @@ export async function bootPlatform<
     // reconcile-as-the-user + suspension/revocation/grant-death verdicts —
     // run by authContext on every authenticated request. undefined on oss.
     principalGate: seams.principalGate,
+    entitlements,
+    entitlementCloud,
     // Cloud only (PRDCT-2443): POST /workspaces creates the organization at
     // the hub AS THE CALLER, then forces their reconcile. undefined on oss —
     // the route creates locally there.

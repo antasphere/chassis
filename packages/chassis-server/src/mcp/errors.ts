@@ -16,7 +16,9 @@ const DOMAIN_HINTS: Record<string, string> = {
     'This endpoint is not opened to machine credentials — a human must do this in the dashboard.',
   invalid_token: 'The OAuth token expired or was revoked. Reconnect the MCP server.',
   unauthenticated: 'No valid credential reached the API. Reconnect the MCP server.',
-  rate_limited: 'Rate limited — wait before retrying.'
+  rate_limited: 'Rate limited — wait before retrying.',
+  plan_required:
+    'The workspace\u2019s plan does not allow this — the upgrade link in this message is where a human raises it.'
 };
 
 /** The chassis hints plus a tool's own: ONE table, the one every lookup reads. */
@@ -29,17 +31,25 @@ export class ApiToolError extends Error {
   readonly status: number;
   readonly code: string | null;
 
-  constructor(status: number, code: string | null, message: string) {
+  /** The wire's `error.details`, when the API sent any (a plan refusal's upgrade link rides here). */
+  readonly details: unknown;
+
+  constructor(status: number, code: string | null, message: string, details?: unknown) {
     super(message);
     this.name = 'ApiToolError';
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 
   toUserFacingText(hints: ErrorHints = DOMAIN_HINTS): string {
     const hint = this.code ? hints[this.code] : undefined;
     const codePart = this.code ? `, code: ${this.code}` : '';
-    return `API error (HTTP ${this.status}${codePart}): ${this.message}${hint ? ` — Next: ${hint}` : ''}`;
+    // A plan refusal carries its upgrade link (the billing rail, §7): the
+    // agent relays it, a human follows it. Text, never a structured field.
+    const upgradeUrl = (this.details as { upgradeUrl?: unknown } | null)?.upgradeUrl;
+    const upgrade = typeof upgradeUrl === 'string' && upgradeUrl ? ` Upgrade: ${upgradeUrl}` : '';
+    return `API error (HTTP ${this.status}${codePart}): ${this.message}${hint ? ` — Next: ${hint}` : ''}${upgrade}`;
   }
 }
 

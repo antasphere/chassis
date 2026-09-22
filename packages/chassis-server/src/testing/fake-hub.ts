@@ -173,11 +173,41 @@ export class FakeHub {
   /** Every introspection call (the grant service's probe pins). */
   readonly introspectRequests: Array<{ token: string; hint: string | null; clientId: string | null }> = [];
 
+  // ── The billing rail's machine channel (the spec, §5 and §6) ──────────
+  /**
+   * `grant_type=client_credentials` on a registry tool client, scope
+   * `usage:write`: the token carries a client and no subject, and the fake
+   * refuses it on every route but `/api/v1/usage/*` — exactly the hub's
+   * stance. Client auth is basic or post; the secret is checked when the
+   * fake was started with one.
+   */
+  private readonly machineTokens = new Map<string, { expMs: number; scope: string }>();
+  /** How many machine tokens were minted (single-flight and refresh pins). */
+  machineTokenMints = 0;
+  /** Lifetime of a machine token (seconds; the real hub mints 900). */
+  machineTokenTtlSeconds = 900;
+  /** `POST /api/v1/usage/events` behavior; `http401_once` refuses the first post with 401 (a dead token), then answers. */
+  usageMode: 'ok' | 'http404' | 'http500' | 'network' | 'http400' | 'http401_once' = 'ok';
+  /** Every usage post: the presented Authorization header + the parsed body. */
+  readonly usageRequests: Array<{ auth: string | null; body: unknown }> = [];
+  /** id → the event as ingested (the dedupe table). */
+  readonly usageEvents = new Map<string, Record<string, unknown>>();
+  /** `GET /api/v1/usage/entitlements` behavior. */
+  entitlementsMode: 'ok' | 'http404' | 'http500' | 'network' = 'ok';
+  /** Every entitlements read: the accountRef asked and the Authorization header. */
+  readonly entitlementsRequests: Array<{ accountRef: string | null; auth: string | null }> = [];
+  /** accountRef → the profile the hub answers; an account not set here is `free` with no overrides. */
+  private readonly entitlementProfiles = new Map<
+    string,
+    { plan: 'free' | 'pro'; limits?: Record<string, number | null>; features?: string[] }
+  >();
+
   private constructor(
     private readonly server: Server,
     readonly issuer: string,
     private keys: HubKey[],
-    private readonly configuredClientId: string | undefined
+    private readonly configuredClientId: string | undefined,
+    private readonly configuredClientSecret: string | undefined
   ) {}
 
   /**
@@ -187,13 +217,21 @@ export class FakeHub {
    * a suite that reaches one of those paths passes it, one that only needs an
    * issuer may omit it.
    */
-  static async start(options: { clientId?: string | undefined } = {}): Promise<FakeHub> {
+  static async start(
+    options: { clientId?: string | undefined; clientSecret?: string | undefined } = {}
+  ): Promise<FakeHub> {
     const key = await newKey();
     const server = createServer();
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('fake hub failed to bind');
-    const hub = new FakeHub(server, `http://127.0.0.1:${address.port}`, [key], options.clientId);
+    const hub = new FakeHub(
+      server,
+      `http://127.0.0.1:${address.port}`,
+      [key],
+      options.clientId,
+      options.clientSecret
+    );
     server.on('request', (req, res) => void hub.handle(req, res));
     return hub;
   }
@@ -388,7 +426,129 @@ export class FakeHub {
     if (req.method === 'POST' && url.pathname === '/api/v1/auth/oauth2/introspect') {
       return this.handleIntrospect(req, res);
     }
+    if (req.method === 'POST' && url.pathname === '/api/v1/usage/events') {
+      return this.handleUsageEvents(req, res);
+    }
+    if (req.method === 'GET' && url.pathname === '/api/v1/usage/entitlements') {
+      return this.handleUsageEntitlements(req, res, url);
+    }
     sendJson(res, 404, { error: 'not_found' });
+  }
+
+  /** Set what `GET /usage/entitlements` answers for one account (the tier's defaults plus overrides). */
+  setEntitlements(
+    accountRef: string,
+    profile: { plan: 'free' | 'pro'; limits?: Record<string, number | null>; features?: string[] }
+  ): void {
+    this.entitlementProfiles.set(accountRef, profile);
+  }
+
+  /** Forget every machine token (a hub restart, a revoked client): the next post answers 401 until re-minted. */
+  revokeMachineTokens(): void {
+    this.machineTokens.clear();
+  }
+
+  /** The machine-token check of `/api/v1/usage/*`: a live client_credentials token with `usage:write`. */
+  private machineBearer(req: IncomingMessage): boolean {
+    const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? '')?.[1] ?? null;
+    const record = bearer ? this.machineTokens.get(bearer) : undefined;
+    return Boolean(record && record.expMs > Date.now() && record.scope.split(' ').includes('usage:write'));
+  }
+
+  // ── POST /api/v1/usage/events: at-least-once in, exactly-once by id ─────
+  private async handleUsageEvents(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let body: unknown = null;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      body = null;
+    }
+    this.usageRequests.push({ auth: req.headers.authorization ?? null, body });
+    if (this.usageMode === 'network') {
+      req.destroy();
+      return;
+    }
+    if (this.usageMode === 'http404') return sendJson(res, 404, { error: { code: 'not_found' } });
+    if (this.usageMode === 'http500') return sendJson(res, 500, { error: { code: 'internal' } });
+    if (this.usageMode === 'http400') {
+      return sendJson(res, 400, { error: { code: 'validation_error', message: 'injected' } });
+    }
+    if (this.usageMode === 'http401_once') {
+      this.usageMode = 'ok';
+      return sendJson(res, 401, { error: { code: 'invalid_token', message: 'Unauthorized' } });
+    }
+    if (!this.machineBearer(req)) {
+      return sendJson(res, 401, { error: { code: 'invalid_token', message: 'Unauthorized' } });
+    }
+    const events = (body as { events?: unknown } | null)?.events;
+    if (!Array.isArray(events) || events.length === 0 || events.length > 500) {
+      return sendJson(res, 400, { error: { code: 'validation_error', message: '1 to 500 events' } });
+    }
+    // The real hub's per-element judgement (PRDCT-2625): each element parses
+    // on its own; the account must be an organization this hub holds; a
+    // named user must be a hub user; a duplicate id is never an error.
+    const knownOrgs = new Set<string>();
+    for (const orgs of this.userOrgs.values()) for (const id of orgs.keys()) knownOrgs.add(id);
+    const results = events.map((raw: unknown) => {
+      const e = raw as Record<string, unknown>;
+      const id = typeof e?.id === 'string' && /^[0-9A-HJKMNP-TV-Z]{26}$/.test(e.id) ? e.id : null;
+      if (
+        !id ||
+        typeof e.accountRef !== 'string' ||
+        typeof e.actionKey !== 'string' ||
+        typeof e.quantity !== 'number' ||
+        typeof e.occurredAt !== 'string' ||
+        !['session', 'api_key', 'oauth'].includes(String(e.via))
+      ) {
+        return { id, status: 'rejected' as const, reason: 'invalid_event', details: [] };
+      }
+      if (!knownOrgs.has(e.accountRef)) return { id, status: 'rejected' as const, reason: 'unknown_account' };
+      if (e.userId != null && !this.userOrgs.has(String(e.userId))) {
+        return { id, status: 'rejected' as const, reason: 'unknown_user' };
+      }
+      if (this.usageEvents.has(id)) return { id, status: 'duplicate' as const };
+      this.usageEvents.set(id, e);
+      return { id, status: 'accepted' as const };
+    });
+    const count = (status: string) => results.filter((r) => r.status === status).length;
+    return sendJson(res, 200, {
+      results,
+      accepted: count('accepted'),
+      duplicate: count('duplicate'),
+      rejected: count('rejected')
+    });
+  }
+
+  // ── GET /api/v1/usage/entitlements?accountRef=: the account's plan ─────
+  private async handleUsageEntitlements(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    const accountRef = url.searchParams.get('accountRef');
+    this.entitlementsRequests.push({ accountRef, auth: req.headers.authorization ?? null });
+    if (this.entitlementsMode === 'network') {
+      req.destroy();
+      return;
+    }
+    if (this.entitlementsMode === 'http404') return sendJson(res, 404, { error: { code: 'not_found' } });
+    if (this.entitlementsMode === 'http500') return sendJson(res, 500, { error: { code: 'internal' } });
+    if (!this.machineBearer(req)) {
+      return sendJson(res, 401, { error: { code: 'invalid_token', message: 'Unauthorized' } });
+    }
+    if (!accountRef)
+      return sendJson(res, 400, { error: { code: 'validation_error', message: 'accountRef' } });
+    const knownOrgs = new Set<string>();
+    for (const orgs of this.userOrgs.values()) for (const id of orgs.keys()) knownOrgs.add(id);
+    if (!knownOrgs.has(accountRef) && !this.entitlementProfiles.has(accountRef)) {
+      return sendJson(res, 404, {
+        error: { code: 'unknown_account', message: 'no organization holds this id' }
+      });
+    }
+    const profile = this.entitlementProfiles.get(accountRef) ?? { plan: 'free' as const };
+    return sendJson(res, 200, {
+      accountRef,
+      plan: profile.plan,
+      planUntil: null,
+      limits: profile.limits ?? {},
+      features: profile.features ?? []
+    });
   }
 
   // ── GET /api/v1/orgs: the caller-scoped org list ──────────────────────
@@ -508,6 +668,7 @@ export class FakeHub {
 
     const grantType = body.get('grant_type') ?? (body.get('code') ? 'authorization_code' : '');
     if (grantType === 'refresh_token') return this.handleRefreshGrant(body, res);
+    if (grantType === 'client_credentials') return this.handleClientCredentials(req, body, res);
 
     const fixture = this.codes.get(body.get('code') ?? '');
     if (!fixture) {
@@ -547,6 +708,51 @@ export class FakeHub {
       token_type: 'Bearer',
       expires_in: fixture.overrides?.expiresInSeconds ?? this.accessTokenTtlSeconds,
       scope: grantScope
+    });
+  }
+
+  /**
+   * The registry client's machine grant (the billing rail, §6): client auth
+   * (basic, or client_id + client_secret in the body) on THIS tool's client,
+   * scope `usage:write` only. Answers a bearer with no subject.
+   */
+  private handleClientCredentials(req: IncomingMessage, body: URLSearchParams, res: ServerResponse): void {
+    const basic = /^Basic\s+(.+)$/i.exec(req.headers.authorization ?? '')?.[1] ?? null;
+    let clientId = body.get('client_id');
+    let clientSecret = body.get('client_secret');
+    if (basic) {
+      const decoded = Buffer.from(basic, 'base64').toString('utf8');
+      const colon = decoded.indexOf(':');
+      if (colon > 0) {
+        clientId = decodeURIComponent(decoded.slice(0, colon));
+        clientSecret = decodeURIComponent(decoded.slice(colon + 1));
+      }
+    }
+    if (!clientId || !clientSecret || clientId !== this.clientId) {
+      return sendJson(res, 401, { error: 'invalid_client', error_description: 'client auth required' });
+    }
+    if (this.configuredClientSecret !== undefined && clientSecret !== this.configuredClientSecret) {
+      return sendJson(res, 401, { error: 'invalid_client', error_description: 'bad secret' });
+    }
+    // The real hub (PRDCT-2625): the scope must be EXACTLY usage:write, and
+    // the RFC 8707 resource must be the hub's own API resource.
+    if (body.get('scope') !== 'usage:write') {
+      return sendJson(res, 400, { error: 'invalid_scope', error_description: 'usage:write only' });
+    }
+    if (body.get('resource') !== this.apiResource) {
+      return sendJson(res, 400, { error: 'invalid_target', error_description: 'resource must be the hub' });
+    }
+    this.machineTokenMints += 1;
+    const token = `mach_${randomUUID()}`;
+    this.machineTokens.set(token, {
+      expMs: Date.now() + this.machineTokenTtlSeconds * 1000,
+      scope: 'usage:write'
+    });
+    return sendJson(res, 200, {
+      access_token: token,
+      token_type: 'Bearer',
+      expires_in: this.machineTokenTtlSeconds,
+      scope: 'usage:write'
     });
   }
 

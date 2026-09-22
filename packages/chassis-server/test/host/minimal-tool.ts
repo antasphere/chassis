@@ -1,8 +1,13 @@
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDb, schema } from '@antasphere/chassis-db';
-import { defineChassisContract } from '@antasphere/chassis-contract';
-import { defineChassisRoutes } from '@antasphere/chassis-contract/routes';
+import {
+  auditedSizeBytes,
+  declareRouteEntitlements,
+  declaredContentLength,
+  defineChassisContract
+} from '@antasphere/chassis-contract';
+import { defineChassisRoutes, fileUploadRoute } from '@antasphere/chassis-contract/routes';
 import type { BootOverrides, BootResult, ToolDefinition } from '@antasphere/chassis-server';
 import { createScopeAllowlist, requireAuth } from '@antasphere/chassis-server/middleware';
 import { THINGS_COPY, THINGS_IDENTITY, THINGS_ROUTES_COPY } from './identity.js';
@@ -84,6 +89,25 @@ export const minimalTool: ToolDefinition<NoEnv, NoDomain> = {
       api.post('/things', (c) => c.json({ thing: { id: 'thing' } }, 201));
       api.get('/things/export', (c) => c.json({ things: [] }, 200));
     }
+  },
+  // The billing rail (slot 22): the generic files upload is the one metered
+  // route of the minimal tool — a price on the chassis' own route is the
+  // tool's declaration, never the chassis'. The limit's oss and free values
+  // are the operator's cap, so nothing changes on either edition below it.
+  entitlements: (env) => {
+    const capBytes = env.MAX_FILE_SIZE_MB * 1024 * 1024;
+    return {
+      actions: [{ key: 'files.upload', creditsPerUnit: 5, unit: 'bytes', label: 'Upload a file' }],
+      limits: { 'files.maxBytes': { oss: capBytes, free: capBytes, pro: 5 * capBytes } },
+      features: { 'things.premium': { free: false, pro: true } },
+      routes: declareRouteEntitlements([
+        {
+          route: fileUploadRoute,
+          meter: { key: 'files.upload', unit: 'bytes', quantity: auditedSizeBytes },
+          limit: { key: 'files.maxBytes', value: declaredContentLength }
+        }
+      ])
+    };
   },
   mcp: {
     registerTools: () => {},

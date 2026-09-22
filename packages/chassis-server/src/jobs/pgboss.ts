@@ -2,7 +2,7 @@ import PgBoss from 'pg-boss';
 import pg from 'pg';
 import { sql } from 'drizzle-orm';
 import type { Db } from '@antasphere/chassis-db';
-import type { UsageEvent, UsageSink } from '@antasphere/chassis-contract';
+import type { UsageDownstream, UsageEvent, UsageSink } from '@antasphere/chassis-contract';
 import type { Env } from '../env.js';
 import type { Logger } from '../logger.js';
 import type { Auth } from '../identity/better-auth.js';
@@ -102,7 +102,7 @@ export async function createJobs(
   >,
   db: Db,
   logger: Logger,
-  downstreamUsage: UsageSink,
+  downstreamUsage: UsageDownstream,
   /** Orphan purge deletes through Better Auth's own internalAdapter (FK-safe cascade). */
   auth: Auth,
   /** System-actor audit rows for the orphan purge. */
@@ -170,9 +170,15 @@ export async function createJobs(
 
     // Usage events flow through the durable queue (at-least-once); the
     // downstream sink (no-op locally, the rail in cloud) dedupes by ULID.
+    // A downstream that takes batches (the hub poster) gets the drained
+    // batch whole; a throw fails every job of it back to the queue's retry.
     await boss.work<UsageEvent>(USAGE_QUEUE, { batchSize: 50 }, async (jobs) => {
-      for (const job of jobs) {
-        await downstreamUsage.emit(job.data);
+      if (downstreamUsage.emitBatch) {
+        await downstreamUsage.emitBatch(jobs.map((job) => job.data));
+      } else {
+        for (const job of jobs) {
+          await downstreamUsage.emit(job.data);
+        }
       }
       logger.debug({ count: jobs.length }, 'usage events flushed');
     });
@@ -388,10 +394,19 @@ export async function createJobs(
  * The UsageSink bound into the registry: durable, batched emission via
  * pg-boss. Domain code calls emit() and never blocks on the downstream.
  */
+/**
+ * The queue's retry budget: ten retries with exponential backoff from thirty
+ * seconds, about eight and a half hours in all — a hub deploy (the hub
+ * deploys first, and answers 404 until it has) or an outage of an afternoon
+ * loses nothing. At-least-once is the posture; the hub dedupes by ULID.
+ */
+export const DEFAULT_USAGE_RETRY = { limit: 10, delaySeconds: 30 } as const;
+
 export class PgBossUsageSink implements UsageSink {
   constructor(
     private readonly boss: PgBoss,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    private readonly retry: { limit: number; delaySeconds: number } = DEFAULT_USAGE_RETRY
   ) {}
 
   async emit(event: UsageEvent): Promise<void> {
@@ -400,7 +415,8 @@ export class PgBossUsageSink implements UsageSink {
         // Guards against re-enqueueing the same PENDING event only; true
         // idempotency is the receiver's job (dedupe by ULID, per contract).
         singletonKey: event.id,
-        retryLimit: 5,
+        retryLimit: this.retry.limit,
+        retryDelay: this.retry.delaySeconds,
         retryBackoff: true
       });
     } catch (err) {

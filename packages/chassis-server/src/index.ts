@@ -4,6 +4,15 @@ import type { BootOverrides, BootResult, ToolDefinition } from './tool-definitio
 
 export { type AppDeps, createApp, postgresErrorCode } from './app.js';
 export type { ExportEntriesFn, ExportEntry } from './api/export.js';
+export {
+  EMPTY_TOOL_ENTITLEMENTS,
+  HUB_USAGE_SCOPE,
+  HubMachineToken,
+  HubUsagePoster,
+  EntitlementProfiles,
+  assertToolEntitlements,
+  type ToolEntitlementDeclaration
+} from './entitlements/index.js';
 export type {
   ApiContext,
   ApiRateLimitContext,

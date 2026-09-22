@@ -6,7 +6,6 @@ import type { SQL } from 'drizzle-orm';
 import { fileGetRoute, filesListRoute, fileUploadRoute } from '@antasphere/chassis-contract/routes';
 import type { Principal } from '@antasphere/chassis-contract';
 import type { DbConn, FileRow } from '@antasphere/chassis-db';
-import { ulid } from 'ulid';
 import type { Env } from '../env.js';
 import type { ScopeRoutes } from './scope-routes.js';
 import type { Logger } from '../logger.js';
@@ -34,9 +33,8 @@ export interface FileRouteDeps {
   service: FileService;
   storage: StorageDriver;
   registry: PlatformRegistry;
-  env: Pick<Env, 'MAX_FILE_SIZE_MB' | 'EDITION' | 'APP_VERSION'>;
+  env: Pick<Env, 'MAX_FILE_SIZE_MB'>;
   logger: Logger;
-  instanceId: () => Promise<string>;
   /**
    * ADR 011 blob-delete guard: true when the blob is referenced by a live
    * version manifest of the tool's resource — DELETE answers 409 file_in_use instead
@@ -97,16 +95,11 @@ export function registerFileRoutes(api: OpenAPIHono, deps: FileRouteDeps): void 
     const { name } = c.req.valid('query');
     const contentType = c.req.header('content-type') ?? 'application/octet-stream';
 
-    // Entitlement gate first (declared size), hard cap enforced mid-stream too.
-    const declared = Number(c.req.header('content-length') ?? '0');
-    const decision = await registry.entitlements.check(principal, {
-      key: 'files.upload',
-      quantity: declared,
-      unit: 'bytes'
-    });
-    if (!decision.allowed) {
-      return c.json(err('entitlement_denied', decision.reason), 413);
-    }
+    // The declared-size check and the usage event are the entitlement gate's
+    // (the billing rail, §7): a tool declares `files.upload` on this route in
+    // its contract and the chassis gate runs it before this handler; the hard
+    // cap is still enforced mid-stream below. Nothing is checked or emitted
+    // by hand here.
     if (!c.req.raw.body) {
       return c.json(err('empty_body', 'Request body required'), 400);
     }
@@ -131,16 +124,6 @@ export function registerFileRoutes(api: OpenAPIHono, deps: FileRouteDeps): void 
         workspaceId: principal.workspaceId,
         fileId: file.id,
         sizeBytes: file.sizeBytes
-      });
-      void registry.usage.emit({
-        id: ulid(),
-        meter: 'files.upload',
-        quantity: file.sizeBytes,
-        unit: 'bytes',
-        occurredAt: new Date().toISOString(),
-        workspaceId: principal.workspaceId,
-        ...(principal.accountRef ? { accountRef: principal.accountRef } : {}),
-        source: { instanceId: await deps.instanceId(), edition: env.EDITION, version: env.APP_VERSION }
       });
 
       return c.json({ file: toWire(file), deduplicated }, 201);

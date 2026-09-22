@@ -103,15 +103,25 @@ export function createProgram<TClient extends ChassisClient<string>>(
           io.err.write(`Error: ${explained}\n`);
           return 1;
         }
+        // A plan refusal (the billing rail, 403 `plan_required`) is not a
+        // key's fault: the sentence carries the upgrade link, the hub's
+        // organization page, where a human raises the plan.
+        const upgradeUrl = (
+          e instanceof PlatformApiError && e.code === 'plan_required'
+            ? (e.details as { upgradeUrl?: unknown } | undefined)?.upgradeUrl
+            : undefined
+        ) as string | undefined;
         const hint =
-          e.status === 403
-            ? ' (this API key is not allowed to do that)'
-            : (errorHint?.(e) ??
-              (e.status === 401
-                ? ` (check the key: \`${identity.bin} verify\`)`
-                : e.status === 404
-                  ? workspaceNotFoundHint(io)
-                  : ''));
+          typeof upgradeUrl === 'string' && upgradeUrl
+            ? ` — upgrade the plan at ${upgradeUrl}`
+            : e.status === 403
+              ? ' (this API key is not allowed to do that)'
+              : (errorHint?.(e) ??
+                (e.status === 401
+                  ? ` (check the key: \`${identity.bin} verify\`)`
+                  : e.status === 404
+                    ? workspaceNotFoundHint(io)
+                    : ''));
         io.err.write(`Error: ${e.message}${hint}\n`);
         return 1;
       }

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { KNOWN_AUTH_METHODS } from '../seams.js';
+import { toolEntitlementsSchema } from '../entitlements.js';
 
 /**
  * GET /api/v1/instance — unauthenticated, cacheable discovery. This is what
@@ -40,6 +41,15 @@ export const instanceInfoSchema = z.object({
     mcp: z.boolean(),
     oauth: z.boolean(),
     files: z.boolean()
-  })
+  }),
+  /**
+   * What this version of the tool declares for the billing rail (its priced
+   * actions with their default credits, its limits and features per tier):
+   * the hub seeds its price book and its plan entitlements from it, staff
+   * read what a version declares, and a client reads the limit it will be
+   * held to (the CLI's upfront refusal with the right number). Optional on
+   * the wire so a client keeps parsing an instance from before the rail.
+   */
+  entitlements: toolEntitlementsSchema.optional()
 });
 export type InstanceInfo = z.infer<typeof instanceInfoSchema>;

@@ -106,7 +106,7 @@ export interface IdentityProvider {
 }
 
 export interface MeteredAction {
-  /** Meter key, e.g. 'files.upload'. */
+  /** The action key, e.g. 'files.upload' (the route's `meter.key`, namespaced by the tool's price book). */
   key: string;
   quantity: number;
   unit: string;
@@ -137,15 +137,32 @@ export interface EntitlementService {
   getRequestQuota(principal: Principal): Promise<RequestQuota>;
 }
 
+/**
+ * One metered action, as the tool emits it and the hub ingests it (the
+ * billing rail spec, §5 `POST /usage/events`). At-least-once from the tool;
+ * exactly-once at the hub by `id`. Paid by the account, reported per user.
+ */
 export interface UsageEvent {
   /** ULID — the idempotency key; receivers dedupe on it (at-least-once emission). */
   id: string;
+  /** The action key (`meter` is its historical name; the two carry the same value). */
   meter: string;
+  actionKey: string;
   quantity: number;
   unit: string;
   occurredAt: string; // ISO 8601
   workspaceId: string;
+  /** The paying account (the workspace's central account id). */
   accountRef?: string;
+  /** The reported user; null when the actor is a resource owner the tool could not name. */
+  userId: string | null;
+  /** How the action arrived: a session (the dashboard), an API key (the CLI), an OAuth client (an MCP connector). */
+  via: 'session' | 'api_key' | 'oauth';
+  /** The resource the handler recorded (its audit `resourceType` / `resourceId`), when it recorded one. */
+  resourceType?: string;
+  resourceId?: string;
+  /** The tool's slug, from its identity. */
+  toolSlug: string;
   source: {
     instanceId: string;
     edition: string;
@@ -155,4 +172,14 @@ export interface UsageEvent {
 
 export interface UsageSink {
   emit(event: UsageEvent): Promise<void>;
+}
+
+/**
+ * Where the durable queue hands the events it drained: the no-op locally,
+ * the hub poster on cloud. A downstream that takes whole batches gets them
+ * as the worker drained them (fifty at most); one that only takes single
+ * events is called once per event.
+ */
+export interface UsageDownstream extends UsageSink {
+  emitBatch?(events: readonly UsageEvent[]): Promise<void>;
 }

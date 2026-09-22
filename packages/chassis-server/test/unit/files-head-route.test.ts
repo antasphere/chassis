@@ -74,9 +74,8 @@ function app(): OpenAPIHono {
     service,
     storage,
     registry: { entitlements: { check: async () => ({ allowed: true }) } } as unknown as PlatformRegistry,
-    env: { MAX_FILE_SIZE_MB: 100, EDITION: 'oss', APP_VERSION: 'test' },
+    env: { MAX_FILE_SIZE_MB: 100 },
     logger: pino({ level: 'silent' }),
-    instanceId: async () => 'inst',
     // PRDCT-1343 made per-deck scoping a required dep. This suite exercises the
     // HEAD route shape (PLT-39), not authorization, so it takes the operator
     // view: undefined = unscoped, exactly what an admin/owner principal gets.
@@ -136,9 +135,8 @@ describe('GET/HEAD /files/:id/content (one registration, verb read off the reque
         }
       } as unknown as StorageDriver,
       registry: { entitlements: { check: async () => ({ allowed: true }) } } as unknown as PlatformRegistry,
-      env: { MAX_FILE_SIZE_MB: 100, EDITION: 'oss', APP_VERSION: 'test' },
+      env: { MAX_FILE_SIZE_MB: 100 },
       logger: pino({ level: 'silent' }),
-      instanceId: async () => 'inst',
       // PRDCT-1343 made per-deck scoping a required dep. This suite exercises the
       // HEAD route shape (PLT-39), not authorization, so it takes the operator
       // view: undefined = unscoped, exactly what an admin/owner principal gets.

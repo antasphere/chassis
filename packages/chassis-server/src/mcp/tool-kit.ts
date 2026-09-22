@@ -95,12 +95,13 @@ export async function fetchApiRaw(
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => null)) as {
-      error?: { code?: string; message?: string };
+      error?: { code?: string; message?: string; details?: unknown };
     } | null;
     throw new ApiToolError(
       res.status,
       body?.error?.code ?? null,
-      body?.error?.message ?? `unexpected response from ${path}`
+      body?.error?.message ?? `unexpected response from ${path}`,
+      body?.error?.details
     );
   }
   return res;
@@ -113,13 +114,14 @@ export async function callApi(ctx: McpToolContext, path: string, init: RequestIn
     headers: { ...(init.headers ?? {}), ...apiHeaders(ctx) }
   });
   const body = (await res.json().catch(() => null)) as {
-    error?: { code?: string; message?: string };
+    error?: { code?: string; message?: string; details?: unknown };
   } | null;
   if (!res.ok) {
     throw new ApiToolError(
       res.status,
       body?.error?.code ?? null,
-      body?.error?.message ?? `unexpected response from ${path}`
+      body?.error?.message ?? `unexpected response from ${path}`,
+      body?.error?.details
     );
   }
   return body;

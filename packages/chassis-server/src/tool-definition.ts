@@ -1,5 +1,5 @@
 import type { Db, DbHandle } from '@antasphere/chassis-db';
-import type { ToolIdentity, UsageSink } from '@antasphere/chassis-contract';
+import type { ToolIdentity, UsageDownstream } from '@antasphere/chassis-contract';
 import type { OpenAPIHono } from '@hono/zod-openapi';
 import type { Hono, MiddlewareHandler } from 'hono';
 import type { RateLimiterAbstract } from 'rate-limiter-flexible';
@@ -10,6 +10,8 @@ import type { ScopeRoutes } from './api/scope-routes.js';
 import type { PepperRegistry } from './apikeys/peppers.js';
 import type { AuditService } from './audit/service.js';
 import type { EmailDriver } from './email/driver.js';
+import type { ToolEntitlementDeclaration } from './entitlements/slot.js';
+import type { EntitlementProfileDials } from './entitlements/profiles.js';
 import type { EnvExtension, ToolEnv } from './env.js';
 import type { FileService } from './files/service.js';
 import type { Auth } from './identity/better-auth.js';
@@ -273,12 +275,32 @@ export interface ToolDefinition<
   mcp: McpToolDefinition;
   /** Slot 21: the tool's wording of the chassis refusals that name its domain. */
   copy: ToolCopy;
+  /**
+   * Slot 22: the billing rail's declarations (the pay-per-use billing rail
+   * spec, §7 and §8b) — the priced actions with their default credits, the
+   * limits and the features per tier, and the routes that carry a meter, a
+   * limit or a feature (declared ONCE, in the tool's contract, beside the
+   * route). A function of the environment so an oss value can be the
+   * operator's env cap. Shown on `GET /instance`; enforced by the chassis'
+   * one entitlement gate, after the scope gate and before the handler.
+   * Absent = nothing declared: no route gated, empty lists in discovery.
+   */
+  entitlements?: (env: ToolEnv<TEnvShape>) => ToolEntitlementDeclaration;
 }
 
 /** Test seams only — production boot never passes overrides. */
 export interface BootOverrides<TToolOverrides = never> {
-  /** Downstream sink the pg-boss worker hands batches to (default: no-op). */
-  usageDownstream?: UsageSink;
+  /** Downstream sink the pg-boss worker hands batches to (default: no-op on oss, the hub poster on cloud). */
+  usageDownstream?: UsageDownstream;
+  /**
+   * The usage queue's retry budget (`retryLimit`, `retryDelay` in seconds,
+   * exponential backoff): production runs ten retries from thirty seconds,
+   * about eight hours in all, so a hub deploy loses nothing; a test shrinks
+   * it to watch a retried batch land in milliseconds.
+   */
+  usageRetry?: { limit: number; delaySeconds: number };
+  /** Shrinks the entitlement profile cache dials (30 s TTL, 15 min stale window) for the cloud tests. */
+  entitlementDials?: Partial<EntitlementProfileDials>;
   /**
    * Replaces the env-derived email driver. Exists because change-email tokens
    * are stateless JWTs (never stored) — tests can only observe them by

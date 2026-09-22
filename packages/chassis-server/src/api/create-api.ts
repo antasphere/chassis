@@ -31,6 +31,11 @@ import type {
 import type { ApiKeyService } from '../apikeys/index.js';
 import type { EmailDriver } from '../email/index.js';
 import { auditMiddleware, type AuditService } from '../audit/index.js';
+import {
+  registerEntitlementGate,
+  type EntitlementCloud,
+  type ToolEntitlementDeclaration
+} from '../entitlements/index.js';
 import { constantTimeEquals } from '../util/index.js';
 import { isSecureSetupOrigin } from '../util/index.js';
 import { authBodyGuard } from '../middleware/index.js';
@@ -252,6 +257,19 @@ export interface ApiDeps<
    * Absent on oss: the route creates locally and carries zero hub surface.
    */
   workspaceCloud?: WorkspaceCloudDeps | undefined;
+  /**
+   * The tool's billing-rail declarations (its `entitlements` slot, asserted
+   * at boot): the lists `GET /instance` shows and the routes the one
+   * entitlement gate enforces (entitlements/gate.ts).
+   */
+  entitlements: ToolEntitlementDeclaration;
+  /**
+   * Cloud edition only: the per-account plan source (the hub's
+   * `GET /usage/entitlements`, cached) and the upgrade link a plan refusal
+   * carries — the hub's organization page. Absent on oss: no plan exists,
+   * the gate compares limits against their oss values and emits nothing.
+   */
+  entitlementCloud?: EntitlementCloud | undefined;
 }
 
 /** Control-flow marker: the singleton claim lost (instance already set up). */
@@ -591,6 +609,32 @@ export function createApiApp<
     auditMiddleware(audit, clientIp, tool.api.auditExempt ? { exempt: tool.api.auditExempt } : {})
   );
 
+  // Instance id for usage-event sources, cached after first read.
+  let cachedInstanceId: string | null = null;
+  const instanceId = async (): Promise<string> => {
+    if (cachedInstanceId) return cachedInstanceId;
+    const [row] = await db.select({ id: instanceSettings.instanceId }).from(instanceSettings).limit(1);
+    cachedInstanceId = row?.id ?? 'unsetup';
+    return cachedInstanceId;
+  };
+
+  // ── The entitlement gate (the billing rail, §7) — AFTER the scope gate
+  // (inside authContext), the idempotency claim and the audit middleware,
+  // BEFORE every handler: one middleware per declared route, so a route
+  // that declares a meter, a limit or a feature is checked here and its
+  // usage event emitted here, and no handler checks or emits by hand. The
+  // dashboard, the CLI and the MCP tools all pass through it.
+  registerEntitlementGate(api, {
+    declarations: deps.entitlements.routes,
+    tool: deps.entitlements,
+    entitlements: registry.entitlements,
+    usage: registry.usage,
+    cloud: deps.entitlementCloud,
+    source: async () => ({ instanceId: await instanceId(), edition: env.EDITION, version: env.APP_VERSION }),
+    toolSlug: tool.identity.slug,
+    logger
+  });
+
   // ── GET /instance — unauthenticated discovery ────────────────────────────
   api.openapi(instanceRoute, async (c) => {
     const [row] = await db.select().from(instanceSettings).limit(1);
@@ -613,7 +657,14 @@ export function createApiApp<
             ? { sso: { hintCookieName: hub.hintCookieName, hintCookieDomain: hub.hintCookieDomain } }
             : {})
         },
-        features: { mcp: true, oauth: true, files: true }
+        features: { mcp: true, oauth: true, files: true },
+        // What this version declares for the billing rail (§7): the hub seeds
+        // from it, staff read it, a client reads the limit it is held to.
+        entitlements: {
+          actions: deps.entitlements.actions,
+          limits: deps.entitlements.limits,
+          features: deps.entitlements.features
+        }
       },
       200
     );
@@ -1062,21 +1113,12 @@ export function createApiApp<
     ...(tool.api.exportEntries ? { exportEntries: tool.api.exportEntries(deps.domain) } : {})
   });
 
-  // Instance id for usage-event sources, cached after first read.
-  let cachedInstanceId: string | null = null;
-  const instanceId = async (): Promise<string> => {
-    if (cachedInstanceId) return cachedInstanceId;
-    const [row] = await db.select({ id: instanceSettings.instanceId }).from(instanceSettings).limit(1);
-    cachedInstanceId = row?.id ?? 'unsetup';
-    return cachedInstanceId;
-  };
   registerFileRoutes(api, {
     service: deps.fileService,
     storage: deps.storage,
     registry: chassisRegistry,
     env,
     logger,
-    instanceId,
     // The tool's blob policy. ADR 011 sharp edge closed: a blob referenced
     // by a live version manifest of the tool's resource is not deletable
     // through the generic files surface; SL-B1: the generic files surface
