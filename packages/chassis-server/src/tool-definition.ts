@@ -302,7 +302,22 @@ export interface ToolDefinition<
    * one entitlement gate, after the scope gate and before the handler.
    * Absent = nothing declared: no route gated, empty lists in discovery.
    */
-  entitlements?: (env: ToolEnv<TEnvShape>) => ToolEntitlementDeclaration;
+  entitlements?: (env: ToolEnv<TEnvShape>, ctx: EntitlementsContext<TDomain>) => ToolEntitlementDeclaration;
+}
+
+/**
+ * What the `entitlements` slot receives beside the env (PRDCT-2634): the
+ * database and the domain, LATE-BOUND like the jobs slot's, because the slot
+ * runs before `services` and an `actor` hook of an anonymous surface (a form
+ * response through a share link: the share secret → the deck → its owner →
+ * the owner's workspace and account) resolves at REQUEST time through the
+ * domain's own services. Read `getTool()` inside the hook, never at
+ * declaration time.
+ */
+export interface EntitlementsContext<TDomain> {
+  db: Db;
+  /** The `services` result, or null until that slot has run. Read it at RUN time, inside a hook. */
+  getTool: () => TDomain | null;
 }
 
 /** Test seams only — production boot never passes overrides. */

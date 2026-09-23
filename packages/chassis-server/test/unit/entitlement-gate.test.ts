@@ -75,6 +75,22 @@ const ROUTES = declareRouteEntitlements([
         accountRef: 'acct-owner'
       })
     }
+  },
+  // An anonymous surface whose hook fails (a lookup error): left to the route.
+  {
+    route: { method: 'post', path: '/exploding/{id}' },
+    meter: {
+      key: 'things.make',
+      unit: 'call',
+      actor: () => {
+        throw new Error('lookup failed');
+      }
+    }
+  },
+  // An anonymous surface whose hook resolves nothing (an unknown secret).
+  {
+    route: { method: 'post', path: '/unknown/{id}' },
+    meter: { key: 'things.make', unit: 'call', actor: () => null }
   }
 ]);
 
@@ -188,6 +204,8 @@ function fixture(opts: {
     });
   app.post('/things', handler);
   app.post('/files', handler);
+  app.post('/exploding/:id', handler);
+  app.post('/unknown/:id', handler);
   app.post('/things/:id/premium', handler);
   app.post('/premium-files', handler);
   app.post('/things/:id/nowhere', handler);
@@ -629,5 +647,85 @@ describe('the gate on oss', () => {
     await tick();
     expect(f.emitted).toEqual([]);
     expect(f.hub.reads).toBe(0);
+  });
+});
+
+describe('the gate on an anonymous surface: the route’s actor hook runs with no principal (PRDCT-2634)', () => {
+  it('cloud: the owner the hook resolves pays and is reported, the viewer is never a principal', async () => {
+    const f = fixture({ cloud: true, principal: null });
+    const res = await f.app.request('/owned/deck-7', { method: 'POST' });
+    expect(res.status).toBe(201);
+    expect(f.creditChecks).toEqual([
+      { accountRef: 'acct-owner', actionKey: 'things.make', quantity: 1, unit: 'call' }
+    ]);
+    expect(f.checks).toEqual([]); // the local check is never asked on a metered account
+    expect(f.emitted).toHaveLength(1);
+    expect(f.emitted[0]).toMatchObject({
+      actionKey: 'things.make',
+      accountRef: 'acct-owner',
+      workspaceId: 'ws-of-deck-7',
+      userId: null,
+      via: 'session'
+    });
+  });
+
+  it('cloud: a credit refusal on an anonymous surface is a NEUTRAL 402: the code, one sentence, no details, no link', async () => {
+    const f = fixture({
+      cloud: true,
+      principal: null,
+      credits: () => ({
+        allowed: false,
+        reason: 'insufficient_credits',
+        source: 'hub',
+        check: {
+          accountRef: '77777777-aaaa-4bbb-8ccc-000000000001',
+          actionKey: 'things.make',
+          quantity: 1,
+          allowed: false,
+          credits: 10,
+          balance: 0,
+          unit: 'call',
+          priced: true,
+          plan: 'free',
+          reason: 'insufficient_credits',
+          topUpUrl: 'https://hub.test/billing/top-up?org=secret-org'
+        }
+      })
+    });
+    const res = await f.app.request('/owned/deck-7', { method: 'POST' });
+    expect(res.status).toBe(402);
+    const body = (await res.json()) as { error: { code: string; message: string; details?: unknown } };
+    expect(body.error.code).toBe('entitlement_denied');
+    expect(body.error.details).toBeUndefined();
+    expect(body.error.message).not.toContain('hub.test');
+    expect(body.error.message).not.toContain('10');
+    expect(body.error.message).not.toContain('secret-org');
+    expect(f.emitted).toEqual([]);
+  });
+
+  it('a hook that resolves nothing, or throws, leaves the route to its own handling: nothing checked, nothing emitted', async () => {
+    for (const path of ['/unknown/x', '/exploding/x']) {
+      const f = fixture({ cloud: true, principal: null });
+      const res = await f.app.request(path, { method: 'POST' });
+      expect(res.status, path).toBe(201);
+      expect(f.creditChecks, path).toEqual([]);
+      expect(f.emitted, path).toEqual([]);
+    }
+  });
+
+  it('a route with no actor and no principal is untouched: the route’s own auth answers', async () => {
+    const f = fixture({ cloud: true, principal: null });
+    const res = await f.app.request('/things', { method: 'POST' });
+    expect(res.status).toBe(201);
+    expect(f.creditChecks).toEqual([]);
+    expect(f.emitted).toEqual([]);
+  });
+
+  it('oss: the owner resolves with no account, the surface is unmetered byte for byte', async () => {
+    const f = fixture({ cloud: false, principal: null });
+    const res = await f.app.request('/owned/deck-7', { method: 'POST' });
+    expect(res.status).toBe(201);
+    expect(f.checks).toEqual([]);
+    expect(f.emitted).toEqual([]);
   });
 });

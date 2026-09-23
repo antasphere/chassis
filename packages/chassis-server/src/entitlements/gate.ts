@@ -136,6 +136,8 @@ const LENGTH_REQUIRED = 'length_required';
 const SUSPENDED_MESSAGE = 'This organization is suspended on Antasphere';
 const UNAVAILABLE_MESSAGE =
   'The Antasphere hub has been unreachable for too long; requests are refused until it recovers';
+/** What a viewer on an anonymous surface reads when the owner's account cannot pay (PRDCT-2634): no figure, no link. */
+const ANONYMOUS_DENIED_MESSAGE = 'The owner of this content cannot take this action right now';
 
 /** The methods that carry a body the limit judges. */
 const BODY_METHODS = new Set(['POST', 'PUT', 'PATCH']);
@@ -214,6 +216,24 @@ async function actorOf(
     if (resolved) return resolved;
   }
   return principalActor(principal);
+}
+
+/**
+ * The actor of a request with NO principal: only a route that declares an
+ * `actor` hook has one (PRDCT-2634), and only what the hook resolves. A hook
+ * that throws resolves nothing: the route's own handling answers, and the
+ * action goes unmetered rather than refused on a lookup error.
+ */
+async function anonymousActorOf(
+  entry: RouteEntitlementEntry,
+  ctx: EntitlementRequest
+): Promise<ActorRef | null> {
+  if (!entry.meter?.actor) return null;
+  try {
+    return (await entry.meter.actor(ctx)) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** The first tier above the account's that allows the value, or null when none does. */
@@ -345,7 +365,9 @@ async function creditRefusal(
   meter: MeterDeclaration,
   ctx: EntitlementRequest,
   actor: ActorRef,
-  cloud: EntitlementCloud
+  cloud: EntitlementCloud,
+  /** No principal: a viewer on an anonymous surface, who must learn nothing about the owner's account. */
+  anonymous: boolean
 ): Promise<Response | null> {
   const verdict = await cloud.credits.check({
     accountRef: actor.accountRef!,
@@ -356,6 +378,11 @@ async function creditRefusal(
   if (verdict.allowed) return null;
   if (verdict.reason === 'account_suspended') return c.json(err('account_suspended', SUSPENDED_MESSAGE), 403);
   if (verdict.reason === 'hub_unavailable') return c.json(err('hub_unavailable', UNAVAILABLE_MESSAGE), 403);
+  if (anonymous) {
+    // The owner's balance, price and top-up page are the owner's: a viewer
+    // gets the code and a neutral sentence, never the details (PRDCT-2634).
+    return c.json(err(ENTITLEMENT_DENIED, ANONYMOUS_DENIED_MESSAGE), 402);
+  }
   const details: EntitlementDeniedDetails = {
     credits: verdict.check?.credits ?? 0,
     balance: verdict.check?.balance ?? 0,
@@ -374,14 +401,22 @@ async function creditRefusal(
 export function entitlementGate(entry: RouteEntitlementEntry, deps: EntitlementGateDeps): MiddlewareHandler {
   const meterKey = entry.meter ? routeEntitlementKey(entry.route) : null;
   return async (c, next) => {
-    const principal = c.get('principal');
+    const principal: Principal | null = c.get('principal') ?? null;
     const deferredRefusal = pendingBodyRefusal(c);
-    // No principal: the route's own auth answers (401); nothing to meter. A
-    // deferred size refusal still fires first, as the cap did before.
-    if (!principal) return deferredRefusal ? deferredRefusal() : next();
     const ctx = requestOf(c, principal);
-    const actor = await actorOf(entry, ctx, principal);
+    // The actor: the principal, or, on an ANONYMOUS surface (a form response
+    // through a share link, PRDCT-2634), whoever the route's `actor` hook
+    // resolves with no principal at all (the share secret → the deck → its
+    // owner → the owner's workspace and account: the owner pays and is
+    // reported, the viewer is never identified, §8). No principal and no
+    // actor: the route's own auth answers (401/404); nothing to meter, and a
+    // deferred size refusal still fires first, as the cap did before.
+    const actor = principal ? await actorOf(entry, ctx, principal) : await anonymousActorOf(entry, ctx);
+    if (!actor) return deferredRefusal ? deferredRefusal() : next();
     const metered = Boolean(deps.cloud && actor.accountRef);
+    // An anonymous actor with no account (oss, a cloud-local workspace) has
+    // no plan and no credits: the surface stays as it was, byte for byte.
+    if (!principal && !metered) return deferredRefusal ? deferredRefusal() : next();
 
     if (metered) {
       const profile = await deps.cloud!.profiles.get(actor.accountRef!, deps.tool).catch((cause: unknown) => {
@@ -401,13 +436,14 @@ export function entitlementGate(entry: RouteEntitlementEntry, deps: EntitlementG
         return c.json(err(LENGTH_REQUIRED, 'A metered upload must declare its size (Content-Length)'), 411);
       }
       if (entry.meter) {
-        const refused = await creditRefusal(c, entry.meter, ctx, actor, deps.cloud!);
+        const refused = await creditRefusal(c, entry.meter, ctx, actor, deps.cloud!, principal === null);
         if (refused) return refused;
       }
     } else {
       if (entry.meter) {
+        // A principal is certain here: the anonymous-and-unmetered case returned above.
         const decision = await deps.entitlements.check(
-          principal,
+          principal!,
           { key: entry.meter.key, quantity: quantityOf(entry.meter, ctx), unit: entry.meter.unit },
           { route: meterKey }
         );
@@ -435,7 +471,10 @@ export function entitlementGate(entry: RouteEntitlementEntry, deps: EntitlementG
       workspaceId: actor.workspaceId,
       accountRef: actor.accountRef!,
       userId: hubUser,
-      via: principal.via,
+      // The hub's channel enum has no value for a share link: an anonymous
+      // surface reports the owner as if from a browser session (PRDCT-2634;
+      // a dedicated value is the hub's contract to add).
+      via: principal?.via ?? 'session',
       ...(audit?.resourceType ? { resourceType: audit.resourceType } : {}),
       ...(audit?.resourceId ? { resourceId: audit.resourceId } : {}),
       source: await deps.source()

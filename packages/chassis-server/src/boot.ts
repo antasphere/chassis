@@ -657,7 +657,10 @@ export async function bootPlatform<
   // The tool's billing-rail declarations (slot 22), asserted once here: a
   // route that meters an action the price book does not know, or a limit no
   // tier values, stops the boot naming the route.
-  const entitlements = tool.entitlements?.(env) ?? EMPTY_TOOL_ENTITLEMENTS;
+  // The slot runs before `services`; an actor hook of an anonymous surface
+  // reads the domain lazily through `getTool()` at request time (PRDCT-2634).
+  const entitlements =
+    tool.entitlements?.(env, { db: db.db, getTool: () => domainRef.current }) ?? EMPTY_TOOL_ENTITLEMENTS;
   assertToolEntitlements(entitlements);
   // The credit check at the hub (§7 steps 3 and 4), cloud only: the price
   // of a metered request against the organization's balance, before the
