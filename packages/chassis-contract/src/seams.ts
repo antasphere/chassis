@@ -173,11 +173,23 @@ export interface UsageSink {
 }
 
 /**
+ * What a downstream says about a batch it took: the events it did NOT post
+ * because the hub would refuse them on their date (PRDCT-2644), each with
+ * its reason. The worker sends those to the held queue instead of leaving
+ * them counted as rejections at the hub; an empty list, or no outcome at
+ * all, means the whole batch was handled.
+ */
+export interface UsageBatchOutcome {
+  held: ReadonlyArray<{ id: string; reason: string }>;
+}
+
+/**
  * Where the durable queue hands the events it drained: the no-op locally,
  * the hub poster on cloud. A downstream that takes whole batches gets them
  * as the worker drained them (fifty at most); one that only takes single
- * events is called once per event.
+ * events is called once per event. A batch downstream may answer an outcome
+ * naming the events it held back.
  */
 export interface UsageDownstream extends UsageSink {
-  emitBatch?(events: readonly UsageEvent[]): Promise<void>;
+  emitBatch?(events: readonly UsageEvent[]): Promise<void | UsageBatchOutcome>;
 }

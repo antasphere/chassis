@@ -92,13 +92,16 @@ export const minimalTool: ToolDefinition<NoEnv, NoDomain> = {
   },
   // The billing rail (slot 22): the generic files upload is the one metered
   // route of the minimal tool — a price on the chassis' own route is the
-  // tool's declaration, never the chassis'. The limit's oss and free values
-  // are the operator's cap, so nothing changes on either edition below it.
+  // tool's declaration, never the chassis'. The limit's oss value is the
+  // operator's cap and so is the paid tier's (what discovery advertises is
+  // what the instance serves, PRDCT-2653); the free value is a fifth of it,
+  // so a suite can upload above the free value and below the cap as a pro
+  // account. Self-hosted instances read the oss value alone.
   entitlements: (env) => {
     const capBytes = env.MAX_FILE_SIZE_MB * 1024 * 1024;
     return {
       actions: [{ key: 'files.upload', creditsPerUnit: 5, unit: 'bytes', label: 'Upload a file' }],
-      limits: { 'files.maxBytes': { oss: capBytes, free: capBytes, pro: 5 * capBytes } },
+      limits: { 'files.maxBytes': { oss: capBytes, free: Math.floor(capBytes / 5), pro: capBytes } },
       features: { 'things.premium': { free: false, pro: true } },
       routes: declareRouteEntitlements([
         {

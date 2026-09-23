@@ -72,14 +72,19 @@ export const usageEventSchema = z
     path: ['actionKey']
   });
 
-/** The hub's answer to `POST /usage/events`: one result per element, in the batch's order. */
+/**
+ * The hub's answer to `POST /usage/events`: one result per element, in the
+ * batch's order. Since phase 2 an `accepted` result carries the `credits`
+ * the hub debited for it (0 when the action has no price).
+ */
 export const usageIngestResultSchema = z.object({
   results: z.array(
     z.object({
       id: z.string().nullable(),
       status: z.enum(['accepted', 'duplicate', 'rejected']),
       reason: z.string().optional(),
-      details: z.unknown().optional()
+      details: z.unknown().optional(),
+      credits: z.number().int().optional()
     })
   ),
   accepted: z.number().int().optional(),
@@ -87,6 +92,112 @@ export const usageIngestResultSchema = z.object({
   rejected: z.number().int().optional()
 });
 export type UsageIngestResult = z.infer<typeof usageIngestResultSchema>;
+
+// ── The hub's window on an event's date (PRDCT-2630 at the hub, PRDCT-2644 here) ──
+
+/**
+ * The window an event's `occurredAt` must fall in, measured against the
+ * moment the hub receives it: the hub's `USAGE_EVENT_MAX_PAST_MS` and
+ * `USAGE_EVENT_MAX_FUTURE_MS` (`packages/contract/src/schemas/billing.ts`
+ * of the hub) MIRRORED VERBATIM, names and values. Backward, seven days:
+ * the queue's retry budget is about eight and a half hours, so an outage of
+ * a night is covered many times over, and a week also covers an operator
+ * re-driving held jobs by hand. Forward, five minutes: the skew every JWT
+ * verifier already tolerates; anything further is a clock that is wrong.
+ * Outside the window the hub answers `rejected(invalid_event)` naming
+ * `occurredAt` and never clamps, so the poster refuses BEFORE posting: an
+ * event the hub would refuse on its date is held where it was made, never
+ * counted as a rejection at the hub (PRDCT-2644). The pin test reads the
+ * hub's file beside this checkout when it is there.
+ */
+export const USAGE_EVENT_MAX_PAST_MS = 7 * 24 * 60 * 60 * 1000;
+export const USAGE_EVENT_MAX_FUTURE_MS = 5 * 60 * 1000;
+
+/**
+ * Why an event's `occurredAt` is refused against the receipt time, or null
+ * when it falls inside the window (both bounds INCLUSIVE). The hub's
+ * `usageEventOccurrenceIssue` mirrored verbatim: the one comparison both
+ * halves run, the hub at ingest against its own clock, the chassis before
+ * posting against its best estimate of the receipt (its own clock), so the
+ * two never disagree on the sign or the edge.
+ */
+export function usageEventOccurrenceIssue(
+  occurredAt: Date,
+  receivedAt: Date
+): { path: 'occurredAt'; message: string } | null {
+  const delta = occurredAt.getTime() - receivedAt.getTime();
+  if (delta < -USAGE_EVENT_MAX_PAST_MS) {
+    return {
+      path: 'occurredAt',
+      message: `more than ${USAGE_EVENT_MAX_PAST_MS / 86_400_000} days before the hub received the event`
+    };
+  }
+  if (delta > USAGE_EVENT_MAX_FUTURE_MS) {
+    return {
+      path: 'occurredAt',
+      message: `more than ${USAGE_EVENT_MAX_FUTURE_MS / 60_000} minutes after the hub received the event`
+    };
+  }
+  return null;
+}
+
+// ── POST /usage/check: the price and the balance before an action (§5, §7 step 3) ──
+
+/**
+ * The request of `POST /usage/check` (the hub's `UsageCheckRequest`,
+ * PRDCT-2663): the paying account, the action key and the quantity of THIS
+ * request. `unit` is accepted and ignored by the hub, which prices by its
+ * own row; it is sent so the answer's unit can be compared and a mismatch
+ * logged.
+ */
+export const usageCheckRequestSchema = z.object({
+  accountRef: z.uuid(),
+  actionKey: z.string().min(1).max(120),
+  quantity: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  unit: z.string().min(1).max(40).optional()
+});
+export type UsageCheckRequest = z.infer<typeof usageCheckRequestSchema>;
+
+/** The two reasons a check refuses; `null` when allowed. */
+export const USAGE_CHECK_REASONS = ['insufficient_credits', 'account_suspended'] as const;
+export type UsageCheckReason = (typeof USAGE_CHECK_REASONS)[number];
+
+/**
+ * The hub's answer to `POST /usage/check` (its `UsageCheck`, PRDCT-2663),
+ * mirrored verbatim: advisory, no side effect. `credits` is the price of
+ * this quantity from the price book row effective now (0 and `priced:
+ * false` when the tool has no row for the action: views are never priced,
+ * an unknown key is not a refusal); `balance` the account's; `allowed` is
+ * `balance >= credits` unless the organization is suspended, which refuses
+ * whatever the price. `topUpUrl` is always present: the hub's billing page
+ * for that organization, what a `402 entitlement_denied` carries straight
+ * off the answer.
+ */
+export const usageCheckSchema = z.object({
+  accountRef: z.uuid(),
+  actionKey: z.string(),
+  quantity: z.number().int().min(0),
+  allowed: z.boolean(),
+  credits: z.number().int().min(0),
+  balance: z.number().int(),
+  unit: z.string().nullable(),
+  priced: z.boolean(),
+  plan: entitlementTierSchema,
+  reason: z.enum(USAGE_CHECK_REASONS).nullable(),
+  topUpUrl: z.string()
+});
+export type UsageCheck = z.infer<typeof usageCheckSchema>;
+
+/** The wire code of a credit refusal (§7 step 4), and its `details`. */
+export const ENTITLEMENT_DENIED = 'entitlement_denied';
+export interface EntitlementDeniedDetails {
+  /** The price of this action, in credits. */
+  credits: number;
+  /** The organization's balance, in credits. */
+  balance: number;
+  /** The hub's billing page for the organization: where a human adds credits. */
+  topUpUrl: string;
+}
 
 /**
  * What a declaration's functions see: the request as the chassis reads it.
@@ -265,7 +376,13 @@ export type ToolEntitlements = z.infer<typeof toolEntitlementsSchema>;
  * phase 1 `limits` and `features` are empty and the tool's own declared
  * values fill the numbers. A limit's value is a number or a boolean: the
  * hub may switch a numeric limit off or on per account (`true` = unlimited,
- * `false` = nothing allowed; `profiles.ts` resolves it so).
+ * `false` = nothing allowed; `profiles.ts` resolves it so). Since phase 2
+ * (PRDCT-2663) the hub serves its real rows — every limit key it holds for
+ * the calling tool and the features on for the account — and `upgradeUrl`,
+ * its upgrade page for the organization carrying `org`, `tool` and `plan`;
+ * the chassis appends `&key=<key>&requiredPlan=<tier>` at refusal time.
+ * Optional here so an older hub's answer still parses (the hub root is
+ * then the link).
  */
 export const entitlementProfileSchema = z.object({
   accountRef: z.uuid(),
@@ -273,7 +390,8 @@ export const entitlementProfileSchema = z.object({
   /** Until when the plan is paid for (ISO 8601); null on `free` and on a live subscription. */
   planUntil: z.string().nullable(),
   limits: z.record(z.string(), z.union([z.number(), z.boolean()])),
-  features: z.array(z.string())
+  features: z.array(z.string()),
+  upgradeUrl: z.string().optional()
 });
 export type EntitlementProfile = z.infer<typeof entitlementProfileSchema>;
 
