@@ -19,6 +19,13 @@ export interface ResolvedProfile {
   features: ReadonlySet<string>;
   /** Where the plan came from: the hub, the last known answer, or the default. */
   source: 'hub' | 'stale' | 'default';
+  /**
+   * The hub's upgrade page for the organization (`org`, `tool`, `plan` on it),
+   * when the hub sent one with the plan served here; null when the plan is
+   * the default (never answered, or past the stale window) or the hub is
+   * older than phase 2. The gate appends `key` and `requiredPlan`.
+   */
+  upgradeUrl: string | null;
 }
 
 export interface EntitlementProfileDials {
@@ -68,6 +75,8 @@ interface CacheEntry {
   /** The hub's overrides as sent: a number, or a boolean switch (`true` unlimited, `false` nothing). */
   hubLimits: Record<string, number | boolean>;
   hubFeatures: string[] | null;
+  /** The hub's upgrade page for the organization, when it sent one. */
+  hubUpgradeUrl: string | null;
   /** When the hub last answered. */
   answeredAtMs: number;
   /** Until when this entry is served without a hub call. */
@@ -148,16 +157,20 @@ export class EntitlementProfiles {
     const answered = await this.read(accountRef);
     const now = this.now();
     if (answered) {
-      // The hub's phase-1 answer carries EMPTY limits and features by
-      // contract ("the tool applies its own tier defaults for the plan named
-      // here"): an empty list is no override, never "nothing on". When the
-      // hub starts serving plan_entitlements (phase 2), an explicit empty
-      // must become distinguishable from the phase-1 empty — a point for
-      // that contract change, noted on the record.
+      // Which features list is the truth. A hub that answers at least one
+      // limit key serves its real rows for this tool (phase 2, PRDCT-2663):
+      // its `features` is then authoritative AS IT IS, an empty list
+      // included, so a per-account override that switches a feature off is
+      // felt. A hub that answers no limit at all is a phase-1 hub (or a tool
+      // it has not seeded yet), whose empty lists mean "the tool applies its
+      // own tier defaults for the plan named here": there a non-empty list
+      // still overrides and an empty one leaves the declared tier values.
+      const authoritative = Object.keys(answered.limits).length > 0;
       this.cache.set(accountRef, {
         plan: answered.plan,
         hubLimits: answered.limits,
-        hubFeatures: answered.features.length > 0 ? answered.features : null,
+        hubFeatures: authoritative || answered.features.length > 0 ? answered.features : null,
+        hubUpgradeUrl: answered.upgradeUrl ?? null,
         answeredAtMs: now,
         freshUntilMs: now + this.dials.ttlMs
       });
@@ -173,6 +186,7 @@ export class EntitlementProfiles {
             plan: 'free',
             hubLimits: {},
             hubFeatures: null,
+            hubUpgradeUrl: null,
             answeredAtMs: 0,
             freshUntilMs: now + this.dials.ttlMs
           }
@@ -253,7 +267,8 @@ export function resolve(
   for (const [key, tiers] of Object.entries(tool.features)) {
     if (hubFeatures ? hubFeatures.includes(key) : tiers[plan]) features.add(key);
   }
-  return { plan, limits, features, source };
+  const upgradeUrl = known && !stale ? entry.hubUpgradeUrl : null;
+  return { plan, limits, features, source, upgradeUrl };
 }
 
 /**

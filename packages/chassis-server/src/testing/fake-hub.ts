@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { usageEventSchema } from '@antasphere/chassis-contract';
+import { usageCheckRequestSchema, usageEventSchema } from '@antasphere/chassis-contract';
 import { randomUUID } from 'node:crypto';
 import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
 
@@ -33,6 +33,16 @@ import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
  *    network (+ token-only: invalid_grant | invalid_client | hang |
  *    commit_then_hang — the latter ROTATES, then never answers: the
  *    slow-but-alive hub of PRDCT-1370), `introspectMode`, plus delays.
+ *  - The billing rail's machine surface (`/api/v1/usage/*`, a
+ *    client_credentials token with `usage:write` only): the event ingest
+ *    (per-element judgement, dedupe by id), the plan read (`upgradeUrl`
+ *    included since phase 2) and, since phase 2 (PRDCT-2663/2664), the
+ *    credit check `POST /usage/check` over a price book (`setPrice`) and
+ *    per-organization balances (`setBalance`, `grant`, `balanceOf`, a
+ *    known organization holding the 5,000-credit sign-up grant like the
+ *    real hub). Ingest DEBITS: an accepted event is priced by the same rule
+ *    as the check, its `credits` returned on its result, the balance moved
+ *    and a `debit` appended to `ledger` with the event id as its source.
  *
  * Access tokens still carry the TRANSITIONAL advisory org claims the real
  * hub emits through the compat window ({role, workspace_id, …}) — the tool
@@ -113,6 +123,19 @@ interface RefreshTokenRecord {
   /** The grant's scopes: a refresh re-mints EXACTLY these, never more. */
   scope: string;
 }
+
+/** One row of the fake's price book (the hub's `tool_prices`, reduced to what the price rule reads). */
+export interface FakePriceRow {
+  creditsPerUnit: number;
+  unit: string;
+  /** How many units one `creditsPerUnit` buys; 1 when absent. */
+  per?: number | undefined;
+  /** The quantity each account uses free every month before the price applies; 0 when absent. */
+  freeQuantityPerMonth?: number | undefined;
+}
+
+/** The credits a new organization is granted at the hub (the sign-up grant). */
+const SIGNUP_GRANT = 5_000;
 
 /** The hub's `z.uuid()` on an account reference, as zod 4 spells it (the nil and max uuids included). */
 const UUID_RE =
@@ -206,6 +229,23 @@ export class FakeHub {
     string,
     { plan: 'free' | 'pro'; limits?: Record<string, number | boolean>; features?: string[] }
   >();
+  /** `POST /api/v1/usage/check` behavior; `hang` parks the request (`tokenHangMs`). */
+  checkMode: 'ok' | 'http404' | 'http500' | 'network' | 'hang' = 'ok';
+  /** Hold every check answer this long. */
+  checkDelayMs = 0;
+  /** Every credit check: the presented Authorization header + the parsed body. */
+  readonly checkRequests: Array<{ auth: string | null; body: unknown }> = [];
+  /** actionKey → its price row (the hub's price book for this tool). */
+  private readonly prices = new Map<string, FakePriceRow>();
+  /** accountRef → credits; a known organization with no entry holds the sign-up grant. */
+  private readonly balances = new Map<string, number>();
+  /** Every balance movement, in order: the sign-up grant, manual grants, ingest debits. */
+  readonly ledger: Array<{
+    accountRef: string;
+    kind: 'signup' | 'manual' | 'debit';
+    amount: number;
+    sourceRef: string;
+  }> = [];
 
   private constructor(
     private readonly server: Server,
@@ -457,6 +497,9 @@ export class FakeHub {
     if (req.method === 'GET' && url.pathname === '/api/v1/usage/entitlements') {
       return this.handleUsageEntitlements(req, res, url);
     }
+    if (req.method === 'POST' && url.pathname === '/api/v1/usage/check') {
+      return this.handleUsageCheck(req, res);
+    }
     sendJson(res, 404, { error: 'not_found' });
   }
 
@@ -466,6 +509,87 @@ export class FakeHub {
     profile: { plan: 'free' | 'pro'; limits?: Record<string, number | boolean>; features?: string[] }
   ): void {
     this.entitlementProfiles.set(accountRef, profile);
+  }
+
+  // ── The price book and the balances (phase 2, PRDCT-2663) ─────────────
+
+  /** Set the price row of an action: `creditsPerUnit` credits per `per` units, after a monthly free allowance. */
+  setPrice(actionKey: string, row: FakePriceRow): void {
+    this.prices.set(actionKey, row);
+  }
+
+  clearPrices(): void {
+    this.prices.clear();
+  }
+
+  /** Set an organization's balance outright (no ledger entry). */
+  setBalance(accountRef: string, credits: number): void {
+    this.balances.set(accountRef, credits);
+  }
+
+  /** Add (or, negative, take) credits by hand: a `manual` ledger entry. */
+  grant(accountRef: string, delta: number): void {
+    this.balances.set(accountRef, this.balanceOf(accountRef) + delta);
+    this.ledger.push({
+      accountRef,
+      kind: 'manual',
+      amount: delta,
+      sourceRef: `manual-${this.ledger.length + 1}`
+    });
+  }
+
+  /**
+   * An organization's balance. One the fake knows (an org registry entry)
+   * with no balance set holds the sign-up grant, 5,000 credits, recorded as
+   * a `signup` ledger entry the first time it is read — like the real hub,
+   * which grants it at the organization's creation. Unknown: 0.
+   */
+  balanceOf(accountRef: string): number {
+    const held = this.balances.get(accountRef);
+    if (held !== undefined) return held;
+    if (!this.knownOrgs().has(accountRef)) return 0;
+    this.balances.set(accountRef, SIGNUP_GRANT);
+    this.ledger.push({ accountRef, kind: 'signup', amount: SIGNUP_GRANT, sourceRef: 'signup' });
+    return SIGNUP_GRANT;
+  }
+
+  private knownOrgs(): Set<string> {
+    const known = new Set<string>();
+    for (const orgs of this.userOrgs.values()) for (const id of orgs.keys()) known.add(id);
+    return known;
+  }
+
+  /**
+   * The price of a quantity of an action for an account, by the hub's rule:
+   * `ceil(max(0, quantity − freeLeft) / per) × creditsPerUnit`, where
+   * `freeLeft` is the monthly allowance minus the quantities already
+   * ingested for that account and action. The fake has NO month rollover:
+   * every event it ever ingested counts against the allowance.
+   */
+  private priceOf(
+    accountRef: string,
+    actionKey: string,
+    quantity: number
+  ): { credits: number; priced: boolean; unit: string | null } {
+    const row = this.prices.get(actionKey);
+    if (!row) return { credits: 0, priced: false, unit: null };
+    let used = 0;
+    for (const e of this.usageEvents.values()) {
+      if (
+        e.accountRef === accountRef &&
+        (e.actionKey ?? e.meter) === actionKey &&
+        typeof e.quantity === 'number'
+      ) {
+        used += e.quantity;
+      }
+    }
+    const freeLeft = Math.max(0, (row.freeQuantityPerMonth ?? 0) - used);
+    const billable = Math.max(0, quantity - freeLeft);
+    return {
+      credits: Math.ceil(billable / (row.per ?? 1)) * row.creditsPerUnit,
+      priced: true,
+      unit: row.unit
+    };
   }
 
   /**
@@ -522,8 +646,7 @@ export class FakeHub {
     // registry slug is `tool_mismatch`, the account must be an organization
     // this hub holds, a named user must be a hub user, a duplicate id is
     // never an error.
-    const knownOrgs = new Set<string>();
-    for (const orgs of this.userOrgs.values()) for (const id of orgs.keys()) knownOrgs.add(id);
+    const knownOrgs = this.knownOrgs();
     const results = events.map((raw: unknown) => {
       const parsed = usageEventSchema.safeParse(raw);
       if (!parsed.success) {
@@ -548,8 +671,15 @@ export class FakeHub {
         return { id, status: 'rejected' as const, reason: 'unknown_user' };
       }
       if (this.usageEvents.has(id)) return { id, status: 'duplicate' as const };
+      // Priced BEFORE it is recorded, so its own quantity is not counted
+      // against the free allowance twice; the debit lands with it.
+      const { credits } = this.priceOf(e.accountRef, e.actionKey ?? e.meter!, e.quantity);
       this.usageEvents.set(id, { ...(raw as Record<string, unknown>), toolSlug: this.toolSlug });
-      return { id, status: 'accepted' as const };
+      if (credits > 0) {
+        this.balances.set(e.accountRef, this.balanceOf(e.accountRef) - credits);
+        this.ledger.push({ accountRef: e.accountRef, kind: 'debit', amount: -credits, sourceRef: id });
+      }
+      return { id, status: 'accepted' as const, credits };
     });
     const count = (status: string) => results.filter((r) => r.status === status).length;
     return sendJson(res, 200, {
@@ -578,9 +708,7 @@ export class FakeHub {
       return sendJson(res, 400, {
         error: { code: 'validation_error', message: 'accountRef must be a uuid' }
       });
-    const knownOrgs = new Set<string>();
-    for (const orgs of this.userOrgs.values()) for (const id of orgs.keys()) knownOrgs.add(id);
-    if (!knownOrgs.has(accountRef) && !this.entitlementProfiles.has(accountRef)) {
+    if (!this.knownOrgs().has(accountRef) && !this.entitlementProfiles.has(accountRef)) {
       return sendJson(res, 404, {
         error: { code: 'unknown_account', message: 'no organization holds this id' }
       });
@@ -591,7 +719,67 @@ export class FakeHub {
       plan: profile.plan,
       planUntil: null,
       limits: profile.limits ?? {},
-      features: profile.features ?? []
+      features: profile.features ?? [],
+      upgradeUrl: `${this.issuer}/billing/upgrade?org=${accountRef}&tool=${this.toolSlug}&plan=${profile.plan}`
+    });
+  }
+
+  // ── POST /api/v1/usage/check: the price and the balance, no side effect ─
+  private async handleUsageCheck(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let body: unknown = null;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      body = null;
+    }
+    this.checkRequests.push({ auth: req.headers.authorization ?? null, body });
+    if (this.checkDelayMs > 0) await new Promise((r) => setTimeout(r, this.checkDelayMs));
+    if (this.checkMode === 'network') {
+      req.destroy();
+      return;
+    }
+    if (this.checkMode === 'hang') return this.park(res);
+    if (this.checkMode === 'http404') return sendJson(res, 404, { error: { code: 'not_found' } });
+    if (this.checkMode === 'http500') return sendJson(res, 500, { error: { code: 'internal' } });
+    if (!this.machineBearer(req)) {
+      return sendJson(res, 401, { error: { code: 'invalid_token', message: 'Unauthorized' } });
+    }
+    const parsed = usageCheckRequestSchema.safeParse(body);
+    if (!parsed.success) {
+      return sendJson(res, 400, {
+        error: {
+          code: 'validation_error',
+          message: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')
+        }
+      });
+    }
+    const { accountRef, actionKey, quantity } = parsed.data;
+    const orgKnown = this.knownOrgs().has(accountRef);
+    if (!orgKnown && !this.balances.has(accountRef)) {
+      return sendJson(res, 404, {
+        error: { code: 'unknown_account', message: 'no organization holds this id' }
+      });
+    }
+    let suspended = false;
+    for (const orgs of this.userOrgs.values()) {
+      if (orgs.get(accountRef)?.status === 'suspended') suspended = true;
+    }
+    const { credits, priced, unit } = this.priceOf(accountRef, actionKey, quantity);
+    const balance = this.balanceOf(accountRef);
+    const allowed = !suspended && balance >= credits;
+    const reason = suspended ? 'account_suspended' : allowed ? null : 'insufficient_credits';
+    return sendJson(res, 200, {
+      accountRef,
+      actionKey,
+      quantity,
+      allowed,
+      credits,
+      balance,
+      unit,
+      priced,
+      plan: this.entitlementProfiles.get(accountRef)?.plan ?? 'free',
+      reason,
+      topUpUrl: `${this.issuer}/billing/top-up?org=${accountRef}&credits=${credits}&balance=${balance}&tool=${this.toolSlug}&action=${actionKey}`
     });
   }
 

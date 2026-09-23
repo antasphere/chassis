@@ -11,7 +11,13 @@ import {
   type ToolEntitlements,
   type UsageEvent
 } from '@antasphere/chassis-contract';
-import { honoPath, registerEntitlementGate, type EntitlementCloud } from '../../src/entitlements/index.js';
+import {
+  honoPath,
+  registerEntitlementGate,
+  type CreditCheckRequest,
+  type CreditVerdict,
+  type EntitlementCloud
+} from '../../src/entitlements/index.js';
 import { EntitlementProfiles, HubMachineToken } from '../../src/entitlements/index.js';
 import type { Logger } from '../../src/logger.js';
 
@@ -23,6 +29,11 @@ import type { Logger } from '../../src/logger.js';
  * the `via`, the resource the handler recorded, the stored size), no event
  * on a refusal, on a 4xx, on oss or on a cloud-local workspace, the `actor`
  * hook's shape, and the OpenAPI path spelled the way Hono registers it.
+ * Phase 2 (PRDCT-2664): on a metered account the hub's credit check replaces
+ * the local one (402 entitlement_denied with the top-up link, 403
+ * account_suspended, 403 hub_unavailable), an upload that declares no size
+ * meets 411 (PRDCT-2652), and the upgrade link is the hub's page for the
+ * organization with the key and the required plan appended.
  */
 
 const logger = { error: () => {}, warn: () => {}, info: () => {}, debug: () => {} } as unknown as Logger;
@@ -86,6 +97,8 @@ interface Fixture {
   app: OpenAPIHono;
   emitted: UsageEvent[];
   checks: Array<{ key: string; quantity: number; unit: string }>;
+  /** Every call of the hub's credit check (the stubbed `cloud.credits`). */
+  creditChecks: CreditCheckRequest[];
   hub: { profile: unknown; reads: number };
 }
 
@@ -97,10 +110,13 @@ function fixture(opts: {
   handler?: (c: Context) => Response | Promise<Response>;
   /** A size refusal the cap deferred to the gate (PRDCT-2632), parked on every request. */
   deferredRefusal?: boolean;
+  /** The hub's credit check verdict; allowed by the hub when absent. */
+  credits?: (req: CreditCheckRequest) => CreditVerdict;
 }): Fixture {
   const app = new OpenAPIHono();
   const emitted: UsageEvent[] = [];
   const checks: Array<{ key: string; quantity: number; unit: string }> = [];
+  const creditChecks: CreditCheckRequest[] = [];
   const hub = { profile: opts.hubProfile ?? { plan: 'free' }, reads: 0 };
   app.use('*', async (c, next) => {
     c.set('principal', opts.principal);
@@ -135,6 +151,12 @@ function fixture(opts: {
     ? {
         profiles: new EntitlementProfiles({ issuerUrl: 'https://hub.test', token, logger, fetchImpl }),
         upgradeUrl: 'https://hub.test',
+        credits: {
+          check: async (req) => {
+            creditChecks.push(req);
+            return opts.credits?.(req) ?? { allowed: true, source: 'hub', check: null };
+          }
+        },
         hubSubject: async (userId) => (userId === 'user-1' ? 'hub-sub-1' : null)
       }
     : undefined;
@@ -170,7 +192,7 @@ function fixture(opts: {
   app.post('/premium-files', handler);
   app.post('/things/:id/nowhere', handler);
   app.post('/owned/:id', handler);
-  return { app, emitted, checks, hub };
+  return { app, emitted, checks, creditChecks, hub };
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 5));
@@ -220,8 +242,12 @@ describe('the gate on cloud, a hub-projected workspace', () => {
     // The body never names the tool: the hub takes it from the token (PRDCT-2629).
     expect(f.emitted[0]).not.toHaveProperty('toolSlug');
     expect(f.emitted[0]!.id).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
-    // The check saw the DECLARED size, the emit the stored one.
-    expect(f.checks).toEqual([{ key: 'files.upload', quantity: 40, unit: 'bytes' }]);
+    // The hub's check saw the DECLARED size, the emit the stored one; the
+    // local check is not asked on a metered account (PRDCT-2653).
+    expect(f.creditChecks).toEqual([
+      { accountRef: 'acct-1', actionKey: 'files.upload', quantity: 40, unit: 'bytes' }
+    ]);
+    expect(f.checks).toEqual([]);
     expect(f.hub.reads).toBe(1);
   });
 
@@ -242,6 +268,7 @@ describe('the gate on cloud, a hub-projected workspace', () => {
       upgradeUrl: 'https://hub.test'
     });
     expect(f.checks).toEqual([]);
+    expect(f.creditChecks).toEqual([]);
     await tick();
     expect(f.emitted).toEqual([]);
   });
@@ -311,17 +338,141 @@ describe('the gate on cloud, a hub-projected workspace', () => {
     ).toBe(201);
   });
 
-  it('the credit check refuses with 413 entitlement_denied and its reason, after the plan checks', async () => {
+  it('a short balance is 402 entitlement_denied with the price, the balance and the top-up link, and emits nothing', async () => {
+    const topUpUrl = 'https://hub.test/billing/top-up?org=acct-1&credits=10&balance=3';
     const f = fixture({
       cloud: true,
       principal: principal(),
-      decision: { allowed: false, reason: 'no credits' }
+      credits: (req) => ({
+        allowed: false,
+        reason: 'insufficient_credits',
+        source: 'hub',
+        check: {
+          accountRef: req.accountRef,
+          actionKey: req.actionKey,
+          quantity: req.quantity,
+          allowed: false,
+          credits: 10,
+          balance: 3,
+          unit: 'call',
+          priced: true,
+          plan: 'free',
+          reason: 'insufficient_credits',
+          topUpUrl
+        }
+      })
     });
     const res = await f.app.request('/things', { method: 'POST' });
-    expect(res.status).toBe(413);
-    expect(await errorOf(res)).toEqual({ error: { code: 'entitlement_denied', message: 'no credits' } });
+    expect(res.status).toBe(402);
+    expect(await errorOf(res)).toEqual({
+      error: {
+        code: 'entitlement_denied',
+        message: `This needs 10 credits and the organization holds 3; top up at ${topUpUrl}`,
+        details: { credits: 10, balance: 3, topUpUrl }
+      }
+    });
     await tick();
     expect(f.emitted).toEqual([]);
+  });
+
+  it('a suspended organization is 403 account_suspended, an outage past the window 403 hub_unavailable, in the live gate’s words', async () => {
+    const suspended = fixture({
+      cloud: true,
+      principal: principal(),
+      credits: () => ({ allowed: false, reason: 'account_suspended', source: 'hub', check: null })
+    });
+    const s = await suspended.app.request('/things', { method: 'POST' });
+    expect(s.status).toBe(403);
+    expect(await errorOf(s)).toEqual({
+      error: { code: 'account_suspended', message: 'This organization is suspended on Antasphere' }
+    });
+    const closed = fixture({
+      cloud: true,
+      principal: principal(),
+      credits: () => ({ allowed: false, reason: 'hub_unavailable', source: 'closed', check: null })
+    });
+    const c = await closed.app.request('/things', { method: 'POST' });
+    expect(c.status).toBe(403);
+    expect(await errorOf(c)).toEqual({
+      error: {
+        code: 'hub_unavailable',
+        message:
+          'The Antasphere hub has been unreachable for too long; requests are refused until it recovers'
+      }
+    });
+    await tick();
+    expect(suspended.emitted).toEqual([]);
+    expect(closed.emitted).toEqual([]);
+  });
+
+  it('the local credit check is never asked on a metered account (PRDCT-2653): its refusal does not reach the request', async () => {
+    const f = fixture({
+      cloud: true,
+      principal: principal(),
+      hubProfile: { plan: 'pro' },
+      decision: { allowed: false, reason: 'file exceeds MAX_FILE_SIZE_MB (1MB)' }
+    });
+    const res = await f.app.request('/files', {
+      method: 'POST',
+      headers: { 'content-length': '400' },
+      body: 'x'.repeat(400)
+    });
+    expect(res.status).toBe(201);
+    expect(f.checks).toEqual([]);
+    expect(f.creditChecks).toHaveLength(1);
+  });
+
+  it('a metered upload that declares no size is 411 length_required before the handler, the check and the event (PRDCT-2652)', async () => {
+    const f = fixture({ cloud: true, principal: principal() });
+    const res = await f.app.request('/files', { method: 'POST', body: 'x'.repeat(40) });
+    expect(res.status).toBe(411);
+    expect(await errorOf(res)).toEqual({
+      error: { code: 'length_required', message: 'A metered upload must declare its size (Content-Length)' }
+    });
+    expect(f.creditChecks).toEqual([]);
+    await tick();
+    expect(f.emitted).toEqual([]);
+    // A declared zero is a declaration: it passes.
+    expect(
+      (await f.app.request('/files', { method: 'POST', headers: { 'content-length': '0' } })).status
+    ).toBe(201);
+    // A metered route without a limit does not judge a size: no 411.
+    expect((await f.app.request('/things', { method: 'POST', body: 'x' })).status).toBe(201);
+  });
+
+  it('no 411 where no plan applies: oss, and a cloud-local workspace', async () => {
+    const oss = fixture({ cloud: false, principal: localPrincipal() });
+    expect((await oss.app.request('/files', { method: 'POST', body: 'x'.repeat(40) })).status).toBe(201);
+    const local = fixture({ cloud: true, principal: localPrincipal() });
+    expect((await local.app.request('/files', { method: 'POST', body: 'x'.repeat(40) })).status).toBe(201);
+    expect(local.creditChecks).toEqual([]);
+  });
+
+  it('the upgrade link is the hub’s page for the organization with the key and the required plan appended', async () => {
+    const page = 'https://hub.test/billing/upgrade?org=acct-1&tool=things&plan=free';
+    const f = fixture({
+      cloud: true,
+      principal: principal(),
+      hubProfile: { plan: 'free', upgradeUrl: page }
+    });
+    const over = await f.app.request('/files', {
+      method: 'POST',
+      headers: { 'content-length': '60' },
+      body: 'x'.repeat(60)
+    });
+    expect(over.status).toBe(403);
+    expect((await errorOf(over)).error.details).toEqual({
+      key: 'files.maxBytes',
+      plan: 'free',
+      requiredPlan: 'pro',
+      upgradeUrl: `${page}&key=files.maxBytes&requiredPlan=pro`
+    });
+    // No plan has the feature: the key alone is appended.
+    const nowhere = await f.app.request('/things/9/nowhere', { method: 'POST' });
+    expect((await errorOf(nowhere)).error.details).toMatchObject({
+      requiredPlan: null,
+      upgradeUrl: `${page}&key=nowhere`
+    });
   });
 
   it('a handler refusal (4xx) emits nothing', async () => {
@@ -359,6 +510,12 @@ describe('the gate on cloud, a hub-projected workspace', () => {
     expect((await f.app.request('/owned/42', { method: 'POST' })).status).toBe(201);
     await tick();
     expect(f.emitted[0]).toMatchObject({ userId: null, workspaceId: 'ws-of-42', accountRef: 'acct-owner' });
+    // The owner's account is the one the hub is asked to charge.
+    expect(f.creditChecks[0]).toMatchObject({
+      accountRef: 'acct-owner',
+      actionKey: 'things.make',
+      quantity: 1
+    });
     expect((await f.app.request('/things', { method: 'POST' })).status).toBe(201);
     await tick();
     expect(f.emitted[1]).toMatchObject({ userId: null, workspaceId: 'ws-1', accountRef: 'acct-1' });
@@ -389,6 +546,7 @@ describe('the gate on cloud, a hub-projected workspace', () => {
     expect(capped.status).toBe(413);
     expect((await errorOf(capped)).error.code).toBe('file_too_large');
     expect(pro.checks).toEqual([]);
+    expect(pro.creditChecks).toEqual([]);
     await tick();
     expect(pro.emitted).toEqual([]);
   });

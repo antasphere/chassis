@@ -11,6 +11,7 @@ import type { PepperRegistry } from './apikeys/peppers.js';
 import type { AuditService } from './audit/service.js';
 import type { EmailDriver } from './email/driver.js';
 import type { ToolEntitlementDeclaration } from './entitlements/slot.js';
+import type { CreditCheckDials } from './entitlements/check.js';
 import type { EntitlementProfileDials } from './entitlements/profiles.js';
 import type { UsageRetry } from './jobs/pgboss.js';
 import type { EnvExtension, ToolEnv } from './env.js';
@@ -318,6 +319,12 @@ export interface BootOverrides<TToolOverrides = never> {
   usageRetry?: Partial<UsageRetry>;
   /** Shrinks the entitlement profile cache dials (30 s TTL, 15 min stale window) for the cloud tests. */
   entitlementDials?: Partial<EntitlementProfileDials>;
+  /**
+   * Shrinks the credit check dials (30 s allowed / 5 s denied cache, 15 min
+   * fail-open window, 5 s hub budget, entitlements/check.ts) for the cloud
+   * tests. Production always runs the fixed defaults.
+   */
+  entitlementCheckDials?: Partial<CreditCheckDials> | undefined;
   /**
    * Replaces the env-derived email driver. Exists because change-email tokens
    * are stateless JWTs (never stored) — tests can only observe them by

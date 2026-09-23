@@ -36,8 +36,11 @@ import { FileService } from './files/index.js';
 import { createJobs, DEFAULT_USAGE_RETRY, PgBossUsageSink, type UsageRetry } from './jobs/index.js';
 import {
   assertToolEntitlements,
+  describeHubClockSkew,
   EMPTY_TOOL_ENTITLEMENTS,
   EntitlementProfiles,
+  hubClockSkewMs,
+  HubCreditCheck,
   HubMachineToken,
   HubUsagePoster
 } from './entitlements/index.js';
@@ -656,8 +659,20 @@ export async function bootPlatform<
   // tier values, stops the boot naming the route.
   const entitlements = tool.entitlements?.(env) ?? EMPTY_TOOL_ENTITLEMENTS;
   assertToolEntitlements(entitlements);
-  const entitlementCloud =
+  // The credit check at the hub (§7 steps 3 and 4), cloud only: the price
+  // of a metered request against the organization's balance, before the
+  // handler runs. Its metrics join /metrics beside the poster's.
+  const hubCreditCheck =
     hub && hubMachineToken
+      ? new HubCreditCheck({
+          issuerUrl: hub.issuerUrl,
+          token: hubMachineToken,
+          logger,
+          dials: overrides.entitlementCheckDials
+        })
+      : undefined;
+  const entitlementCloud =
+    hub && hubMachineToken && hubCreditCheck
       ? {
           profiles: new EntitlementProfiles({
             issuerUrl: hub.issuerUrl,
@@ -665,9 +680,10 @@ export async function bootPlatform<
             logger,
             dials: overrides.entitlementDials
           }),
-          // The upgrade link of a plan refusal: the hub's organization page,
-          // the same target the dashboard shows for a hub-managed workspace.
+          // The upgrade link of a plan refusal when the hub's answer carries
+          // no upgrade page of its own (an older hub): the hub root.
           upgradeUrl: hub.issuerUrl,
+          credits: hubCreditCheck,
           // The reported user of an event is the HUB user (the SSO `sub` on
           // the account row), never the tool's local id; a user with no hub
           // link (the operator) reports null. Cached per user for five
@@ -675,6 +691,20 @@ export async function bootPlatform<
           hubSubject: hubSubjectResolver(db.db)
         }
       : undefined;
+
+  // The clock check (PRDCT-2644), cloud only and off the boot's critical
+  // path: the hub judges every usage event's date against ITS clock and the
+  // poster against this instance's, so a clock more than five minutes ahead
+  // of the hub's stamps events the hub would refuse and the poster cannot
+  // see it. One read of the hub's Date header, a warning when they disagree
+  // beyond the forward bound, nothing refused.
+  if (hub) {
+    void hubClockSkewMs(hub.issuerUrl).then((skewMs) => {
+      if (skewMs === null) return;
+      const sentence = describeHubClockSkew(skewMs);
+      if (sentence) logger.warn({ skewMs }, `hub clock: ${sentence}`);
+    });
+  }
 
   // The edition split (internal/federation.md): the local defaults below are the
   // oss binding, passed through bindEditionSeams — the ONE place EDITION
@@ -833,6 +863,7 @@ export async function bootPlatform<
     ...(hubReconciler?.promMetrics ?? []),
     ...(hubGrant?.promMetrics ?? []),
     ...(hubUsagePoster?.promMetrics ?? []),
+    ...(hubCreditCheck?.promMetrics ?? []),
     ...jobs.promMetrics
   ]) {
     metrics.registry.registerMetric(metric);
