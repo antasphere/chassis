@@ -10,6 +10,15 @@ import { registerProjectCommands } from './commands/projects.js';
 import { registerFileCommands } from './commands/files.js';
 import { registerCompletionCommand } from './commands/completion.js';
 
+/** The price and the balance of a credit refusal, each only when it is a number (the code review). */
+function creditFigures(credit: { credits?: unknown; balance?: unknown } | undefined): string {
+  const parts = [
+    typeof credit?.credits === 'number' ? `this needs ${credit.credits} credits` : null,
+    typeof credit?.balance === 'number' ? `the organization holds ${credit.balance}` : null
+  ].filter((x): x is string => x !== null);
+  return parts.length > 0 ? `${parts.join(' and ')}; ` : '';
+}
+
 /** The program and the runner of one tool, over its kit (kit.ts). */
 export function createProgram<TClient extends ChassisClient<string>>(
   kit: CliKit<TClient>,
@@ -125,7 +134,7 @@ export function createProgram<TClient extends ChassisClient<string>>(
           typeof upgradeUrl === 'string' && upgradeUrl
             ? ` — upgrade the plan at ${upgradeUrl}`
             : topUpUrl && !e.message.includes(topUpUrl)
-              ? ` — this needs ${String(credit?.credits)} credits and the organization holds ${String(credit?.balance)}; top up at ${topUpUrl}`
+              ? ` — ${creditFigures(credit)}top up at ${topUpUrl}`
               : e.status === 403
                 ? ' (this API key is not allowed to do that)'
                 : (errorHint?.(e) ??

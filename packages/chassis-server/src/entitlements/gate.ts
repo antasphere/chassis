@@ -3,6 +3,7 @@ import type { Context, MiddlewareHandler } from 'hono';
 import { COMPOSED_HANDLER } from 'hono/utils/constants';
 import { ulid } from 'ulid';
 import {
+  declaredContentLength,
   ENTITLEMENT_DENIED,
   ENTITLEMENT_TIERS,
   PLAN_REQUIRED,
@@ -206,34 +207,34 @@ function principalActor(principal: Principal): ActorRef {
   };
 }
 
+/**
+ * The paying actor of one request. A route that declares an `actor` hook is
+ * a SURFACE ATTRIBUTED TO A RESOURCE'S OWNER (a form response through a share
+ * link, PRDCT-2634): the hook, and only the hook, names who pays, whether or
+ * not a principal happens to be signed in (a person of any workspace may hold
+ * a share link; they are a viewer here, never the payer). A hook that resolves
+ * nothing, or throws, leaves the route to its own handling with nothing
+ * metered, rather than refusing on a lookup error or billing the viewer. A
+ * route without a hook meters its principal, or nothing without one.
+ */
 async function actorOf(
   entry: RouteEntitlementEntry,
   ctx: EntitlementRequest,
-  principal: Principal
-): Promise<ActorRef> {
+  principal: Principal | null
+): Promise<ActorRef | null> {
   if (entry.meter?.actor) {
-    const resolved = await entry.meter.actor(ctx);
-    if (resolved) return resolved;
+    try {
+      return (await entry.meter.actor(ctx)) ?? null;
+    } catch {
+      return null;
+    }
   }
-  return principalActor(principal);
+  return principal ? principalActor(principal) : null;
 }
 
-/**
- * The actor of a request with NO principal: only a route that declares an
- * `actor` hook has one (PRDCT-2634), and only what the hook resolves. A hook
- * that throws resolves nothing: the route's own handling answers, and the
- * action goes unmetered rather than refused on a lookup error.
- */
-async function anonymousActorOf(
-  entry: RouteEntitlementEntry,
-  ctx: EntitlementRequest
-): Promise<ActorRef | null> {
-  if (!entry.meter?.actor) return null;
-  try {
-    return (await entry.meter.actor(ctx)) ?? null;
-  } catch {
-    return null;
-  }
+/** Whether the request is a viewer's on an owner-attributed surface: the route declares an actor hook. */
+function viewerSurface(entry: RouteEntitlementEntry): boolean {
+  return Boolean(entry.meter?.actor);
 }
 
 /** The first tier above the account's that allows the value, or null when none does. */
@@ -427,18 +428,18 @@ export function entitlementGate(entry: RouteEntitlementEntry, deps: EntitlementG
     // reported, the viewer is never identified, §8). No principal and no
     // actor: the route's own auth answers (401/404); nothing to meter, and a
     // deferred size refusal still fires first, as the cap did before.
-    // The hook runs on cloud only: on oss no account can exist, so the
-    // lookups would cost the database for nothing (verifier round 3).
-    const actor = principal
-      ? await actorOf(entry, ctx, principal)
-      : deps.cloud
-        ? await anonymousActorOf(entry, ctx)
-        : null;
+    // A viewer's request (an owner-attributed surface, with or without a
+    // signed-in person) learns nothing of the owner's account: every refusal
+    // to it is one neutral sentence (verifier round 3, the code review: a
+    // signed-in holder of a share link is a viewer too). On oss the hook is
+    // not run: no account can exist, the lookups would cost the database.
+    const viewer = viewerSurface(entry);
+    const actor = viewer && !deps.cloud ? null : await actorOf(entry, ctx, principal);
     if (!actor) return deferredRefusal ? deferredRefusal() : next();
     const metered = Boolean(deps.cloud && actor.accountRef);
-    // An anonymous actor with no account (oss, a cloud-local workspace) has
-    // no plan and no credits: the surface stays as it was, byte for byte.
-    if (!principal && !metered) return deferredRefusal ? deferredRefusal() : next();
+    // A viewer's surface whose owner has no account (a cloud-local
+    // workspace) has no plan and no credits: byte for byte as it was.
+    if (viewer && !metered) return deferredRefusal ? deferredRefusal() : next();
 
     // The plan is read only when the route declares a feature or a limit: a
     // meter-only route has nothing to judge against it (verifier round 3).
@@ -447,7 +448,7 @@ export function entitlementGate(entry: RouteEntitlementEntry, deps: EntitlementG
         deps.logger.warn({ err: cause }, 'entitlements: profile read threw — the free tier applies');
         return defaultProfile(deps.tool);
       });
-      const refused = planCheck(c, entry, ctx, profile, deps, principal === null);
+      const refused = planCheck(c, entry, ctx, profile, deps, viewer);
       if (refused) return refused;
     }
     // The size cap's deferred refusal: the plan has had its say (or none
@@ -459,17 +460,21 @@ export function entitlementGate(entry: RouteEntitlementEntry, deps: EntitlementG
       // A route metered in BYTES needs the size too: with no header the check
       // would price 0 bytes and the emit the stored size, so an anonymous
       // upload door could take an owner's balance below zero (verifier round 3).
-      const judgesSize = Boolean(entry.limit) || entry.meter?.unit === 'bytes';
+      // A limit JUDGES the body when its value is the declared length (the
+      // contract's own reader), not any limit (a count limit on a JSON route
+      // must not refuse a chunked body: the code review).
+      const judgesSize = entry.limit?.value === declaredContentLength || entry.meter?.unit === 'bytes';
       if (judgesSize && BODY_METHODS.has(c.req.method.toUpperCase()) && !declaresLength(ctx)) {
         return c.json(err(LENGTH_REQUIRED, 'A metered upload must declare its size (Content-Length)'), 411);
       }
       if (entry.meter) {
-        const refused = await creditRefusal(c, entry.meter, ctx, actor, deps.cloud!, principal === null);
+        const refused = await creditRefusal(c, entry.meter, ctx, actor, deps.cloud!, viewer);
         if (refused) return refused;
       }
     } else {
       if (entry.meter) {
-        // A principal is certain here: the anonymous-and-unmetered case returned above.
+        // A principal is certain here: a viewer's surface returned above, and a
+        // route without a hook resolved no actor without a principal.
         const decision = await deps.entitlements.check(
           principal!,
           { key: entry.meter.key, quantity: quantityOf(entry.meter, ctx), unit: entry.meter.unit },
@@ -502,7 +507,7 @@ export function entitlementGate(entry: RouteEntitlementEntry, deps: EntitlementG
       // The hub's channel enum has no value for a share link: an anonymous
       // surface reports the owner as if from a browser session (PRDCT-2634;
       // a dedicated value is the hub's contract to add).
-      via: principal?.via ?? 'session',
+      via: viewer ? 'session' : principal!.via,
       ...(audit?.resourceType ? { resourceType: audit.resourceType } : {}),
       ...(audit?.resourceId ? { resourceId: audit.resourceId } : {}),
       source: await deps.source()

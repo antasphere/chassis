@@ -824,3 +824,41 @@ describe('the anonymous surface, round 3 of the verifier', () => {
     expect(f.creditChecks).toHaveLength(1);
   });
 });
+
+describe('a signed-in holder of a share link is a viewer too (the code review)', () => {
+  it('the owner pays and is reported, via session, whatever the viewer signed in with; the refusal is neutral', async () => {
+    const f = fixture({
+      cloud: true,
+      principal: principal({ via: 'api_key', accountRef: 'acct-viewer', workspaceId: 'ws-viewer' }),
+      credits: () => ({ allowed: false, reason: 'insufficient_credits', source: 'hub', check: null })
+    });
+    const res = await f.app.request('/owned/deck-7', { method: 'POST' });
+    expect(res.status).toBe(402);
+    const body = (await res.json()) as { error: { message: string; details?: unknown } };
+    expect(body.error.details).toBeUndefined();
+    expect(body.error.message).not.toContain('acct');
+    expect(f.creditChecks).toEqual([
+      { accountRef: 'acct-owner', actionKey: 'things.make', quantity: 1, unit: 'call' }
+    ]);
+    const ok = fixture({ cloud: true, principal: principal({ via: 'api_key', accountRef: 'acct-viewer' }) });
+    expect((await ok.app.request('/owned/deck-7', { method: 'POST' })).status).toBe(201);
+    expect(ok.emitted[0]).toMatchObject({ accountRef: 'acct-owner', via: 'session', userId: null });
+  });
+
+  it('a hook that resolves nothing never falls back to the signed-in viewer: the route answers, nothing is checked', async () => {
+    const f = fixture({ cloud: true, principal: principal() });
+    for (const path of ['/unknown/x', '/exploding/x']) {
+      const res = await f.app.request(path, { method: 'POST' });
+      expect(res.status, path).toBe(201);
+    }
+    expect(f.creditChecks).toEqual([]);
+    expect(f.checks).toEqual([]);
+    expect(f.emitted).toEqual([]);
+  });
+
+  it('a count limit on a JSON route does not demand a Content-Length: only a body-judging limit or a bytes meter does', async () => {
+    const f = fixture({ cloud: true, principal: principal() });
+    const res = await f.app.request('/things', { method: 'POST' });
+    expect(res.status).toBe(201);
+  });
+});

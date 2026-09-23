@@ -143,6 +143,10 @@ export class HubCreditCheck implements CreditCheck {
   private closedLogged = false;
   /** The action keys whose unit mismatch was already logged. */
   private readonly unitWarned = new Set<string>();
+  /** The action keys whose malformed-request answer was already logged at error (one line per key, not per request). */
+  private readonly malformedLogged = new Set<string>();
+  /** Whether the hub's 403 was logged at error for the current outage (the hold probes every few seconds). */
+  private forbiddenLogged = false;
   /** How many calls reached the hub — a test seam. */
   hubCalls = 0;
 
@@ -263,6 +267,7 @@ export class HubCreditCheck implements CreditCheck {
   private answered(): void {
     this.failingSinceMs = null;
     this.closedLogged = false;
+    this.forbiddenLogged = false;
   }
 
   /** Keep an answer; an allowed answer over a fresh allowed entry keeps the larger quantity. */
@@ -387,17 +392,26 @@ export class HubCreditCheck implements CreditCheck {
     }
     if (res.status === 400) {
       const body = await res.text().catch(() => '');
-      this.opts.logger.error(
-        { accountRef: req.accountRef, actionKey: req.actionKey, body: body.slice(0, 500) },
-        'usage check: the hub refused the check as malformed — a bug, the action is allowed (counted on usage_check_total{outcome="malformed"})'
-      );
+      // One error line per action key: a schema drift would otherwise write
+      // one per metered request (the code review).
+      if (!this.malformedLogged.has(req.actionKey)) {
+        this.malformedLogged.add(req.actionKey);
+        this.opts.logger.error(
+          { accountRef: req.accountRef, actionKey: req.actionKey, body: body.slice(0, 500) },
+          'usage check: the hub refused the check as malformed — a bug, the action is allowed (counted on usage_check_total{outcome="malformed"})'
+        );
+      }
       return { kind: 'malformed' };
     }
     if (res.status === 403) {
-      this.opts.logger.error(
-        { status: res.status },
-        'usage check: the hub refuses this client (403) — check the client’s usage:write scope; treated as an outage'
-      );
+      // One error line per outage: the hold probes every few seconds.
+      if (!this.forbiddenLogged) {
+        this.forbiddenLogged = true;
+        this.opts.logger.error(
+          { status: res.status },
+          'usage check: the hub refuses this client (403) — check the client’s usage:write scope; treated as an outage'
+        );
+      }
       return { kind: 'outage' };
     }
     this.opts.logger.debug({ status: res.status }, 'usage check: the hub answered non-2xx');
