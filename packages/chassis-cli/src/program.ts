@@ -111,17 +111,26 @@ export function createProgram<TClient extends ChassisClient<string>>(
             ? (e.details as { upgradeUrl?: unknown } | undefined)?.upgradeUrl
             : undefined
         ) as string | undefined;
+        // A credit refusal (402 `entitlement_denied`, PRDCT-2664) carries the
+        // price, the balance and the top-up link, the hub's billing page. The
+        // self-hosted cap's 413 has no details and keeps its message alone.
+        const credit = (
+          e instanceof PlatformApiError && e.code === 'entitlement_denied' ? e.details : undefined
+        ) as { credits?: unknown; balance?: unknown; topUpUrl?: unknown } | undefined;
+        const topUpUrl = typeof credit?.topUpUrl === 'string' && credit.topUpUrl ? credit.topUpUrl : null;
         const hint =
           typeof upgradeUrl === 'string' && upgradeUrl
             ? ` — upgrade the plan at ${upgradeUrl}`
-            : e.status === 403
-              ? ' (this API key is not allowed to do that)'
-              : (errorHint?.(e) ??
-                (e.status === 401
-                  ? ` (check the key: \`${identity.bin} verify\`)`
-                  : e.status === 404
-                    ? workspaceNotFoundHint(io)
-                    : ''));
+            : topUpUrl
+              ? ` — this needs ${String(credit?.credits)} credits and the organization holds ${String(credit?.balance)}; top up at ${topUpUrl}`
+              : e.status === 403
+                ? ' (this API key is not allowed to do that)'
+                : (errorHint?.(e) ??
+                  (e.status === 401
+                    ? ` (check the key: \`${identity.bin} verify\`)`
+                    : e.status === 404
+                      ? workspaceNotFoundHint(io)
+                      : ''));
         io.err.write(`Error: ${e.message}${hint}\n`);
         return 1;
       }
