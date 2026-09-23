@@ -19,10 +19,23 @@ describe('mcp error → hint mapping', () => {
     });
     const text = err.toUserFacingText();
     expect(text).toContain('HTTP 402');
-    expect(text).toContain('not have enough credits');
+    expect(text).toContain('lacks the credits');
     expect(text).toContain(
       'Top up: https://account.antasphere.com/orgs/acme/billing (this needs 1500 credits, the organization holds 20).'
     );
+  });
+
+  it('the gate’s own 402 message already carries the link: no second top-up sentence (verifier round 1)', () => {
+    const url = 'https://account.antasphere.com/orgs/acme/billing';
+    const err = new ApiToolError(
+      402,
+      'entitlement_denied',
+      `This needs 1500 credits and the organization holds 20; top up at ${url}`,
+      { credits: 1500, balance: 20, topUpUrl: url }
+    );
+    const text = err.toUserFacingText();
+    expect(text).not.toContain('Top up:');
+    expect(text.split(url).length - 1).toBe(1);
   });
 
   it('a 413 entitlement_denied without details (the self-hosted cap) has no top-up sentence', () => {

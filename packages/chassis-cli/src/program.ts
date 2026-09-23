@@ -118,10 +118,13 @@ export function createProgram<TClient extends ChassisClient<string>>(
           e instanceof PlatformApiError && e.code === 'entitlement_denied' ? e.details : undefined
         ) as { credits?: unknown; balance?: unknown; topUpUrl?: unknown } | undefined;
         const topUpUrl = typeof credit?.topUpUrl === 'string' && credit.topUpUrl ? credit.topUpUrl : null;
+        // The gate's own message already spells the price, the balance and
+        // the link; the hint repeats them only for a message that does not
+        // (verifier round 1: the URL was printed twice).
         const hint =
           typeof upgradeUrl === 'string' && upgradeUrl
             ? ` — upgrade the plan at ${upgradeUrl}`
-            : topUpUrl
+            : topUpUrl && !e.message.includes(topUpUrl)
               ? ` — this needs ${String(credit?.credits)} credits and the organization holds ${String(credit?.balance)}; top up at ${topUpUrl}`
               : e.status === 403
                 ? ' (this API key is not allowed to do that)'

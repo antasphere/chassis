@@ -259,6 +259,43 @@ describe('HubCreditCheck: the hub’s answers', () => {
   });
 });
 
+describe('HubCreditCheck: what the verifier found (round 1)', () => {
+  it('a denial is reused for the SAME quantity too: an identical retry costs no hub call', async () => {
+    const h = hub((r) => Response.json(answer(r, { allowed: false, reason: 'insufficient_credits' })));
+    expect(await h.check.check(h.req(100))).toMatchObject({ allowed: false, source: 'hub' });
+    expect(await h.check.check(h.req(100))).toMatchObject({ allowed: false, source: 'cache' });
+    expect(h.check.hubCalls).toBe(1);
+  });
+
+  it('a hub that ANSWERS 400 or unknown_account after a blip ends the outage: the clock clears, the next blip fails open again', async () => {
+    let mode: 'down' | 'bad' | 'unknown' | 'ok' = 'down';
+    const h = hub((r) => {
+      if (mode === 'bad') return Response.json({ error: { code: 'validation_error' } }, { status: 400 });
+      if (mode === 'unknown') return Response.json({ error: { code: 'unknown_account' } }, { status: 404 });
+      if (mode === 'ok') return Response.json(answer(r));
+      return new Response('{}', { status: 503 });
+    });
+    expect(await h.check.check(h.req(1))).toMatchObject({ source: 'fail_open' });
+    expect(await h.gauge('posture')).toBe(1);
+    mode = 'bad';
+    expect(await h.check.check(h.req(2))).toMatchObject({ source: 'malformed' });
+    expect(await h.gauge('posture')).toBe(0);
+    expect(await h.gauge('failingSince')).toBe(0);
+    // Fifteen minutes of 400s later, one blip is a NEW outage: open, not closed.
+    h.clock.now += 16 * 60_000;
+    mode = 'down';
+    expect(await h.check.check(h.req(3))).toMatchObject({ allowed: true, source: 'fail_open' });
+    expect(await h.gauge('posture')).toBe(1);
+    mode = 'unknown';
+    expect(await h.check.check(h.req(4))).toMatchObject({ source: 'unknown_account' });
+    expect(await h.gauge('posture')).toBe(0);
+    h.clock.now += 16 * 60_000;
+    mode = 'down';
+    expect(await h.check.check(h.req(5))).toMatchObject({ allowed: true, source: 'fail_open' });
+    expect(h.logs.filter((l) => l.level === 'error' && l.msg.includes('hub_unavailable'))).toHaveLength(0);
+  });
+});
+
 describe('HubCreditCheck: the outage posture', () => {
   it('fails open for fifteen minutes from the first failure, then closes; a success clears it', async () => {
     let down = false;

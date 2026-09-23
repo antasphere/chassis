@@ -67,11 +67,15 @@ describe('hubSubjectCache', () => {
     expect(cache.size).toBe(before);
   });
 
-  it('does not sweep at or below the threshold', async () => {
-    const { cache, advance } = setup({ sweepAbove: 3 });
+  it('does not sweep at or below the threshold, even with expired entries to drop; one entry above, it does', async () => {
+    const { cache, advance } = setup({ sweepAbove: 3, ttlMs: 1_000 });
     for (const u of ['a', 'b']) await cache.resolve(u);
-    advance(2_000);
-    await cache.resolve('c');
+    advance(2_000); // a and b are expired now
+    await cache.resolve('c'); // size 2 → not above 3: no sweep, the expired stay
+    expect(cache.size).toBe(3);
+    await cache.resolve('d'); // size 3 → still not above 3: no sweep (the boundary, verifier round 1)
+    expect(cache.size).toBe(4);
+    await cache.resolve('e'); // size 4 → above 3: a and b swept, c, d live
     expect(cache.size).toBe(3);
     cache.clear();
     expect(cache.size).toBe(0);

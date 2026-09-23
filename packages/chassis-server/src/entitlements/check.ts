@@ -220,8 +220,7 @@ export class HubCreditCheck implements CreditCheck {
     const outcome = await this.ask(req, true);
     switch (outcome.kind) {
       case 'answer': {
-        this.failingSinceMs = null;
-        this.closedLogged = false;
+        this.answered();
         const { answer } = outcome;
         if (
           typeof answer.unit === 'string' &&
@@ -244,14 +243,26 @@ export class HubCreditCheck implements CreditCheck {
           check: answer
         });
       }
+      // The hub ANSWERED, whatever it said: the outage, if one was running,
+      // is over (verifier round 1: a clock cleared only by a 200 let a hub
+      // answering 400 or unknown_account after one blip keep an outage
+      // "running", and the next blip closed the gate without its window).
       case 'unknown_account':
+        this.answered();
         return this.verdict('unknown_account', { allowed: true, source: 'unknown_account', check: null });
       case 'malformed':
+        this.answered();
         return this.verdict('malformed', { allowed: true, source: 'malformed', check: null });
       case 'outage':
         this.lastFailureMs = this.now();
         return this.outage();
     }
+  }
+
+  /** The hub answered: the outage, if any, is over, and the next one warns again. */
+  private answered(): void {
+    this.failingSinceMs = null;
+    this.closedLogged = false;
   }
 
   /** Keep an answer; an allowed answer over a fresh allowed entry keeps the larger quantity. */

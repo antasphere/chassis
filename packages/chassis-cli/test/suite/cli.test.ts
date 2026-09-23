@@ -213,6 +213,27 @@ describe(`${bin} CLI`, () => {
     );
   });
 
+  it('the gate’s own 402 message already carries the link: printed once, never twice (verifier round 1)', async () => {
+    const url = 'https://account.antasphere.com/orgs/acme/billing';
+    const message = `This needs 1500 credits and the organization holds 20; top up at ${url}`;
+    const h = harness([
+      {
+        status: 402,
+        body: {
+          error: {
+            code: 'entitlement_denied',
+            message,
+            details: { credits: 1500, balance: 20, topUpUrl: url }
+          }
+        }
+      }
+    ]);
+    const code = await run(['files', 'list', '--url', 'http://x', '--api-key', 'k'], h.io);
+    expect(code).toBe(1);
+    expect(h.err()).toBe(`Error: ${message}\n`);
+    expect(h.err().split(url).length - 1).toBe(1);
+  });
+
   it('a 413 entitlement_denied without details (the self-hosted cap) prints the message alone', async () => {
     const h = harness([
       {
