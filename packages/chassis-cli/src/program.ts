@@ -10,6 +10,15 @@ import { registerProjectCommands } from './commands/projects.js';
 import { registerFileCommands } from './commands/files.js';
 import { registerCompletionCommand } from './commands/completion.js';
 
+/** The price and the balance of a credit refusal, each only when it is a number (the code review). */
+function creditFigures(credit: { credits?: unknown; balance?: unknown } | undefined): string {
+  const parts = [
+    typeof credit?.credits === 'number' ? `this needs ${credit.credits} credits` : null,
+    typeof credit?.balance === 'number' ? `the organization holds ${credit.balance}` : null
+  ].filter((x): x is string => x !== null);
+  return parts.length > 0 ? `${parts.join(' and ')}; ` : '';
+}
+
 /** The program and the runner of one tool, over its kit (kit.ts). */
 export function createProgram<TClient extends ChassisClient<string>>(
   kit: CliKit<TClient>,
@@ -111,17 +120,29 @@ export function createProgram<TClient extends ChassisClient<string>>(
             ? (e.details as { upgradeUrl?: unknown } | undefined)?.upgradeUrl
             : undefined
         ) as string | undefined;
+        // A credit refusal (402 `entitlement_denied`, PRDCT-2664) carries the
+        // price, the balance and the top-up link, the hub's billing page. The
+        // self-hosted cap's 413 has no details and keeps its message alone.
+        const credit = (
+          e instanceof PlatformApiError && e.code === 'entitlement_denied' ? e.details : undefined
+        ) as { credits?: unknown; balance?: unknown; topUpUrl?: unknown } | undefined;
+        const topUpUrl = typeof credit?.topUpUrl === 'string' && credit.topUpUrl ? credit.topUpUrl : null;
+        // The gate's own message already spells the price, the balance and
+        // the link; the hint repeats them only for a message that does not
+        // (verifier round 1: the URL was printed twice).
         const hint =
           typeof upgradeUrl === 'string' && upgradeUrl
             ? ` — upgrade the plan at ${upgradeUrl}`
-            : e.status === 403
-              ? ' (this API key is not allowed to do that)'
-              : (errorHint?.(e) ??
-                (e.status === 401
-                  ? ` (check the key: \`${identity.bin} verify\`)`
-                  : e.status === 404
-                    ? workspaceNotFoundHint(io)
-                    : ''));
+            : topUpUrl && !e.message.includes(topUpUrl)
+              ? ` — ${creditFigures(credit)}top up at ${topUpUrl}`
+              : e.status === 403
+                ? ' (this API key is not allowed to do that)'
+                : (errorHint?.(e) ??
+                  (e.status === 401
+                    ? ` (check the key: \`${identity.bin} verify\`)`
+                    : e.status === 404
+                      ? workspaceNotFoundHint(io)
+                      : ''));
         io.err.write(`Error: ${e.message}${hint}\n`);
         return 1;
       }

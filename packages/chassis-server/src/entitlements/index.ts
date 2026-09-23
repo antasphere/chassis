@@ -1,3 +1,13 @@
+export { describeHubClockSkew, hubClockSkewMs } from './clock-skew.js';
+export {
+  DEFAULT_CREDIT_CHECK_DIALS,
+  HubCreditCheck,
+  type CreditCheck,
+  type CreditCheckDials,
+  type CreditCheckRequest,
+  type CreditVerdict,
+  type HubCreditCheckOptions
+} from './check.js';
 export {
   entitlementGate,
   honoPath,

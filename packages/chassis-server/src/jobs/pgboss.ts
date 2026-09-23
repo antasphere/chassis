@@ -30,6 +30,17 @@ export const AUDIT_PURGE_QUEUE = 'audit-purge';
  * `heldDelaySeconds` — forever. Failed usage is held, never lost.
  */
 export const USAGE_HELD_QUEUE = 'usage-events-held';
+/**
+ * The singleton key a window hold (PRDCT-2644) carries on the held queue:
+ * pg-boss's dead-letter copy carries none, so the held worker tells a
+ * retry-budget hold from a window hold by it. The held queue's policy is
+ * `standard` and the send names no `singletonSeconds`, so the key enforces
+ * nothing; it is a label.
+ */
+const WINDOW_HOLD_PREFIX = 'occurred_at_window:';
+const windowHoldKey = (id: string): string => WINDOW_HOLD_PREFIX + id;
+const isWindowHoldKey = (key: string | null | undefined): boolean =>
+  typeof key === 'string' && key.startsWith(WINDOW_HOLD_PREFIX);
 export const APIKEY_EXPIRY_QUEUE = 'apikey-expiry-sweep';
 export const IDEMPOTENCY_PURGE_QUEUE = 'idempotency-purge';
 export const ORPHAN_USER_PURGE_QUEUE = 'orphan-user-purge';
@@ -126,7 +137,8 @@ export async function createJobs(
   // registers: [] — boot attaches it to the app registry.
   const held = new Counter({
     name: 'usage_events_held_total',
-    help: 'Usage events that exhausted the retry budget and were held for an hourly re-drive (the hub, or HUB_CLIENT_ID/HUB_CLIENT_SECRET, needs an operator)',
+    help: 'Usage events held for a re-drive, by reason: retry_budget (the retry budget ran out), occurred_at_window (the hub would refuse the date)',
+    labelNames: ['reason'] as const,
     registers: []
   });
 
@@ -216,9 +228,36 @@ export async function createJobs(
     // downstream sink (no-op locally, the rail in cloud) dedupes by ULID.
     // A downstream that takes batches (the hub poster) gets the drained
     // batch whole; a throw fails every job of it back to the queue's retry.
+    //
+    // A batch downstream may answer an outcome naming events it HELD rather
+    // than posted (PRDCT-2644: an `occurredAt` outside the hub's window).
+    // Each is sent to the held queue, which re-drives it here after
+    // `heldDelaySeconds`, forever, as it does a retry-budget hold: a
+    // future-dated event is posted once its time has come, a stale one stays
+    // held until an operator acts. No event the hub would refuse on its date
+    // is ever posted, and none is dropped.
     await boss.work<UsageEvent>(USAGE_QUEUE, { batchSize: 50 }, async (jobs) => {
       if (downstreamUsage.emitBatch) {
-        await downstreamUsage.emitBatch(jobs.map((job) => job.data));
+        const outcome = await downstreamUsage.emitBatch(jobs.map((job) => job.data));
+        if (outcome && outcome.held.length > 0) {
+          const heldIds = new Set(outcome.held.map((h) => h.id));
+          const heldJobs = jobs.filter((job) => heldIds.has(job.data.id));
+          for (const job of heldJobs) {
+            await boss.send(USAGE_HELD_QUEUE, job.data, { singletonKey: windowHoldKey(job.data.id) });
+          }
+          logger.warn(
+            {
+              ids: heldJobs.map((job) => job.data.id),
+              reason: 'occurred_at_window',
+              retryAfterSeconds: usageRetry.heldDelaySeconds
+            },
+            'usage: events outside the hub’s occurredAt window — held, never posted, re-driven after the hold; check this instance’s clock (usage_events_held_total{reason="occurred_at_window"})'
+          );
+          // Counted once the sends are in, for the reason the held worker
+          // below gives: a send that throws fails this batch back to its
+          // retry, which would count the held events again.
+          held.inc({ reason: 'occurred_at_window' }, heldJobs.length);
+        }
       } else {
         for (const job of jobs) {
           await downstreamUsage.emit(job.data);
@@ -232,12 +271,25 @@ export async function createJobs(
     // operator sees it, counted on /metrics, and re-sent to the usage queue
     // after the hold — round after round, until the hub accepts it. An
     // outage of a day, an older hub, a wrong secret: the usage waits.
-    await boss.work<UsageEvent>(USAGE_HELD_QUEUE, { batchSize: 50 }, async (jobs) => {
-      const ids = jobs.map((job) => job.data.id);
-      logger.error(
-        { count: jobs.length, ids, retryAfterSeconds: usageRetry.heldDelaySeconds },
-        'usage: events exhausted the retry budget — held, re-driven after the hold; check the hub, HUB_CLIENT_ID/HUB_CLIENT_SECRET and the instance’s registry entry (usage_events_held_total)'
-      );
+    //
+    // Two kinds of job land here, told apart by the singleton key: pg-boss's
+    // dead-letter copy of a batch that ran out of retries carries none, the
+    // usage worker's window hold (PRDCT-2644) carries `windowHoldKey`. A
+    // window hold was logged and counted where it was held, so it is only
+    // re-driven here: logging or counting it again would name it a
+    // retry-budget hold, which it is not.
+    await boss.work<UsageEvent>(USAGE_HELD_QUEUE, { batchSize: 50, includeMetadata: true }, async (jobs) => {
+      const budget = jobs.filter((job) => !isWindowHoldKey(job.singletonKey));
+      if (budget.length > 0) {
+        logger.error(
+          {
+            count: budget.length,
+            ids: budget.map((job) => job.data.id),
+            retryAfterSeconds: usageRetry.heldDelaySeconds
+          },
+          'usage: events exhausted the retry budget — held, re-driven after the hold; check the hub, HUB_CLIENT_ID/HUB_CLIENT_SECRET and the instance’s registry entry (usage_events_held_total)'
+        );
+      }
       for (const job of jobs) {
         await boss.send(USAGE_QUEUE, job.data, {
           ...usageSendOptions(job.data, usageRetry),
@@ -248,7 +300,7 @@ export async function createJobs(
       // fails the held batch back to its own retries, which re-send the
       // whole batch (the hub answers duplicate for what already went) and
       // would count it again if the count came first.
-      held.inc(jobs.length);
+      if (budget.length > 0) held.inc({ reason: 'retry_budget' }, budget.length);
     });
 
     // Audit retention: a nightly purge keeps audit_log from growing without

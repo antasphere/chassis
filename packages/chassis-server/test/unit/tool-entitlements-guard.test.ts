@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { declareRouteEntitlements } from '@antasphere/chassis-contract';
-import { assertToolEntitlements, EMPTY_TOOL_ENTITLEMENTS } from '../../src/entitlements/index.js';
+import {
+  assertToolEntitlements,
+  EMPTY_TOOL_ENTITLEMENTS,
+  type ToolEntitlementDeclaration
+} from '../../src/entitlements/index.js';
 
 /**
  * The boot-time guard of the `entitlements` slot (slot 22) and the
@@ -90,4 +94,75 @@ describe('assertToolEntitlements', () => {
       })
     ).toThrow(/declares things.make twice/);
   });
+});
+
+describe('assertToolEntitlements: the shape of the lists and the instance ceiling (PRDCT-2653)', () => {
+  const MB = 1024 * 1024;
+  const withLimits = (limits: unknown): ToolEntitlementDeclaration => ({
+    ...base(),
+    limits: limits as ToolEntitlementDeclaration['limits'],
+    routes: declareRouteEntitlements([])
+  });
+
+  it('refuses a limit key with a missing tier, naming its path', () => {
+    expect(() => assertToolEntitlements(withLimits({ 'things.max': { oss: 10, free: 10 } }))).toThrow(
+      /entitlements declaration is malformed: limits\.things\.max\.pro: /
+    );
+  });
+
+  it('refuses a feature with a missing tier, naming its path', () => {
+    expect(() =>
+      assertToolEntitlements({
+        ...base(),
+        features: { premium: { free: false } } as unknown as ToolEntitlementDeclaration['features'],
+        routes: declareRouteEntitlements([])
+      })
+    ).toThrow(/entitlements declaration is malformed: features\.premium\.pro: /);
+  });
+
+  it('refuses a tier above a numeric oss, with the ceiling message', () => {
+    expect(() =>
+      assertToolEntitlements(withLimits({ 'files.maxBytes': { oss: 100, free: 20, pro: 500 } }))
+    ).toThrow(
+      'tool definition: entitlements.limits.files.maxBytes.pro (500) is above the instance ceiling (oss 100): a plan value the instance cannot serve must not be advertised'
+    );
+  });
+
+  it('refuses an unlimited (null) tier under a numeric oss', () => {
+    expect(() =>
+      assertToolEntitlements(withLimits({ 'files.maxBytes': { oss: 100, free: null, pro: 100 } }))
+    ).toThrow(
+      'tool definition: entitlements.limits.files.maxBytes.free (null) is above the instance ceiling (oss 100): a plan value the instance cannot serve must not be advertised'
+    );
+  });
+
+  it('accepts any tier value under a null oss (no ceiling)', () => {
+    expect(() =>
+      assertToolEntitlements(withLimits({ 'workspace.members': { oss: null, free: 3, pro: null } }))
+    ).not.toThrow();
+    expect(() =>
+      assertToolEntitlements(withLimits({ 'links.perDeck': { oss: null, free: 10, pro: 1e9 } }))
+    ).not.toThrow();
+  });
+
+  for (const cap of [100 * MB, 500 * MB]) {
+    it(`accepts the two real declarations' shapes at cap = ${cap / MB} MB`, () => {
+      // packages/chassis-server/test/host/minimal-tool.ts
+      expect(() =>
+        assertToolEntitlements(
+          withLimits({ 'files.maxBytes': { oss: cap, free: Math.floor(cap / 5), pro: cap } })
+        )
+      ).not.toThrow();
+      // apps/server/src/tool.ts
+      expect(() =>
+        assertToolEntitlements(
+          withLimits({
+            'files.maxBytes': { oss: cap, free: Math.min(100 * MB, cap), pro: cap },
+            'workspace.members': { oss: null, free: 3, pro: null },
+            'links.perDeck': { oss: null, free: 10, pro: null }
+          })
+        )
+      ).not.toThrow();
+    });
+  }
 });

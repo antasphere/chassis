@@ -12,7 +12,8 @@ import type { Logger } from '@antasphere/chassis-server/logger';
  * The read is off the request path (PRDCT-2633): a stale entry is served at
  * once while the refresh runs behind it, a cold account waits at most the
  * cold budget. The hub's answer shape is mirrored verbatim, a boolean limit
- * included (PRDCT-2636).
+ * included (PRDCT-2636), and since phase 2 the hub's upgrade page and its
+ * features list as the truth once it serves limit rows (PRDCT-2664).
  */
 
 const logger = { error: () => {}, warn: () => {}, info: () => {}, debug: () => {} } as unknown as Logger;
@@ -241,6 +242,32 @@ describe('EntitlementProfiles', () => {
       const { p } = profiles(() => answerOf(bad as Record<string, unknown>), clock);
       expect((await p.get('acct', TOOL)).source, JSON.stringify(bad)).toBe('default');
     }
+  });
+
+  it('carries the hub’s upgrade page through resolve, and none when the hub sent none or the plan is the default', async () => {
+    const clock = { now: 1_000_000 };
+    const page = `${ISSUER}/billing/upgrade?org=acct&tool=things&plan=pro`;
+    const { p } = profiles(() => answerOf({ plan: 'pro', upgradeUrl: page }), clock);
+    expect((await p.get('acct', TOOL)).upgradeUrl).toBe(page);
+    const older = profiles(() => answerOf({ plan: 'pro' }), clock);
+    expect((await older.p.get('acct', TOOL)).upgradeUrl).toBeNull();
+    const missing = profiles(() => Response.json({ error: {} }, { status: 500 }), clock);
+    expect((await missing.p.get('acct', TOOL)).upgradeUrl).toBeNull();
+  });
+
+  it('a hub that answers limits is authoritative on features, an empty list included; one that answers none leaves the tier’s features', async () => {
+    const clock = { now: 1_000_000 };
+    // Phase 2: the hub serves its rows, and switches every feature off for this pro account.
+    const phase2 = profiles(() => answerOf({ plan: 'pro', limits: { seats: 10 }, features: [] }), clock);
+    const off = await phase2.p.get('acct', TOOL);
+    expect(off.plan).toBe('pro');
+    expect([...off.features]).toEqual([]);
+    // Phase 1 (no limit key): an empty list means "the declared tier values apply".
+    const phase1 = profiles(() => answerOf({ plan: 'pro', limits: {}, features: [] }), clock);
+    expect([...(await phase1.p.get('acct', TOOL)).features].sort()).toEqual(['basic', 'sso']);
+    // And a non-empty list still overrides there.
+    const listed = profiles(() => answerOf({ plan: 'pro', limits: {}, features: ['basic'] }), clock);
+    expect([...(await listed.p.get('acct', TOOL)).features]).toEqual(['basic']);
   });
 
   it('a malformed profile and an unreachable hub read as a miss', async () => {

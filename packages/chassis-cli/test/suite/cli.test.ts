@@ -162,4 +162,127 @@ describe(`${bin} CLI`, () => {
     expect(code).toBe(1);
     expect(h.err()).toContain('not allowed to do that');
   });
+
+  it('a 403 plan_required prints the message and the upgrade link, not the key hint', async () => {
+    const h = harness([
+      {
+        status: 403,
+        body: {
+          error: {
+            code: 'plan_required',
+            message: 'This needs the pro plan',
+            details: {
+              key: 'files.maxBytes',
+              plan: 'free',
+              requiredPlan: 'pro',
+              upgradeUrl: 'https://account.antasphere.com/orgs/acme'
+            }
+          }
+        }
+      }
+    ]);
+    const code = await run(['files', 'list', '--url', 'http://x', '--api-key', 'k'], h.io);
+    expect(code).toBe(1);
+    expect(h.err()).toBe(
+      'Error: This needs the pro plan — upgrade the plan at https://account.antasphere.com/orgs/acme\n'
+    );
+  });
+
+  it('a 402 entitlement_denied prints the price, the balance and the top-up link (PRDCT-2664)', async () => {
+    const h = harness([
+      {
+        status: 402,
+        body: {
+          error: {
+            code: 'entitlement_denied',
+            message: 'Not enough credits',
+            details: {
+              credits: 1500,
+              balance: 20,
+              topUpUrl: 'https://account.antasphere.com/orgs/acme/billing'
+            }
+          }
+        }
+      }
+    ]);
+    const code = await run(['files', 'list', '--url', 'http://x', '--api-key', 'k'], h.io);
+    expect(code).toBe(1);
+    expect(h.err()).toBe(
+      'Error: Not enough credits — this needs 1500 credits and the organization holds 20; ' +
+        'top up at https://account.antasphere.com/orgs/acme/billing\n'
+    );
+  });
+
+  it('a 402 whose details carry the link alone prints no figure: never "undefined credits"', async () => {
+    const h = harness([
+      {
+        status: 402,
+        body: {
+          error: {
+            code: 'entitlement_denied',
+            message: 'Not enough credits',
+            details: { topUpUrl: 'https://account.antasphere.com/orgs/acme/billing' }
+          }
+        }
+      }
+    ]);
+    const code = await run(['files', 'list', '--url', 'http://x', '--api-key', 'k'], h.io);
+    expect(code).toBe(1);
+    expect(h.err()).toBe(
+      'Error: Not enough credits — top up at https://account.antasphere.com/orgs/acme/billing\n'
+    );
+  });
+
+  it('a 402 with the price alone prints the price and the link', async () => {
+    const h = harness([
+      {
+        status: 402,
+        body: {
+          error: {
+            code: 'entitlement_denied',
+            message: 'Not enough credits',
+            details: { credits: 1500, topUpUrl: 'https://account.antasphere.com/orgs/acme/billing' }
+          }
+        }
+      }
+    ]);
+    const code = await run(['files', 'list', '--url', 'http://x', '--api-key', 'k'], h.io);
+    expect(code).toBe(1);
+    expect(h.err()).toBe(
+      'Error: Not enough credits — this needs 1500 credits; top up at https://account.antasphere.com/orgs/acme/billing\n'
+    );
+  });
+
+  it('the gate’s own 402 message already carries the link: printed once, never twice (verifier round 1)', async () => {
+    const url = 'https://account.antasphere.com/orgs/acme/billing';
+    const message = `This needs 1500 credits and the organization holds 20; top up at ${url}`;
+    const h = harness([
+      {
+        status: 402,
+        body: {
+          error: {
+            code: 'entitlement_denied',
+            message,
+            details: { credits: 1500, balance: 20, topUpUrl: url }
+          }
+        }
+      }
+    ]);
+    const code = await run(['files', 'list', '--url', 'http://x', '--api-key', 'k'], h.io);
+    expect(code).toBe(1);
+    expect(h.err()).toBe(`Error: ${message}\n`);
+    expect(h.err().split(url).length - 1).toBe(1);
+  });
+
+  it('a 413 entitlement_denied without details (the self-hosted cap) prints the message alone', async () => {
+    const h = harness([
+      {
+        status: 413,
+        body: { error: { code: 'entitlement_denied', message: 'File exceeds the 100 MB limit' } }
+      }
+    ]);
+    const code = await run(['files', 'list', '--url', 'http://x', '--api-key', 'k'], h.io);
+    expect(code).toBe(1);
+    expect(h.err()).toBe('Error: File exceeds the 100 MB limit\n');
+  });
 });

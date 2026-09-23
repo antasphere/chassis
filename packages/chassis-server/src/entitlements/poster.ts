@@ -1,5 +1,11 @@
 import { Counter } from 'prom-client';
-import { usageIngestResultSchema, type UsageDownstream, type UsageEvent } from '@antasphere/chassis-contract';
+import {
+  usageEventOccurrenceIssue,
+  usageIngestResultSchema,
+  type UsageBatchOutcome,
+  type UsageDownstream,
+  type UsageEvent
+} from '@antasphere/chassis-contract';
 import type { Logger } from '../logger.js';
 import { HubMachineTokenError, type HubMachineToken } from './hub-machine-token.js';
 
@@ -30,6 +36,20 @@ import { HubMachineTokenError, type HubMachineToken } from './hub-machine-token.
  * saw is counted on /metrics (`usage_poster_events_total` per event
  * outcome, `usage_poster_batches_total` per batch outcome), so a rail that
  * rejects everything is one scrape away, not one log line nobody reads.
+ *
+ * The date window (PRDCT-2644): the hub refuses an event whose `occurredAt`
+ * is more than seven days before, or more than five minutes after, the
+ * moment it receives it (`usageEventOccurrenceIssue`, the hub's rule
+ * mirrored in the contract), as `rejected(invalid_event)` and never clamped.
+ * So the poster runs the same comparison against its own clock BEFORE
+ * posting: an event outside the window is never posted, it is HELD, named in
+ * the batch outcome (`{ held: [{ id, reason: 'occurred_at_window' }] }`),
+ * logged at warn and counted (`outcome="held"`). The usage worker re-sends
+ * each held event to the held queue (jobs/pgboss.ts), which re-drives it
+ * after the hold, forever: a future-dated event is posted once its time has
+ * come, a stale one stays held until an operator acts. An event the hub
+ * would refuse on its date is handled where it was made, never counted as a
+ * rejection at the hub.
  */
 export interface HubUsagePosterOptions {
   issuerUrl: string;
@@ -37,7 +57,12 @@ export interface HubUsagePosterOptions {
   logger: Logger;
   timeoutMs?: number | undefined;
   fetchImpl?: typeof fetch | undefined;
+  /** The clock the date window is judged against (a test seam; `Date.now` by default). */
+  now?: (() => number) | undefined;
 }
+
+/** The reason a held event carries when its `occurredAt` falls outside the hub's window. */
+export const OCCURRED_AT_WINDOW = 'occurred_at_window';
 
 export class HubUsagePostError extends Error {
   constructor(message: string) {
@@ -61,9 +86,10 @@ export class HubUsagePoster implements UsageDownstream {
   private readonly url: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly now: () => number;
   /** How many POSTs reached the hub — a test seam. */
   posts = 0;
-  /** Per-event outcomes as the hub answered them (or as the poster dropped them). */
+  /** Per-event outcomes as the hub answered them (or as the poster dropped or held them). */
   readonly events: Counter<'outcome'>;
   /** Per-batch outcomes: delivered (a hub answer read), retried (an outage), dropped (malformed). */
   readonly batches: Counter<'outcome'>;
@@ -74,11 +100,12 @@ export class HubUsagePoster implements UsageDownstream {
     this.url = opts.issuerUrl.replace(/\/+$/, '') + '/api/v1/usage/events';
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
     this.timeoutMs = opts.timeoutMs ?? 15_000;
+    this.now = opts.now ?? Date.now;
     // registers: [] — boot attaches these to the app registry; a test builds
     // a poster without one.
     this.events = new Counter({
       name: 'usage_poster_events_total',
-      help: 'Usage events by outcome at the hub: accepted, duplicate, rejected (the hub judged it), dropped (malformed batch)',
+      help: 'Usage events by outcome: accepted, duplicate, rejected (the hub judged it), dropped (malformed batch), held (outside the hub’s occurredAt window, never posted)',
       labelNames: ['outcome'] as const,
       registers: []
     });
@@ -95,8 +122,30 @@ export class HubUsagePoster implements UsageDownstream {
     await this.emitBatch([event]);
   }
 
-  async emitBatch(events: readonly UsageEvent[]): Promise<void> {
-    if (events.length === 0) return;
+  async emitBatch(all: readonly UsageEvent[]): Promise<UsageBatchOutcome> {
+    const held: Array<{ id: string; reason: string }> = [];
+    const events: UsageEvent[] = [];
+    const receivedAt = new Date(this.now());
+    for (const e of all) {
+      const issue = usageEventOccurrenceIssue(new Date(e.occurredAt), receivedAt);
+      if (issue === null) {
+        events.push(e);
+        continue;
+      }
+      held.push({ id: e.id, reason: OCCURRED_AT_WINDOW });
+      this.opts.logger.warn(
+        { id: e.id, occurredAt: e.occurredAt, issue: issue.message },
+        'usage poster: the event’s occurredAt is outside the hub’s window — held, never posted (counted on usage_poster_events_total{outcome="held"})'
+      );
+    }
+    // Counted once the batch is settled: a post that throws fails the whole
+    // batch (the held events' jobs included) back to the queue, whose retry
+    // judges them again, and would count them twice if the count came first.
+    const outcome = (): UsageBatchOutcome => {
+      if (held.length > 0) this.events.inc({ outcome: 'held' }, held.length);
+      return { held };
+    };
+    if (events.length === 0) return outcome();
     let results: EventResult[];
     try {
       const res = await this.post(events, true);
@@ -108,7 +157,7 @@ export class HubUsagePoster implements UsageDownstream {
     if (results === DROPPED) {
       this.batches.inc({ outcome: 'dropped' });
       this.events.inc({ outcome: 'dropped' }, events.length);
-      return;
+      return outcome();
     }
     this.batches.inc({ outcome: 'delivered' });
     for (const r of results) {
@@ -120,6 +169,7 @@ export class HubUsagePoster implements UsageDownstream {
         );
       }
     }
+    return outcome();
   }
 
   private async post(events: readonly UsageEvent[], retryOn401: boolean): Promise<Response> {

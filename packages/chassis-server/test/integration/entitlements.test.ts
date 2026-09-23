@@ -30,6 +30,18 @@ import * as sso from './sso-helpers.js';
  *    refusal answers 403 plan_required with the upgrade link and posts
  *    nothing; a 404 from an older hub is retried until it lands, never
  *    lost; a dead machine token is minted again once.
+ *  - cloud, phase 2 (PRDCT-2664): a priced action is checked at the hub
+ *    with the machine token and debited at ingest; a short balance is 402
+ *    entitlement_denied with the hub's top-up link and posts nothing; the
+ *    plan limit, not the instance cap, is a metered account's ceiling
+ *    (PRDCT-2653) and its refusal links the hub's upgrade page with the key
+ *    and the required plan; an upload with no declared size is 411
+ *    (PRDCT-2652); a hub that does not answer the check fails open, on
+ *    /metrics.
+ *
+ * The suite runs twice (the minimal host, then the Slideless composition):
+ * what the two declare differently (the free upload value) is read from
+ * discovery, never assumed.
  */
 
 const OWNER = { email: 'owner@ent.test', name: 'Ent Owner', password: 'ent-owner-password-1' };
@@ -109,13 +121,17 @@ describe('oss: unmetered by construction, the cap byte for byte', () => {
     await app?.stop();
   });
 
-  it('discovery shows the declared slot: the upload action, the cap as the oss and free values', async () => {
+  it('discovery shows the declared slot: the upload action, the cap as the oss and pro values, the free value at or below it', async () => {
     const info = await readJson(await app.app.request('/api/v1/instance'));
     expect(info.entitlements.actions).toEqual(
       expect.arrayContaining([expect.objectContaining({ key: 'files.upload', unit: 'bytes' })])
     );
-    expect(info.entitlements.limits['files.maxBytes']).toMatchObject({ oss: MB, free: MB });
-    expect(info.entitlements.limits['files.maxBytes'].pro).toBeGreaterThan(MB);
+    // What discovery advertises is what the instance serves (PRDCT-2653):
+    // the paid tier's value is the operator's cap, like the oss value.
+    expect(info.entitlements.limits['files.maxBytes']).toMatchObject({ oss: MB, pro: MB });
+    // The minimal host declares free as a fifth of the cap; Slideless as
+    // 100 MB or the cap when smaller (the cap, at 1 MiB).
+    expect([Math.floor(MB / 5), MB]).toContain(info.entitlements.limits['files.maxBytes'].free);
   });
 
   it('an upload under the cap answers 201 and no event leaves the instance', async () => {
@@ -144,6 +160,16 @@ describe('cloud: every metered action of a hub organization lands in the hub', (
   let hubUserId: string;
   let projectedWorkspaceId: string;
   let projectedKey: string;
+  const METRICS_TOKEN = 'integration-metrics-token-ent';
+
+  const metric = async (name: string): Promise<number> => {
+    const res = await app.app.request('/metrics', { headers: { authorization: `Bearer ${METRICS_TOKEN}` } });
+    expect(res.status).toBe(200);
+    const line = (await res.text())
+      .split('\n')
+      .find((l) => l.startsWith(`${name} `) || l.startsWith(`${name}{`));
+    return line ? Number(line.split(' ').at(-1)) : 0;
+  };
 
   const hubUser: HubUserFixture = {
     sub: 'hub-user-ent',
@@ -171,9 +197,18 @@ describe('cloud: every metered action of a hub organization lands in the hub', (
         HUB_ISSUER_URL: hub.issuer,
         HUB_CLIENT_ID: host.hubClientId,
         HUB_CLIENT_SECRET: HUB_SECRET,
-        MAX_FILE_SIZE_MB: '1'
+        MAX_FILE_SIZE_MB: '1',
+        METRICS_TOKEN
       },
-      { usageRetry: { limit: 4, delaySeconds: 1 }, entitlementDials: { ttlMs: 60_000 } }
+      {
+        usageRetry: { limit: 4, delaySeconds: 1 },
+        entitlementDials: { ttlMs: 60_000 },
+        // Every metered request asks the hub's check (no reuse), so each
+        // test below sees its own check at the fake.
+        // No cache and no hold after a failed call: every upload reaches the
+        // fake's check, and the outage case heals on the very next request.
+        entitlementCheckDials: { allowTtlMs: 0, denyTtlMs: 0, outageHoldMs: 0 }
+      }
     );
     await app.app.request(
       '/api/v1/setup',
@@ -281,11 +316,12 @@ describe('cloud: every metered action of a hub organization lands in the hub', (
     expect(res.status).toBe(403);
     const body = await readJson(res);
     expect(body.error.code).toBe('plan_required');
+    // The hub's upgrade page for the organization, the key and the required plan appended.
     expect(body.error.details).toEqual({
       key: 'files.maxBytes',
       plan: 'free',
       requiredPlan: 'pro',
-      upgradeUrl: hub.issuer
+      upgradeUrl: `${hub.issuer}/billing/upgrade?org=${ORG_B}&tool=${hub.toolSlug}&plan=free&key=files.maxBytes&requiredPlan=pro`
     });
     await new Promise((r) => setTimeout(r, 2_500));
     expect(hub.usageRequests).toHaveLength(before);
@@ -381,9 +417,9 @@ describe('cloud: every metered action of a hub organization lands in the hub', (
     expect(bad.status).toBe(400);
   });
 
-  it('the upload over the operator’s cap on a cloud account still answers the credit check’s 413 (phase 1)', async () => {
-    // free = the cap by construction (1 MiB here): the limit refuses first at
-    // the same threshold, as the spec orders — with the plan refusal.
+  it('the upload over the operator’s cap on a free cloud account meets the plan refusal, not the cap’s 413', async () => {
+    // The free value is at or below the cap (1 MiB here): the limit refuses
+    // first, as the spec orders — with the plan refusal and its upgrade link.
     const res = await upload(
       app,
       { cookie: hubUserCookie, 'x-workspace-id': projectedWorkspaceId, 'content-length': String(MB + 1) },
@@ -391,6 +427,136 @@ describe('cloud: every metered action of a hub organization lands in the hub', (
     );
     expect(res.status).toBe(403);
     expect((await readJson(res)).error.code).toBe('plan_required');
+  });
+
+  it('a priced action is checked at the hub with the machine token, and debited at ingest by the event’s credits', async () => {
+    hub.setPrice('files.upload', { creditsPerUnit: 5, unit: 'bytes', per: 1048576 });
+    const balance = hub.balanceOf(ORG_A);
+    const checks = hub.checkRequests.length;
+    const res = await upload(
+      app,
+      { cookie: hubUserCookie, 'x-workspace-id': projectedWorkspaceId },
+      PAYLOAD + '#'
+    );
+    expect(res.status).toBe(201);
+    const fileId = (await readJson(res)).file.id as string;
+    expect(hub.checkRequests).toHaveLength(checks + 1);
+    expect(hub.checkRequests.at(-1)).toEqual({
+      auth: expect.stringMatching(/^Bearer mach_/),
+      body: { accountRef: ORG_A, actionKey: 'files.upload', quantity: 44, unit: 'bytes' }
+    });
+    await until(
+      () => landed(hub, fileId),
+      (ok) => ok,
+      30_000
+    );
+    const [eventId] = [...hub.usageEvents.entries()].find(([, e]) => e.resourceId === fileId)!;
+    // 44 bytes at 5 credits per MiB, rounded up to the MiB: 5 credits.
+    expect(hub.balanceOf(ORG_A)).toBe(balance - 5);
+    const debits = hub.ledger.filter((l) => l.kind === 'debit');
+    expect(debits).toEqual([{ accountRef: ORG_A, kind: 'debit', amount: -5, sourceRef: eventId }]);
+  }, 60_000);
+
+  it('a balance below the price is 402 entitlement_denied with the hub’s top-up link, and nothing is posted', async () => {
+    hub.setBalance(ORG_A, 2);
+    const posts = hub.usageRequests.length;
+    const res = await upload(app, { cookie: hubUserCookie, 'x-workspace-id': projectedWorkspaceId }, PAYLOAD);
+    expect(res.status).toBe(402);
+    const body = await readJson(res);
+    expect(body.error.code).toBe('entitlement_denied');
+    expect(body.error.details).toEqual({
+      credits: 5,
+      balance: 2,
+      topUpUrl: `${hub.issuer}/billing/top-up?org=${ORG_A}&credits=5&balance=2&tool=${hub.toolSlug}&action=files.upload`
+    });
+    await new Promise((r) => setTimeout(r, 2_500));
+    expect(hub.usageRequests).toHaveLength(posts);
+    expect(hub.balanceOf(ORG_A)).toBe(2);
+    hub.setBalance(ORG_A, 5_000);
+  });
+
+  it('the plan limit is a metered account’s ceiling (PRDCT-2653): pro uploads above the free value, free meets plan_required with the hub’s upgrade page', async (ctx) => {
+    const info = await readJson(await app.app.request('/api/v1/instance'));
+    const { free, pro } = info.entitlements.limits['files.maxBytes'] as { free: number; pro: number };
+    // A host whose free value IS the cap at this size (Slideless at 1 MiB)
+    // has no size between the two to upload: its own metering suite pins it.
+    if (!(free < pro)) return ctx.skip();
+    const size = free + Math.floor((pro - free) / 2);
+    const ORG_PRO = '77777777-aaaa-4bbb-8ccc-00000000e004';
+    hub.setEntitlements(ORG_PRO, { plan: 'pro' });
+    const proCookie = await sso.ssoLogin(app, hub, {
+      sub: 'hub-user-ent-pro',
+      email: 'hub-user-pro@ent.test',
+      name: 'Hub User Pro',
+      workspaceId: ORG_PRO,
+      role: 'owner',
+      workspaceName: 'Org Pro'
+    });
+    const mePro = await readJson(await app.app.request('/api/v1/me', { headers: { cookie: proCookie } }));
+    const ok = await upload(
+      app,
+      { cookie: proCookie, 'x-workspace-id': mePro.activeWorkspaceId },
+      'p'.repeat(size)
+    );
+    expect(ok.status).toBe(201);
+    // Its event lands before the next test counts the posts.
+    const proFileId = (await readJson(ok)).file.id as string;
+    await until(
+      () => landed(hub, proFileId),
+      (landedYet) => landedYet,
+      30_000
+    );
+    const refused = await upload(
+      app,
+      { cookie: hubUserCookie, 'x-workspace-id': projectedWorkspaceId },
+      'f'.repeat(size)
+    );
+    expect(refused.status).toBe(403);
+    const body = await readJson(refused);
+    expect(body.error.code).toBe('plan_required');
+    expect(body.error.details.upgradeUrl.startsWith(`${hub.issuer}/billing/upgrade?`)).toBe(true);
+    expect(body.error.details.upgradeUrl).toContain('key=files.maxBytes&requiredPlan=pro');
+  }, 60_000);
+
+  it('a metered upload that declares no size is 411 length_required: no file, no check, no event (PRDCT-2652)', async () => {
+    const headers = { cookie: hubUserCookie, 'x-workspace-id': projectedWorkspaceId };
+    const count = async () =>
+      ((await readJson(await app.app.request('/api/v1/files', { headers }))).files as unknown[]).length;
+    const files = await count();
+    const checks = hub.checkRequests.length;
+    const posts = hub.usageRequests.length;
+    const res = await app.app.request(`/api/v1/files?name=${encodeURIComponent('silent.txt')}`, {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'text/plain', 'x-forwarded-for': sso.nextIp() },
+      body: PAYLOAD
+    });
+    expect(res.status).toBe(411);
+    expect((await readJson(res)).error.code).toBe('length_required');
+    expect(await count()).toBe(files);
+    expect(hub.checkRequests).toHaveLength(checks);
+    await new Promise((r) => setTimeout(r, 2_500));
+    expect(hub.usageRequests).toHaveLength(posts);
+  });
+
+  it('a hub that does not answer the check fails open, on /metrics; its return clears the posture', async () => {
+    hub.checkMode = 'network';
+    const down = await upload(
+      app,
+      { cookie: hubUserCookie, 'x-workspace-id': projectedWorkspaceId },
+      PAYLOAD + '%'
+    );
+    expect(down.status).toBe(201);
+    expect(await metric('usage_check_posture')).toBe(1);
+    expect(await metric('usage_check_total{outcome="fail_open"}')).toBeGreaterThanOrEqual(1);
+    hub.checkMode = 'ok';
+    const up = await upload(
+      app,
+      { cookie: hubUserCookie, 'x-workspace-id': projectedWorkspaceId },
+      PAYLOAD + '%%'
+    );
+    expect(up.status).toBe(201);
+    expect(await metric('usage_check_posture')).toBe(0);
+    expect(await metric('usage_check_failing_since_seconds')).toBe(0);
   });
 });
 

@@ -26,14 +26,14 @@ const logger = {
 
 const ISSUER = 'https://hub.test';
 
-function event(id: string): UsageEvent {
+function event(id: string, occurredAt: Date = new Date()): UsageEvent {
   return {
     id,
     meter: 'things.make',
     actionKey: 'things.make',
     quantity: 1,
     unit: 'call',
-    occurredAt: new Date(0).toISOString(),
+    occurredAt: occurredAt.toISOString(),
     workspaceId: 'ws-1',
     accountRef: 'acct-1',
     userId: 'user-1',
@@ -45,7 +45,7 @@ function event(id: string): UsageEvent {
 type Script = (url: string, init: RequestInit) => Response | Promise<Response>;
 
 /** A hub as a script: the token endpoint always mints; the events endpoint answers per the script. */
-function hub(script: Script) {
+function hub(script: Script, now?: () => number) {
   const calls: Array<{ url: string; init: RequestInit }> = [];
   let mints = 0;
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -69,7 +69,7 @@ function hub(script: Script) {
     logger,
     fetchImpl
   });
-  const poster = new HubUsagePoster({ issuerUrl: ISSUER, token, logger, fetchImpl });
+  const poster = new HubUsagePoster({ issuerUrl: ISSUER, token, logger, fetchImpl, now });
   return {
     poster,
     token,
@@ -151,7 +151,7 @@ describe('HubUsagePoster', () => {
   it('a 400 drops the batch with an error naming the ids (a retry could never heal it)', async () => {
     logs.length = 0;
     const h = hub(() => Response.json({ error: { code: 'validation_error' } }, { status: 400 }));
-    await expect(h.poster.emitBatch([event('a'), event('b')])).resolves.toBeUndefined();
+    await expect(h.poster.emitBatch([event('a'), event('b')])).resolves.toEqual({ held: [] });
     const dropped = logs.find((l) => l.level === 'error' && /malformed/.test(l.msg));
     expect(dropped?.ctx).toMatchObject({ ids: ['a', 'b'] });
   });
@@ -170,7 +170,7 @@ describe('HubUsagePoster', () => {
         rejected: 2
       })
     );
-    await expect(h.poster.emitBatch([event('a'), event('b'), event('c')])).resolves.toBeUndefined();
+    await expect(h.poster.emitBatch([event('a'), event('b'), event('c')])).resolves.toEqual({ held: [] });
     const rejected = logs.filter((l) => l.level === 'error' && /rejected/.test(l.msg));
     expect(rejected.map((l) => l.ctx)).toEqual([
       expect.objectContaining({ id: 'b', reason: 'unknown_account' }),
@@ -232,6 +232,100 @@ describe('HubUsagePoster', () => {
     });
     await h.poster.emitBatch([]);
     expect(h.calls).toHaveLength(0);
+  });
+});
+
+describe('HubUsagePoster, the hub’s occurredAt window (PRDCT-2644)', () => {
+  const NOW = Date.parse('2026-09-23T12:00:00.000Z');
+  const MIN = 60_000;
+  const DAY = 24 * 60 * MIN;
+  const at = (offsetMs: number) => new Date(NOW + offsetMs);
+  const echo: Script = (_url, init) => {
+    const body = JSON.parse(String(init.body)) as { events: UsageEvent[] };
+    return accepted(body.events.map((e) => e.id));
+  };
+  const postedIds = (h: ReturnType<typeof hub>) =>
+    h
+      .posts()
+      .flatMap((p) => (JSON.parse(String(p.init.body)) as { events: UsageEvent[] }).events.map((e) => e.id));
+
+  it('an event eight days old is held, never posted: no fetch at all, named in the outcome, counted as held', async () => {
+    logs.length = 0;
+    const h = hub(echo, () => NOW);
+    const outcome = await h.poster.emitBatch([event('stale', at(-8 * DAY))]);
+    expect(outcome).toEqual({ held: [{ id: 'stale', reason: 'occurred_at_window' }] });
+    expect(h.calls).toHaveLength(0); // neither a mint nor a post
+    expect(await counts(h.poster.events)).toEqual({ held: 1 });
+    expect(await counts(h.poster.batches)).toEqual({});
+    const warn = logs.find((l) => l.level === 'warn' && /window/.test(l.msg));
+    expect(warn?.ctx).toMatchObject({
+      id: 'stale',
+      occurredAt: at(-8 * DAY).toISOString(),
+      issue: 'more than 7 days before the hub received the event'
+    });
+  });
+
+  it('an event four minutes ahead is posted; one six minutes ahead is held', async () => {
+    const h = hub(echo, () => NOW);
+    expect(await h.poster.emitBatch([event('soon', at(4 * MIN))])).toEqual({ held: [] });
+    expect(postedIds(h)).toEqual(['soon']);
+    logs.length = 0;
+    expect(await h.poster.emitBatch([event('future', at(6 * MIN))])).toEqual({
+      held: [{ id: 'future', reason: 'occurred_at_window' }]
+    });
+    expect(postedIds(h)).toEqual(['soon']);
+    expect(logs.find((l) => l.level === 'warn' && /window/.test(l.msg))?.ctx).toMatchObject({
+      issue: 'more than 5 minutes after the hub received the event'
+    });
+    expect(await counts(h.poster.events)).toEqual({ accepted: 1, held: 1 });
+  });
+
+  it('both bounds are inclusive: exactly seven days before and exactly five minutes after are posted', async () => {
+    const h = hub(echo, () => NOW);
+    await h.poster.emitBatch([event('edge-past', at(-7 * DAY)), event('edge-future', at(5 * MIN))]);
+    expect(postedIds(h)).toEqual(['edge-past', 'edge-future']);
+  });
+
+  it('a mixed batch posts only the in-window events, in order, and holds the rest', async () => {
+    const h = hub(echo, () => NOW);
+    const outcome = await h.poster.emitBatch([
+      event('a', at(-1 * DAY)),
+      event('old', at(-8 * DAY)),
+      event('b', at(0)),
+      event('ahead', at(10 * MIN))
+    ]);
+    expect(postedIds(h)).toEqual(['a', 'b']);
+    expect(outcome).toEqual({
+      held: [
+        { id: 'old', reason: 'occurred_at_window' },
+        { id: 'ahead', reason: 'occurred_at_window' }
+      ]
+    });
+    expect(await counts(h.poster.events)).toEqual({ accepted: 2, held: 2 });
+    expect(await counts(h.poster.batches)).toEqual({ delivered: 1 });
+  });
+
+  it('a batch of only stale events makes no POST and answers the outcome', async () => {
+    const h = hub(
+      () => {
+        throw new Error('never posted');
+      },
+      () => NOW
+    );
+    const outcome = await h.poster.emitBatch([event('x', at(-30 * DAY)), event('y', at(-8 * DAY))]);
+    expect(outcome.held.map((e) => e.id)).toEqual(['x', 'y']);
+    expect(h.posts()).toHaveLength(0);
+    expect(h.poster.posts).toBe(0);
+  });
+
+  it('a held event is not counted when the rest of its batch meets an outage (the queue’s retry judges it again)', async () => {
+    const h = hub(
+      () => Response.json({ error: { code: 'internal' } }, { status: 503 }),
+      () => NOW
+    );
+    await expect(h.poster.emitBatch([event('ok', at(0)), event('old', at(-8 * DAY))])).rejects.toThrow(/503/);
+    expect(await counts(h.poster.events)).toEqual({});
+    expect(postedIds(h)).toEqual(['ok']);
   });
 });
 

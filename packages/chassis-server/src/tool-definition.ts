@@ -11,6 +11,7 @@ import type { PepperRegistry } from './apikeys/peppers.js';
 import type { AuditService } from './audit/service.js';
 import type { EmailDriver } from './email/driver.js';
 import type { ToolEntitlementDeclaration } from './entitlements/slot.js';
+import type { CreditCheckDials } from './entitlements/check.js';
 import type { EntitlementProfileDials } from './entitlements/profiles.js';
 import type { UsageRetry } from './jobs/pgboss.js';
 import type { EnvExtension, ToolEnv } from './env.js';
@@ -301,7 +302,22 @@ export interface ToolDefinition<
    * one entitlement gate, after the scope gate and before the handler.
    * Absent = nothing declared: no route gated, empty lists in discovery.
    */
-  entitlements?: (env: ToolEnv<TEnvShape>) => ToolEntitlementDeclaration;
+  entitlements?: (env: ToolEnv<TEnvShape>, ctx: EntitlementsContext<TDomain>) => ToolEntitlementDeclaration;
+}
+
+/**
+ * What the `entitlements` slot receives beside the env (PRDCT-2634): the
+ * database and the domain, LATE-BOUND like the jobs slot's, because the slot
+ * runs before `services` and an `actor` hook of an anonymous surface (a form
+ * response through a share link: the share secret → the deck → its owner →
+ * the owner's workspace and account) resolves at REQUEST time through the
+ * domain's own services. Read `getTool()` inside the hook, never at
+ * declaration time.
+ */
+export interface EntitlementsContext<TDomain> {
+  db: Db;
+  /** The `services` result, or null until that slot has run. Read it at RUN time, inside a hook. */
+  getTool: () => TDomain | null;
 }
 
 /** Test seams only — production boot never passes overrides. */
@@ -318,6 +334,12 @@ export interface BootOverrides<TToolOverrides = never> {
   usageRetry?: Partial<UsageRetry>;
   /** Shrinks the entitlement profile cache dials (30 s TTL, 15 min stale window) for the cloud tests. */
   entitlementDials?: Partial<EntitlementProfileDials>;
+  /**
+   * Shrinks the credit check dials (30 s allowed / 5 s denied cache, 15 min
+   * fail-open window, 5 s hub budget, entitlements/check.ts) for the cloud
+   * tests. Production always runs the fixed defaults.
+   */
+  entitlementCheckDials?: Partial<CreditCheckDials> | undefined;
   /**
    * Replaces the env-derived email driver. Exists because change-email tokens
    * are stateless JWTs (never stored) — tests can only observe them by

@@ -18,7 +18,11 @@ const DOMAIN_HINTS: Record<string, string> = {
   unauthenticated: 'No valid credential reached the API. Reconnect the MCP server.',
   rate_limited: 'Rate limited — wait before retrying.',
   plan_required:
-    'The workspace\u2019s plan does not allow this — the upgrade link in this message is where a human raises it.'
+    'The workspace\u2019s plan does not allow this — the upgrade link in this message is where a human raises it.',
+  // The same code on both editions: the cloud's credit refusal (402, with the
+  // top-up link) and a self-hosted instance's cap (413, no details).
+  entitlement_denied:
+    'The instance refused this action: on the cloud the organization lacks the credits and the top-up link in this message is where a human adds them; on a self-hosted instance the request exceeds the operator’s cap.'
 };
 
 /** The chassis hints plus a tool's own: ONE table, the one every lookup reads. */
@@ -49,7 +53,25 @@ export class ApiToolError extends Error {
     // agent relays it, a human follows it. Text, never a structured field.
     const upgradeUrl = (this.details as { upgradeUrl?: unknown } | null)?.upgradeUrl;
     const upgrade = typeof upgradeUrl === 'string' && upgradeUrl ? ` Upgrade: ${upgradeUrl}` : '';
-    return `API error (HTTP ${this.status}${codePart}): ${this.message}${hint ? ` — Next: ${hint}` : ''}${upgrade}`;
+    // A credit refusal (402 `entitlement_denied`, PRDCT-2664) carries its
+    // top-up link, the price and the balance: the same, as text. The
+    // self-hosted cap's 413 has no details, so no top-up sentence.
+    const { topUpUrl, credits, balance } = (this.details ?? {}) as {
+      topUpUrl?: unknown;
+      credits?: unknown;
+      balance?: unknown;
+    };
+    let topUp = '';
+    // The gate's message already carries the link, the price and the balance;
+    // the sentence is added only for a message that does not (verifier
+    // round 1: the URL was printed twice).
+    if (typeof topUpUrl === 'string' && topUpUrl && !this.message.includes(topUpUrl)) {
+      const needs = typeof credits === 'number' ? [`this needs ${credits} credits`] : [];
+      const holds = typeof balance === 'number' ? [`the organization holds ${balance}`] : [];
+      const numbers = [...needs, ...holds].join(', ');
+      topUp = ` Top up: ${topUpUrl}${numbers ? ` (${numbers}).` : ''}`;
+    }
+    return `API error (HTTP ${this.status}${codePart}): ${this.message}${hint ? ` — Next: ${hint}` : ''}${upgrade}${topUp}`;
   }
 }
 
