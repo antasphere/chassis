@@ -427,3 +427,37 @@ describe('HubCreditCheck: the outage posture', () => {
     ]);
   });
 });
+
+describe('HubCreditCheck: one error line per outage and per action key (the code review)', () => {
+  it('three 403s in one outage write one error line; a hub that answers again and then refuses writes a second', async () => {
+    let status = 403;
+    const h = hub((r) => (status === 200 ? Response.json(answer(r)) : new Response('{}', { status })));
+    const refusals = () =>
+      h.logs.filter((l) => l.level === 'error' && l.msg.includes('refuses this client')).length;
+    for (const q of [1, 2, 3]) {
+      expect(await h.check.check(h.req(q))).toMatchObject({ allowed: true, source: 'fail_open' });
+    }
+    expect(h.check.hubCalls).toBe(3);
+    expect(refusals()).toBe(1);
+    // The hub answers once: the outage is over, the flag is reset.
+    status = 200;
+    expect(await h.check.check(h.req(4))).toMatchObject({ allowed: true, source: 'hub' });
+    // A larger quantity than the cached answer, so the hub is asked again.
+    status = 403;
+    expect(await h.check.check(h.req(5))).toMatchObject({ source: 'fail_open' });
+    expect(h.check.hubCalls).toBe(5);
+    expect(refusals()).toBe(2);
+  });
+
+  it('two 400s on one action key write one error line; a second key writes its own', async () => {
+    const h = hub(() => Response.json({ error: { code: 'validation_error' } }, { status: 400 }));
+    const malformed = () => h.logs.filter((l) => l.level === 'error' && l.msg.includes('malformed')).length;
+    expect(await h.check.check(h.req(1, 'files.upload'))).toMatchObject({ source: 'malformed' });
+    expect(await h.check.check(h.req(2, 'files.upload'))).toMatchObject({ source: 'malformed' });
+    expect(h.check.hubCalls).toBe(2);
+    expect(malformed()).toBe(1);
+    expect(await h.check.check(h.req(1, 'things.make'))).toMatchObject({ source: 'malformed' });
+    expect(h.check.hubCalls).toBe(3);
+    expect(malformed()).toBe(2);
+  });
+});

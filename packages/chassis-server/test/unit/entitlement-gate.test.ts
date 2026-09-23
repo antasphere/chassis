@@ -107,6 +107,25 @@ const ROUTES = declareRouteEntitlements([
     route: { method: 'post', path: '/owned-premium/{id}' },
     feature: 'premium',
     meter: { key: 'things.make', unit: 'call', actor: ownerActor }
+  },
+  // A count limit read from the path: no meter, the body's size is not judged.
+  {
+    route: { method: 'post', path: '/count/{n}' },
+    limit: { key: 'things.max', value: (ctx) => Number(ctx.params.n) }
+  },
+  // A size limit with no meter: the limit judges the declared length.
+  {
+    route: { method: 'post', path: '/sized' },
+    limit: { key: 'files.maxBytes', value: declaredContentLength }
+  },
+  // An owner-attributed surface whose owner has no account (a cloud-local workspace).
+  {
+    route: { method: 'post', path: '/owned-local/{id}' },
+    meter: {
+      key: 'things.make',
+      unit: 'call',
+      actor: (ctx): ActorRef => ({ userId: null, workspaceId: `ws-of-${ctx.params.id}` })
+    }
   }
 ]);
 
@@ -235,6 +254,9 @@ function fixture(opts: {
   app.post('/premium-files', handler);
   app.post('/things/:id/nowhere', handler);
   app.post('/owned/:id', handler);
+  app.post('/count/:n', handler);
+  app.post('/sized', handler);
+  app.post('/owned-local/:id', handler);
   return { app, emitted, checks, creditChecks, hub };
 }
 
@@ -857,8 +879,64 @@ describe('a signed-in holder of a share link is a viewer too (the code review)',
   });
 
   it('a count limit on a JSON route does not demand a Content-Length: only a body-judging limit or a bytes meter does', async () => {
-    const f = fixture({ cloud: true, principal: principal() });
-    const res = await f.app.request('/things', { method: 'POST' });
+    const f = fixture({ cloud: true, principal: principal(), hubProfile: { plan: 'free' } });
+    const res = await f.app.request('/count/1', { method: 'POST', body: '{}' });
     expect(res.status).toBe(201);
+    expect(f.creditChecks).toEqual([]);
+    // The limit is still judged: free allows 2.
+    const over = await f.app.request('/count/3', {
+      method: 'POST',
+      headers: { 'content-length': '2' },
+      body: '{}'
+    });
+    expect(over.status).toBe(403);
+    expect((await errorOf(over)).error.code).toBe('plan_required');
+  });
+
+  it('a size limit with no bytes meter still demands the declared size: 411 on an undeclared body', async () => {
+    const f = fixture({ cloud: true, principal: principal(), hubProfile: { plan: 'pro' } });
+    const res = await f.app.request('/sized', { method: 'POST', body: 'x'.repeat(10) });
+    expect(res.status).toBe(411);
+    expect((await errorOf(res)).error.code).toBe('length_required');
+    const ok = await f.app.request('/sized', {
+      method: 'POST',
+      headers: { 'content-length': '10' },
+      body: 'x'.repeat(10)
+    });
+    expect(ok.status).toBe(201);
+  });
+
+  it('a feature refusal to a signed-in holder of the link is neutral too: no key, no plan, no upgrade link', async () => {
+    const f = fixture({ cloud: true, principal: principal(), hubProfile: { plan: 'free' } });
+    const res = await f.app.request('/owned-premium/1', { method: 'POST' });
+    expect(res.status).toBe(403);
+    const body = await errorOf(res);
+    expect(body.error.code).toBe('plan_required');
+    expect(body.error.details).toBeUndefined();
+    expect(body.error.message).toBe('The owner of this content cannot take this action right now');
+    expect(body.error.message).not.toContain('premium');
+    expect(body.error.message).not.toContain('free');
+    expect(body.error.message).not.toContain('http');
+    expect(f.emitted).toEqual([]);
+  });
+
+  it('an owner with no account behind the link: nothing is checked for the signed-in holder, not even the local credit service', async () => {
+    const f = fixture({ cloud: true, principal: principal() });
+    const res = await f.app.request('/owned-local/1', { method: 'POST' });
+    expect(res.status).toBe(201);
+    expect(f.checks).toEqual([]);
+    expect(f.creditChecks).toEqual([]);
+    expect(f.emitted).toEqual([]);
+  });
+
+  it('oss never runs the hook for a signed-in holder either', async () => {
+    hookRuns.count = 0;
+    const f = fixture({ cloud: false, principal: principal() });
+    // `/owned-premium` resolves through `ownerActor`, the counted hook.
+    const res = await f.app.request('/owned-premium/1', { method: 'POST' });
+    expect(res.status).toBe(201);
+    expect(hookRuns.count).toBe(0);
+    expect(f.checks).toEqual([]);
+    expect(f.emitted).toEqual([]);
   });
 });
