@@ -656,10 +656,15 @@ export function createAuth({
       },
       // Self-service account deletion (GDPR erasure). NO
       // sendDeleteAccountVerification: the password path works with zero
-      // SMTP. Known Better Auth default, documented not fought: a session
-      // younger than freshAge (24h) may delete WITHOUT a password
-      // server-side; the dashboard always collects the password (every
-      // template user has a credential account). See ADR 006.
+      // SMTP. Known Better Auth default, relied on rather than fought: a
+      // session younger than freshAge (24h) may delete WITHOUT a password
+      // server-side. The dashboard collects the password where the instance
+      // offers one (`/instance` auth.methods has `password`); a hub-JIT user
+      // on cloud has NO credential account, so there the dashboard sends the
+      // person through a fresh hub sign-in first and the new session is the
+      // proof (PRDCT-2640). Deletion is local either way: it erases the
+      // instance's user row, never the hub identity (accounts/deletion.ts).
+      // See ADR 006.
       deleteUser: {
         enabled: true,
         beforeDelete: async (user: { id: string }) => {
