@@ -292,6 +292,20 @@ function planCheck(
   entry: RouteEntitlementEntry,
   ctx: EntitlementRequest,
   profile: ResolvedProfile,
+  deps: EntitlementGateDeps,
+  /** No principal: a viewer, who must learn nothing of the owner's plan or upgrade page. */
+  anonymous = false
+): Response | null {
+  const refusal = planCheckDetailed(c, entry, ctx, profile, deps);
+  if (refusal && anonymous) return c.json(err(PLAN_REQUIRED, ANONYMOUS_DENIED_MESSAGE), 403);
+  return refusal;
+}
+
+function planCheckDetailed(
+  c: Context,
+  entry: RouteEntitlementEntry,
+  ctx: EntitlementRequest,
+  profile: ResolvedProfile,
   deps: EntitlementGateDeps
 ): Response | null {
   if (entry.feature) {
@@ -376,13 +390,15 @@ async function creditRefusal(
     unit: meter.unit
   });
   if (verdict.allowed) return null;
-  if (verdict.reason === 'account_suspended') return c.json(err('account_suspended', SUSPENDED_MESSAGE), 403);
-  if (verdict.reason === 'hub_unavailable') return c.json(err('hub_unavailable', UNAVAILABLE_MESSAGE), 403);
   if (anonymous) {
-    // The owner's balance, price and top-up page are the owner's: a viewer
-    // gets the code and a neutral sentence, never the details (PRDCT-2634).
+    // The owner's balance, price, top-up page, and even whether the
+    // organization is suspended or the hub is down, are the owner's: a
+    // viewer gets one code and one neutral sentence, whatever the reason
+    // (PRDCT-2634; verifier round 3 on the suspended and unavailable answers).
     return c.json(err(ENTITLEMENT_DENIED, ANONYMOUS_DENIED_MESSAGE), 402);
   }
+  if (verdict.reason === 'account_suspended') return c.json(err('account_suspended', SUSPENDED_MESSAGE), 403);
+  if (verdict.reason === 'hub_unavailable') return c.json(err('hub_unavailable', UNAVAILABLE_MESSAGE), 403);
   const details: EntitlementDeniedDetails = {
     credits: verdict.check?.credits ?? 0,
     balance: verdict.check?.balance ?? 0,
@@ -411,19 +427,27 @@ export function entitlementGate(entry: RouteEntitlementEntry, deps: EntitlementG
     // reported, the viewer is never identified, §8). No principal and no
     // actor: the route's own auth answers (401/404); nothing to meter, and a
     // deferred size refusal still fires first, as the cap did before.
-    const actor = principal ? await actorOf(entry, ctx, principal) : await anonymousActorOf(entry, ctx);
+    // The hook runs on cloud only: on oss no account can exist, so the
+    // lookups would cost the database for nothing (verifier round 3).
+    const actor = principal
+      ? await actorOf(entry, ctx, principal)
+      : deps.cloud
+        ? await anonymousActorOf(entry, ctx)
+        : null;
     if (!actor) return deferredRefusal ? deferredRefusal() : next();
     const metered = Boolean(deps.cloud && actor.accountRef);
     // An anonymous actor with no account (oss, a cloud-local workspace) has
     // no plan and no credits: the surface stays as it was, byte for byte.
     if (!principal && !metered) return deferredRefusal ? deferredRefusal() : next();
 
-    if (metered) {
+    // The plan is read only when the route declares a feature or a limit: a
+    // meter-only route has nothing to judge against it (verifier round 3).
+    if (metered && (entry.feature || entry.limit)) {
       const profile = await deps.cloud!.profiles.get(actor.accountRef!, deps.tool).catch((cause: unknown) => {
         deps.logger.warn({ err: cause }, 'entitlements: profile read threw — the free tier applies');
         return defaultProfile(deps.tool);
       });
-      const refused = planCheck(c, entry, ctx, profile, deps);
+      const refused = planCheck(c, entry, ctx, profile, deps, principal === null);
       if (refused) return refused;
     }
     // The size cap's deferred refusal: the plan has had its say (or none
@@ -432,7 +456,11 @@ export function entitlementGate(entry: RouteEntitlementEntry, deps: EntitlementG
     if (metered) {
       // A body with no declared size would pass the plan limit as 0 bytes
       // (PRDCT-2652): refused before anything is stored.
-      if (entry.limit && BODY_METHODS.has(c.req.method.toUpperCase()) && !declaresLength(ctx)) {
+      // A route metered in BYTES needs the size too: with no header the check
+      // would price 0 bytes and the emit the stored size, so an anonymous
+      // upload door could take an owner's balance below zero (verifier round 3).
+      const judgesSize = Boolean(entry.limit) || entry.meter?.unit === 'bytes';
+      if (judgesSize && BODY_METHODS.has(c.req.method.toUpperCase()) && !declaresLength(ctx)) {
         return c.json(err(LENGTH_REQUIRED, 'A metered upload must declare its size (Content-Length)'), 411);
       }
       if (entry.meter) {

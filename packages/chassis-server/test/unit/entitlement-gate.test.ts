@@ -91,8 +91,31 @@ const ROUTES = declareRouteEntitlements([
   {
     route: { method: 'post', path: '/unknown/{id}' },
     meter: { key: 'things.make', unit: 'call', actor: () => null }
+  },
+  // An anonymous upload door: metered in bytes, no plan limit declared.
+  {
+    route: { method: 'post', path: '/owned-files/{id}' },
+    meter: {
+      key: 'files.upload',
+      unit: 'bytes',
+      quantity: auditedSizeBytes,
+      actor: ownerActor
+    }
+  },
+  // An anonymous surface behind a feature (none exists today; the shape is pinned).
+  {
+    route: { method: 'post', path: '/owned-premium/{id}' },
+    feature: 'premium',
+    meter: { key: 'things.make', unit: 'call', actor: ownerActor }
   }
 ]);
+
+/** How many times an anonymous hook ran (the oss case must never run it). */
+const hookRuns = { count: 0 };
+function ownerActor(ctx: { params: Record<string, string> }): ActorRef {
+  hookRuns.count += 1;
+  return { userId: null, workspaceId: `ws-of-${ctx.params.id}`, accountRef: 'acct-owner' };
+}
 
 function principal(over: Partial<Principal> = {}): Principal {
   return {
@@ -206,6 +229,8 @@ function fixture(opts: {
   app.post('/files', handler);
   app.post('/exploding/:id', handler);
   app.post('/unknown/:id', handler);
+  app.post('/owned-files/:id', handler);
+  app.post('/owned-premium/:id', handler);
   app.post('/things/:id/premium', handler);
   app.post('/premium-files', handler);
   app.post('/things/:id/nowhere', handler);
@@ -727,5 +752,75 @@ describe('the gate on an anonymous surface: the route’s actor hook runs with n
     expect(res.status).toBe(201);
     expect(f.checks).toEqual([]);
     expect(f.emitted).toEqual([]);
+  });
+});
+
+describe('the anonymous surface, round 3 of the verifier', () => {
+  it('an anonymous upload door metered in bytes refuses a body with no declared size: 411, no check, nothing emitted', async () => {
+    const f = fixture({ cloud: true, principal: null });
+    const res = await f.app.request('/owned-files/deck-7', { method: 'POST', body: 'x'.repeat(54) });
+    expect(res.status).toBe(411);
+    expect(f.creditChecks).toEqual([]);
+    expect(f.emitted).toEqual([]);
+    const ok = await f.app.request('/owned-files/deck-7', {
+      method: 'POST',
+      headers: { 'content-length': '54' },
+      body: 'x'.repeat(54)
+    });
+    expect(ok.status).toBe(201);
+    expect(f.creditChecks).toEqual([
+      { accountRef: 'acct-owner', actionKey: 'files.upload', quantity: 54, unit: 'bytes' }
+    ]);
+    expect(f.emitted).toHaveLength(1);
+    expect(f.emitted[0]).toMatchObject({ actionKey: 'files.upload', quantity: 7, accountRef: 'acct-owner' });
+  });
+
+  it('a suspended owner, or a closed hub, reads the same neutral 402 to a viewer: no status, no wording of the hub', async () => {
+    for (const reason of ['account_suspended', 'hub_unavailable'] as const) {
+      const f = fixture({
+        cloud: true,
+        principal: null,
+        credits: () => ({ allowed: false, reason, source: 'hub', check: null })
+      });
+      const res = await f.app.request('/owned/deck-7', { method: 'POST' });
+      expect(res.status, reason).toBe(402);
+      const body = (await res.json()) as { error: { code: string; message: string; details?: unknown } };
+      expect(body.error.code, reason).toBe('entitlement_denied');
+      expect(body.error.details, reason).toBeUndefined();
+      expect(body.error.message, reason).not.toMatch(/suspend|Antasphere|hub/i);
+      expect(f.emitted, reason).toEqual([]);
+    }
+  });
+
+  it('a plan refusal on an anonymous surface is neutral too: no key, no plan, no upgrade link', async () => {
+    const f = fixture({ cloud: true, principal: null, hubProfile: { plan: 'free' } });
+    const res = await f.app.request('/owned-premium/deck-7', { method: 'POST' });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { code: string; message: string; details?: unknown } };
+    expect(body.error.code).toBe('plan_required');
+    expect(body.error.details).toBeUndefined();
+    expect(body.error.message).not.toMatch(/premium|free|pro|hub\.test/);
+    expect(f.emitted).toEqual([]);
+  });
+
+  it('oss never runs the hook: no lookup for a self-hosted viewer', async () => {
+    hookRuns.count = 0;
+    const f = fixture({ cloud: false, principal: null });
+    const res = await f.app.request('/owned-files/deck-7', {
+      method: 'POST',
+      headers: { 'content-length': '3' },
+      body: 'abc'
+    });
+    expect(res.status).toBe(201);
+    expect(hookRuns.count).toBe(0);
+    expect(f.emitted).toEqual([]);
+  });
+
+  it('a meter-only route reads no plan: the hub is not asked for the profile', async () => {
+    const f = fixture({ cloud: true, principal: principal() });
+    const res = await f.app.request('/things', { method: 'POST' });
+    expect(res.status).toBe(201);
+    expect(f.hub.reads).toBe(0);
+    expect(f.creditChecks).toHaveLength(1);
   });
 });
