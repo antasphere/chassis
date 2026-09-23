@@ -766,7 +766,10 @@ export class FakeHub {
     }
     const { credits, priced, unit } = this.priceOf(accountRef, actionKey, quantity);
     const balance = this.balanceOf(accountRef);
-    const allowed = !suspended && balance >= credits;
+    // The hub's rule since its fix round (lane A, 23 September, ce2ce1b): a
+    // 0-credit action is allowed whatever the balance, negative included; an
+    // unpriced action is never refused.
+    const allowed = !suspended && (credits === 0 || balance >= credits);
     const reason = suspended ? 'account_suspended' : allowed ? null : 'insufficient_credits';
     return sendJson(res, 200, {
       accountRef,
