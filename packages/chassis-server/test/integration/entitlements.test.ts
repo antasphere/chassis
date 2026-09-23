@@ -205,7 +205,9 @@ describe('cloud: every metered action of a hub organization lands in the hub', (
         entitlementDials: { ttlMs: 60_000 },
         // Every metered request asks the hub's check (no reuse), so each
         // test below sees its own check at the fake.
-        entitlementCheckDials: { allowTtlMs: 0, denyTtlMs: 0 }
+        // No cache and no hold after a failed call: every upload reaches the
+        // fake's check, and the outage case heals on the very next request.
+        entitlementCheckDials: { allowTtlMs: 0, denyTtlMs: 0, outageHoldMs: 0 }
       }
     );
     await app.app.request(
