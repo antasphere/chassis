@@ -1,6 +1,7 @@
 import {
   declareRouteEntitlements,
   ENTITLEMENT_TIERS,
+  featureKeyOf,
   toolEntitlementsSchema,
   type RouteEntitlementDeclarations,
   type ToolEntitlements
@@ -94,9 +95,10 @@ export function assertToolEntitlements(decl: ToolEntitlementDeclaration): void {
         `tool definition: route ${key} checks the limit "${entry.limit.key}", which entitlements.limits does not declare`
       );
     }
-    if (entry.feature && !(entry.feature in decl.features)) {
+    const feature = featureKeyOf(entry);
+    if (feature && !(feature in decl.features)) {
       throw new Error(
-        `tool definition: route ${key} needs the feature "${entry.feature}", which entitlements.features does not declare`
+        `tool definition: route ${key} needs the feature "${feature}", which entitlements.features does not declare`
       );
     }
   }

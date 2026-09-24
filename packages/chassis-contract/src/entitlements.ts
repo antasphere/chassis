@@ -275,6 +275,15 @@ export interface EntitlementRequest {
   /** Route params by name (`{id}` → its value). */
   params: Record<string, string>;
   principal: Principal | null;
+  /**
+   * The parsed JSON body of the request, read once and shared with the
+   * handler's own validation (the server caches the parse); `undefined`
+   * when the request carries none or it does not parse (the route's
+   * validator then answers 400 itself). A count limit or a conditional
+   * feature reads what the request asks for here (PRDCT-2702): the mint
+   * of a share link with a password, the address an invitation names.
+   */
+  body: () => Promise<unknown>;
   audit?:
     | { action: string; resourceType: string; resourceId?: string; metadata?: Record<string, unknown> }
     | undefined;
@@ -295,6 +304,14 @@ export interface ActorRef {
   accountRef?: string | undefined;
 }
 
+/**
+ * The actor of a request when it is not the principal: the owner of a
+ * resource reached anonymously (a form response through a share link), or
+ * the workspace a public door opens (an invitation accepted, a collaborator
+ * grant claimed). Resolves null to leave the route to its own handling.
+ */
+export type ActorHook = (ctx: EntitlementRequest) => Promise<ActorRef | null> | ActorRef | null;
+
 export interface MeterDeclaration {
   /** The action key, namespaced by the tool's price book (`things.publish`). */
   key: string;
@@ -303,21 +320,61 @@ export interface MeterDeclaration {
   /** The quantity of this request; default 1. Called before the handler (the check) and after it (the emit, with `audit` set). */
   quantity?: (ctx: EntitlementRequest) => number;
   /** The actor when it is not the principal (the owner of a resource reached anonymously). */
-  actor?: (ctx: EntitlementRequest) => Promise<ActorRef | null> | ActorRef | null;
+  actor?: ActorHook;
 }
 
 export interface LimitDeclaration {
   /** The limit key (`things.maxBytes`), declared with its per-tier values in the tool's `entitlements` slot. */
   key: string;
-  /** The value this request observes, compared against the tier's value; over it is a plan refusal. */
-  value: (ctx: EntitlementRequest) => number;
+  /**
+   * The value this request observes, compared against the tier's value; over
+   * it is a plan refusal. A SIZE limit reads the declared length
+   * (`declaredContentLength`, synchronous: the gate then also demands a
+   * Content-Length on a metered account). A COUNT limit (PRDCT-2702) may be
+   * asynchronous and read the body and the tool's own tables: it returns the
+   * count AFTER this action (the links of the deck plus this one), so
+   * `observed > max` is the refusal, and `null` when there is nothing to
+   * judge (the resource does not resolve, the caller may not see it): the
+   * gate then lets the route answer on its own.
+   */
+  value: (ctx: EntitlementRequest) => number | null | Promise<number | null>;
+}
+
+/**
+ * A feature a route needs, with an optional condition on the request
+ * (PRDCT-2702): the mint of a share link needs `deck.password` only when the
+ * body sets one, so a declaration on the route refuses the act and never
+ * the route. Absent `when`, the whole route needs the feature.
+ */
+export interface FeatureDeclaration {
+  key: string;
+  when?: (ctx: EntitlementRequest) => boolean | Promise<boolean>;
 }
 
 export interface RouteEntitlement {
   meter?: MeterDeclaration | undefined;
   limit?: LimitDeclaration | undefined;
-  /** A feature key (`things.premium`), declared with its per-tier switch in the tool's `entitlements` slot. */
-  feature?: string | undefined;
+  /** A feature key (`things.premium`), declared with its per-tier switch in the tool's `entitlements` slot, or the key with a condition. */
+  feature?: string | FeatureDeclaration | undefined;
+  /**
+   * The actor of a route that meters nothing but checks a limit or a feature
+   * on a PUBLIC door (no principal): the workspace the door opens pays and is
+   * judged. A meter's own `actor` serves the same purpose on a metered route;
+   * this one covers the limit-only shape. Either makes the route a viewer's
+   * surface: every refusal to it is one neutral sentence.
+   */
+  actor?: ActorHook | undefined;
+}
+
+/** The key of a route's feature declaration, whichever shape it uses; null when none. */
+export function featureKeyOf(entry: RouteEntitlement): string | null {
+  if (!entry.feature) return null;
+  return typeof entry.feature === 'string' ? entry.feature : entry.feature.key;
+}
+
+/** The actor hook of a route, the entry's own or its meter's; null when the principal is the actor. */
+export function actorHookOf(entry: RouteEntitlement): ActorHook | null {
+  return entry.actor ?? entry.meter?.actor ?? null;
 }
 
 /** A route as the contract spells it: the OpenAPI method and the `{param}` path. */
