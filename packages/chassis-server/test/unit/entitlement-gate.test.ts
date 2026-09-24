@@ -14,6 +14,7 @@ import {
 import {
   assertToolEntitlements,
   honoPath,
+  isDeferringGate,
   registerEntitlementGate,
   type CreditCheckRequest,
   type CreditVerdict,
@@ -37,7 +38,14 @@ import type { Logger } from '../../src/logger.js';
  * organization with the key and the required plan appended.
  */
 
-const logger = { error: () => {}, warn: () => {}, info: () => {}, debug: () => {} } as unknown as Logger;
+/** Every warning the gate logged (a throwing hook must be visible to an operator, PRDCT-2702). */
+const warnings: Array<{ msg: string; fields: Record<string, unknown> }> = [];
+const logger = {
+  error: () => {},
+  warn: (fields: Record<string, unknown>, msg: string) => void warnings.push({ msg, fields }),
+  info: () => {},
+  debug: () => {}
+} as unknown as Logger;
 
 const TOOL: ToolEntitlements = {
   actions: [
@@ -1157,10 +1165,17 @@ describe('a count limit and a conditional feature (PRDCT-2702)', () => {
     expect((await pro.app.request('/counted', jsonPost({ count: 999 }))).status).toBe(201);
   });
 
-  it('a hook that resolves null, or throws, leaves the route alone: no plan refusal on a lookup that found nothing', async () => {
+  it('a hook that resolves null, or throws, leaves the route alone: no plan refusal on a lookup that found nothing, and a throw is logged', async () => {
     const f = fixture({ cloud: true, principal: principal() });
     expect((await f.app.request('/counted-maybe/none', { method: 'POST' })).status).toBe(201);
+    warnings.length = 0;
     expect((await f.app.request('/counted-maybe/throws', { method: 'POST' })).status).toBe(201);
+    expect(warnings).toEqual([
+      expect.objectContaining({
+        msg: expect.stringContaining('limit hook threw'),
+        fields: expect.objectContaining({ route: 'POST /counted-maybe/{what}', key: 'things.max' })
+      })
+    ]);
     // The same hook with a number over the value is refused: the null is the difference.
     expect((await f.app.request('/counted-maybe/some', { method: 'POST' })).status).toBe(403);
   });
@@ -1292,5 +1307,27 @@ describe('a count limit and a conditional feature (PRDCT-2702)', () => {
         ])
       })
     ).not.toThrow();
+  });
+
+  it('only a size limit marks a deferring gate: a count route meets the cap at once, a size route after the plan (PRDCT-2632)', () => {
+    const f = fixture({ cloud: true, principal: principal() });
+    // The handlers as registered (`api.on`), the shape create-api.ts's cap reads them in.
+    const gatesOf = (path: string) =>
+      f.app.routes.filter((r) => r.method === 'POST' && r.path === path).map((r) => r.handler);
+    expect(gatesOf('/counted')).toHaveLength(2);
+    expect(gatesOf('/counted').some(isDeferringGate)).toBe(false);
+    expect(gatesOf('/counted-capped').some(isDeferringGate)).toBe(false);
+    expect(gatesOf('/door/:id').some(isDeferringGate)).toBe(false);
+    expect(gatesOf('/sized').some(isDeferringGate)).toBe(true);
+    expect(gatesOf('/files').some(isDeferringGate)).toBe(true);
+    expect(gatesOf('/premium-files').some(isDeferringGate)).toBe(true);
+  });
+
+  it('a conditional feature whose condition does not hold reads no plan: the hub is not asked', async () => {
+    const f = fixture({ cloud: true, principal: principal() });
+    expect((await f.app.request('/lockable', jsonPost({ name: 'open' }))).status).toBe(201);
+    expect(f.hub.reads).toBe(0);
+    expect((await f.app.request('/lockable', jsonPost({ password: 'hunter22' }))).status).toBe(403);
+    expect(f.hub.reads).toBe(1);
   });
 });

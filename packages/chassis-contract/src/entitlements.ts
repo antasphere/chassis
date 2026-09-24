@@ -332,7 +332,7 @@ export interface LimitDeclaration {
    * (`declaredContentLength`, synchronous: the gate then also demands a
    * Content-Length on a metered account). A COUNT limit (PRDCT-2702) may be
    * asynchronous and read the body and the tool's own tables: it returns the
-   * count AFTER this action (the links of the deck plus this one), so
+   * count AFTER this action (the resource's things plus this one), so
    * `observed > max` is the refusal, and `null` when there is nothing to
    * judge (the resource does not resolve, the caller may not see it): the
    * gate then lets the route answer on its own.
@@ -342,9 +342,10 @@ export interface LimitDeclaration {
 
 /**
  * A feature a route needs, with an optional condition on the request
- * (PRDCT-2702): the mint of a share link needs `deck.password` only when the
- * body sets one, so a declaration on the route refuses the act and never
- * the route. Absent `when`, the whole route needs the feature.
+ * (PRDCT-2702): a route that creates a thing needs `things.premium` only
+ * when the body asks for the premium option, so a declaration on the route
+ * refuses the act and never the route. Absent `when`, the whole route needs
+ * the feature.
  */
 export interface FeatureDeclaration {
   key: string;
