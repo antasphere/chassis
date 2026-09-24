@@ -3,9 +3,11 @@ import type { Context, MiddlewareHandler } from 'hono';
 import { COMPOSED_HANDLER } from 'hono/utils/constants';
 import { ulid } from 'ulid';
 import {
+  actorHookOf,
   declaredContentLength,
   ENTITLEMENT_DENIED,
   ENTITLEMENT_TIERS,
+  featureKeyOf,
   PLAN_REQUIRED,
   type ActorRef,
   type EntitlementDeniedDetails,
@@ -181,18 +183,29 @@ export function isDeferringGate(handler: unknown): boolean {
 export function registerEntitlementGate(api: OpenAPIHono, deps: EntitlementGateDeps): void {
   for (const entry of deps.declarations.values()) {
     const gate = entitlementGate(entry, deps);
-    if (entry.limit) deferringGates.add(gate);
+    // Only a limit that JUDGES THE SIZE defers the cap's refusal (the plan
+    // must see the declared size first, PRDCT-2632); a count limit never
+    // judges the size, so the cap answers at once there and no lookup runs
+    // on a body the cap has dropped (the code review of PRDCT-2702).
+    if (entry.limit?.value === declaredContentLength) deferringGates.add(gate);
     api.on(entry.route.method.toUpperCase(), honoPath(entry.route.path), gate);
   }
 }
 
 function requestOf(c: Context, principal: Principal | null): EntitlementRequest {
+  // The body, parsed once and shared with the handler's validator (Hono
+  // caches the parse on the request): a count limit or a conditional
+  // feature reads what the request asks for (PRDCT-2702). A body that is
+  // not JSON, or none at all, reads as undefined; the route's own validator
+  // answers 400 for it, the gate never does.
+  let body: Promise<unknown> | undefined;
   return {
     method: c.req.method,
     path: c.req.path,
     headers: c.req.raw.headers,
     params: c.req.param() as Record<string, string>,
-    principal
+    principal,
+    body: () => (body ??= c.req.json().catch(() => undefined))
   };
 }
 
@@ -223,21 +236,79 @@ function principalActor(principal: Principal): ActorRef {
 async function actorOf(
   entry: RouteEntitlementEntry,
   ctx: EntitlementRequest,
-  principal: Principal | null
+  principal: Principal | null,
+  logger: Logger
 ): Promise<ActorRef | null> {
-  if (entry.meter?.actor) {
+  const hook = actorHookOf(entry);
+  if (hook) {
     try {
-      return (await entry.meter.actor(ctx)) ?? null;
-    } catch {
+      return (await hook(ctx)) ?? null;
+    } catch (cause: unknown) {
+      // A lookup that fails is the route's to answer, never a refusal; but a
+      // cap that stops biting must be visible to an operator.
+      logger.warn(
+        { err: cause, route: routeEntitlementKey(entry.route) },
+        'entitlements: actor hook threw — nothing judged, nothing metered'
+      );
       return null;
     }
   }
   return principal ? principalActor(principal) : null;
 }
 
-/** Whether the request is a viewer's on an owner-attributed surface: the route declares an actor hook. */
+/**
+ * Whether the request is a viewer's on an owner-attributed surface: the
+ * route declares an actor hook, on its meter or on the entry itself (a
+ * public door that checks a limit and meters nothing, PRDCT-2702).
+ */
 function viewerSurface(entry: RouteEntitlementEntry): boolean {
-  return Boolean(entry.meter?.actor);
+  return actorHookOf(entry) !== null;
+}
+
+/**
+ * The value a limit observes for this request, or null when the hook says
+ * there is nothing to judge (PRDCT-2702) or throws: a lookup error must
+ * never become a plan refusal, so the route answers on its own then.
+ */
+async function observedOf(
+  entry: RouteEntitlementEntry,
+  ctx: EntitlementRequest,
+  logger: Logger
+): Promise<number | null> {
+  try {
+    const observed = await entry.limit!.value(ctx);
+    return typeof observed === 'number' && Number.isFinite(observed) ? observed : null;
+  } catch (cause: unknown) {
+    logger.warn(
+      { err: cause, route: routeEntitlementKey(entry.route), key: entry.limit!.key },
+      'entitlements: limit hook threw — the limit was not judged on this request'
+    );
+    return null;
+  }
+}
+
+/**
+ * Whether the route's feature applies to THIS request: a plain key applies
+ * always, a conditional one only when its `when` says so (a thing created
+ * with the premium option needs the feature, one created without does not).
+ * A condition that throws does not apply: the route answers on its own.
+ */
+async function featureApplies(
+  entry: RouteEntitlementEntry,
+  ctx: EntitlementRequest,
+  logger: Logger
+): Promise<boolean> {
+  if (!entry.feature) return false;
+  if (typeof entry.feature === 'string' || !entry.feature.when) return true;
+  try {
+    return await entry.feature.when(ctx);
+  } catch (cause: unknown) {
+    logger.warn(
+      { err: cause, route: routeEntitlementKey(entry.route), key: featureKeyOf(entry) },
+      'entitlements: feature condition threw — the feature was not judged on this request'
+    );
+    return false;
+  }
 }
 
 /** The first tier above the account's that allows the value, or null when none does. */
@@ -291,29 +362,33 @@ function upgradeLink(
  * plan's value by staying silent; the instance's hard caps (the body limits
  * and the services' mid-stream ceilings) still bound a body that lies.
  */
-function planCheck(
+async function planCheck(
   c: Context,
   entry: RouteEntitlementEntry,
   ctx: EntitlementRequest,
   profile: ResolvedProfile,
   deps: EntitlementGateDeps,
+  /** Whether the route's feature applies to this request (judged before the plan was read). */
+  feature: boolean,
   /** No principal: a viewer, who must learn nothing of the owner's plan or upgrade page. */
   anonymous = false
-): Response | null {
-  const refusal = planCheckDetailed(c, entry, ctx, profile, deps);
+): Promise<Response | null> {
+  const refusal = await planCheckDetailed(c, entry, ctx, profile, deps, feature);
   if (refusal && anonymous) return c.json(err(PLAN_REQUIRED, ANONYMOUS_DENIED_MESSAGE), 403);
   return refusal;
 }
 
-function planCheckDetailed(
+async function planCheckDetailed(
   c: Context,
   entry: RouteEntitlementEntry,
   ctx: EntitlementRequest,
   profile: ResolvedProfile,
-  deps: EntitlementGateDeps
-): Response | null {
-  if (entry.feature) {
-    const key = entry.feature;
+  deps: EntitlementGateDeps,
+  feature: boolean
+): Promise<Response | null> {
+  const featureKey = featureKeyOf(entry);
+  if (featureKey && feature) {
+    const key = featureKey;
     if (!profile.features.has(key)) {
       const requiredPlan = requiredPlanFor(
         deps.tool,
@@ -337,8 +412,8 @@ function planCheckDetailed(
   if (entry.limit) {
     const { key } = entry.limit;
     const max = profile.limits[key];
-    const observed = entry.limit.value(ctx);
-    if (max !== null && max !== undefined && Number.isFinite(observed) && observed > max) {
+    const observed = await observedOf(entry, ctx, deps.logger);
+    if (max !== null && max !== undefined && observed !== null && observed > max) {
       const requiredPlan = requiredPlanFor(deps.tool, profile.plan, (tier) => {
         const value = deps.tool.limits[key]?.[tier];
         return value === null || (typeof value === 'number' && observed <= value);
@@ -361,17 +436,21 @@ function planCheckDetailed(
 }
 
 /** The oss half of a limit: the operator's own knob, refused the way the credit check refuses. */
-function ossLimitCheck(
+async function ossLimitCheck(
   c: Context,
   entry: RouteEntitlementEntry,
   ctx: EntitlementRequest,
-  tool: ToolEntitlements
-): Response | null {
+  tool: ToolEntitlements,
+  logger: Logger
+): Promise<Response | null> {
   if (!entry.limit) return null;
   const { key } = entry.limit;
   const max = tool.limits[key]?.oss;
-  const observed = entry.limit.value(ctx);
-  if (max !== null && max !== undefined && Number.isFinite(observed) && observed > max) {
+  // The value is read only when an oss ceiling exists: a null ceiling (the
+  // operator's unlimited) costs no lookup for a count hook.
+  if (max === null || max === undefined) return null;
+  const observed = await observedOf(entry, ctx, logger);
+  if (observed !== null && observed > max) {
     return c.json(err('entitlement_denied', `${key}: ${observed} exceeds the instance limit (${max})`), 413);
   }
   return null;
@@ -457,21 +536,25 @@ export function entitlementGate(entry: RouteEntitlementEntry, deps: EntitlementG
     // signed-in holder of a share link is a viewer too). On oss the hook is
     // not run: no account can exist, the lookups would cost the database.
     const viewer = viewerSurface(entry);
-    const actor = viewer && !deps.cloud ? null : await actorOf(entry, ctx, principal);
+    const actor = viewer && !deps.cloud ? null : await actorOf(entry, ctx, principal, deps.logger);
     if (!actor) return deferredRefusal ? deferredRefusal() : next();
     const metered = Boolean(deps.cloud && actor.accountRef);
     // A viewer's surface whose owner has no account (a cloud-local
     // workspace) has no plan and no credits: byte for byte as it was.
     if (viewer && !metered) return deferredRefusal ? deferredRefusal() : next();
 
-    // The plan is read only when the route declares a feature or a limit: a
-    // meter-only route has nothing to judge against it (verifier round 3).
-    if (metered && (entry.feature || entry.limit)) {
+    // The plan is read only when the route declares a limit, or a feature
+    // that APPLIES to this request: a meter-only route has nothing to judge
+    // against it (verifier round 3), and a conditional feature whose
+    // condition does not hold costs no hub read (the code review of
+    // PRDCT-2702: a link renamed must not wait on a cold plan).
+    const feature = metered && entry.feature ? await featureApplies(entry, ctx, deps.logger) : false;
+    if (metered && (feature || entry.limit)) {
       const profile = await deps.cloud!.profiles.get(actor.accountRef!, deps.tool).catch((cause: unknown) => {
         deps.logger.warn({ err: cause }, 'entitlements: profile read threw — the free tier applies');
         return defaultProfile(deps.tool);
       });
-      const refused = planCheck(c, entry, ctx, profile, deps, viewer);
+      const refused = await planCheck(c, entry, ctx, profile, deps, feature, viewer);
       if (refused) return refused;
     }
     // The size cap's deferred refusal: the plan has had its say (or none
@@ -507,7 +590,7 @@ export function entitlementGate(entry: RouteEntitlementEntry, deps: EntitlementG
           return c.json(err('entitlement_denied', decision.reason), 413);
         }
       }
-      const refused = ossLimitCheck(c, entry, ctx, deps.tool);
+      const refused = await ossLimitCheck(c, entry, ctx, deps.tool, deps.logger);
       if (refused) return refused;
     }
 

@@ -12,7 +12,9 @@ import {
   type UsageEvent
 } from '@antasphere/chassis-contract';
 import {
+  assertToolEntitlements,
   honoPath,
+  isDeferringGate,
   registerEntitlementGate,
   type CreditCheckRequest,
   type CreditVerdict,
@@ -36,7 +38,14 @@ import type { Logger } from '../../src/logger.js';
  * organization with the key and the required plan appended.
  */
 
-const logger = { error: () => {}, warn: () => {}, info: () => {}, debug: () => {} } as unknown as Logger;
+/** Every warning the gate logged (a throwing hook must be visible to an operator, PRDCT-2702). */
+const warnings: Array<{ msg: string; fields: Record<string, unknown> }> = [];
+const logger = {
+  error: () => {},
+  warn: (fields: Record<string, unknown>, msg: string) => void warnings.push({ msg, fields }),
+  info: () => {},
+  debug: () => {}
+} as unknown as Logger;
 
 const TOOL: ToolEntitlements = {
   actions: [
@@ -45,7 +54,9 @@ const TOOL: ToolEntitlements = {
   ],
   limits: {
     'files.maxBytes': { oss: 100, free: 50, pro: 500 },
-    'things.max': { oss: null, free: 2, pro: null }
+    'things.max': { oss: null, free: 2, pro: null },
+    // A count limit with an operator's ceiling on oss (PRDCT-2702).
+    'things.capped': { oss: 2, free: 1, pro: 2 }
   },
   features: { premium: { free: false, pro: true }, nowhere: { free: false, pro: false } }
 };
@@ -126,8 +137,67 @@ const ROUTES = declareRouteEntitlements([
       unit: 'call',
       actor: (ctx): ActorRef => ({ userId: null, workspaceId: `ws-of-${ctx.params.id}` })
     }
+  },
+  // ── PRDCT-2702: what a count limit and a conditional feature need ──
+  // A count read from the BODY, asynchronously: the count after this action.
+  {
+    route: { method: 'post', path: '/counted' },
+    limit: { key: 'things.max', value: countAfter }
+  },
+  // The same count against the operator's ceiling on oss.
+  {
+    route: { method: 'post', path: '/counted-capped' },
+    limit: { key: 'things.capped', value: countAfter }
+  },
+  // A hook that says there is nothing to judge, or fails: the route answers.
+  {
+    route: { method: 'post', path: '/counted-maybe/{what}' },
+    limit: {
+      key: 'things.max',
+      value: (ctx) => {
+        if (ctx.params.what === 'throws') throw new Error('lookup failed');
+        return ctx.params.what === 'none' ? null : 9;
+      }
+    }
+  },
+  // A feature the route needs only when the body sets a password.
+  {
+    route: { method: 'post', path: '/lockable' },
+    feature: { key: 'premium', when: passwordSet }
+  },
+  // A feature on a metered route, conditional too (the mint of a share link).
+  {
+    route: { method: 'post', path: '/lockable-metered' },
+    meter: { key: 'things.make', unit: 'call' },
+    feature: { key: 'premium', when: passwordSet },
+    limit: { key: 'things.max', value: countAfter }
+  },
+  // A public door with an entry-level actor and a count: the workspace the
+  // door opens is judged, the caller is a viewer.
+  {
+    route: { method: 'post', path: '/door/{id}' },
+    actor: ownerActor,
+    limit: { key: 'things.max', value: countAfter }
+  },
+  // A public door whose feature is conditional, no meter.
+  {
+    route: { method: 'post', path: '/door-lockable/{id}' },
+    actor: ownerActor,
+    feature: { key: 'premium', when: passwordSet }
   }
 ]);
+
+/** The count after this action, read from the body: `{ count }` is the count before it. */
+async function countAfter(ctx: { body: () => Promise<unknown> }): Promise<number | null> {
+  const body = (await ctx.body()) as { count?: unknown } | undefined;
+  return typeof body?.count === 'number' ? body.count + 1 : null;
+}
+
+/** Whether the body sets a password (a string; null is a removal, undefined is no change). */
+async function passwordSet(ctx: { body: () => Promise<unknown> }): Promise<boolean> {
+  const body = (await ctx.body()) as { password?: unknown } | undefined;
+  return typeof body?.password === 'string';
+}
 
 /** How many times an anonymous hook ran (the oss case must never run it). */
 const hookRuns = { count: 0 };
@@ -262,6 +332,13 @@ function fixture(opts: {
   app.post('/count/:n', handler);
   app.post('/sized', handler);
   app.post('/owned-local/:id', handler);
+  app.post('/counted', handler);
+  app.post('/counted-capped', handler);
+  app.post('/counted-maybe/:what', handler);
+  app.post('/lockable', handler);
+  app.post('/lockable-metered', handler);
+  app.post('/door/:id', handler);
+  app.post('/door-lockable/:id', handler);
   return { app, emitted, checks, creditChecks, hub };
 }
 
@@ -1015,5 +1092,242 @@ describe('a signed-in holder of a share link is a viewer too (the code review)',
     expect(hookRuns.count).toBe(0);
     expect(f.checks).toEqual([]);
     expect(f.emitted).toEqual([]);
+  });
+});
+
+describe('a count limit and a conditional feature (PRDCT-2702)', () => {
+  const jsonPost = (body: unknown, headers: Record<string, string> = {}) => ({
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify(body)
+  });
+
+  it('cloud: a count read from the body is judged after the action: over the tier value is 403 plan_required naming the plan that allows it, at the value it passes', async () => {
+    const f = fixture({ cloud: true, principal: principal() });
+    const over = await f.app.request('/counted', jsonPost({ count: 2 }));
+    expect(over.status).toBe(403);
+    const body = await errorOf(over);
+    expect(body.error.code).toBe('plan_required');
+    expect(body.error.message).toBe('things.max is limited to 2 on the free plan; the pro plan allows it');
+    expect(body.error.details).toEqual({
+      key: 'things.max',
+      plan: 'free',
+      requiredPlan: 'pro',
+      upgradeUrl: `${HUB_UPGRADE_PAGE}&key=things.max&requiredPlan=pro`
+    });
+    const at = await f.app.request('/counted', jsonPost({ count: 1 }));
+    expect(at.status).toBe(201);
+  });
+
+  it('the gate’s read of the body is the handler’s: the handler still reads the same JSON after the check', async () => {
+    const f = fixture({
+      cloud: true,
+      principal: principal(),
+      handler: async (c) => c.json({ echoed: await c.req.json() }, 201)
+    });
+    const res = await f.app.request('/counted', jsonPost({ count: 0, name: 'x' }));
+    expect(res.status).toBe(201);
+    expect(await res.json()).toEqual({ echoed: { count: 0, name: 'x' } });
+  });
+
+  it('a body that is not JSON, or none, reads as nothing to count: the route answers, never the gate', async () => {
+    const f = fixture({ cloud: true, principal: principal() });
+    const text = await f.app.request('/counted', {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: 'not json'
+    });
+    expect(text.status).toBe(201);
+    const none = await f.app.request('/counted', { method: 'POST' });
+    expect(none.status).toBe(201);
+  });
+
+  it('a count hook never demands a Content-Length on a metered account: a body with no declared size is judged on its count, not 411', async () => {
+    const f = fixture({ cloud: true, principal: principal() });
+    // `app.request` with a body and no header sends none (the 411 suite's own reproduction).
+    const over = await f.app.request('/counted', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ count: 5 })
+    });
+    expect(over.status).toBe(403);
+    expect((await errorOf(over)).error.code).toBe('plan_required');
+  });
+
+  it('the hub’s override and the pro plan decide the count too', async () => {
+    const wide = fixture({
+      cloud: true,
+      principal: principal(),
+      hubProfile: { plan: 'free', limits: { 'things.max': 10 } }
+    });
+    expect((await wide.app.request('/counted', jsonPost({ count: 9 }))).status).toBe(201);
+    const pro = fixture({ cloud: true, principal: principal(), hubProfile: { plan: 'pro' } });
+    expect((await pro.app.request('/counted', jsonPost({ count: 999 }))).status).toBe(201);
+  });
+
+  it('a hook that resolves null, or throws, leaves the route alone: no plan refusal on a lookup that found nothing, and a throw is logged', async () => {
+    const f = fixture({ cloud: true, principal: principal() });
+    expect((await f.app.request('/counted-maybe/none', { method: 'POST' })).status).toBe(201);
+    warnings.length = 0;
+    expect((await f.app.request('/counted-maybe/throws', { method: 'POST' })).status).toBe(201);
+    expect(warnings).toEqual([
+      expect.objectContaining({
+        msg: expect.stringContaining('limit hook threw'),
+        fields: expect.objectContaining({ route: 'POST /counted-maybe/{what}', key: 'things.max' })
+      })
+    ]);
+    // The same hook with a number over the value is refused: the null is the difference.
+    expect((await f.app.request('/counted-maybe/some', { method: 'POST' })).status).toBe(403);
+  });
+
+  it('oss: the count is judged against the operator’s ceiling, 413 entitlement_denied byte for byte; a null ceiling never runs the hook', async () => {
+    const f = fixture({ cloud: false, principal: localPrincipal() });
+    const over = await f.app.request('/counted-capped', jsonPost({ count: 2 }));
+    expect(over.status).toBe(413);
+    expect(await errorOf(over)).toEqual({
+      error: { code: 'entitlement_denied', message: 'things.capped: 3 exceeds the instance limit (2)' }
+    });
+    expect((await f.app.request('/counted-capped', jsonPost({ count: 1 }))).status).toBe(201);
+    // `things.max` has no oss ceiling: a count that would be over the free
+    // value passes on oss, and the handler still reads the body untouched.
+    const g = fixture({
+      cloud: false,
+      principal: localPrincipal(),
+      handler: async (c) => c.json({ echoed: await c.req.json() }, 201)
+    });
+    const res = await g.app.request('/counted', jsonPost({ count: 50 }));
+    expect(res.status).toBe(201);
+    expect(await res.json()).toEqual({ echoed: { count: 50 } });
+    expect(f.emitted).toEqual([]);
+    expect(g.emitted).toEqual([]);
+  });
+
+  it('a conditional feature refuses the ACT, never the route: setting a password on free is 403 plan_required, no password or a removal passes, pro passes with one', async () => {
+    const f = fixture({ cloud: true, principal: principal() });
+    const locked = await f.app.request('/lockable', jsonPost({ password: 'hunter22' }));
+    expect(locked.status).toBe(403);
+    const body = await errorOf(locked);
+    expect(body.error.code).toBe('plan_required');
+    expect(body.error.details).toEqual({
+      key: 'premium',
+      plan: 'free',
+      requiredPlan: 'pro',
+      upgradeUrl: `${HUB_UPGRADE_PAGE}&key=premium&requiredPlan=pro`
+    });
+    expect((await f.app.request('/lockable', jsonPost({ name: 'open' }))).status).toBe(201);
+    expect((await f.app.request('/lockable', jsonPost({ password: null }))).status).toBe(201);
+    expect((await f.app.request('/lockable', { method: 'POST' })).status).toBe(201);
+    const pro = fixture({ cloud: true, principal: principal(), hubProfile: { plan: 'pro' } });
+    expect((await pro.app.request('/lockable', jsonPost({ password: 'hunter22' }))).status).toBe(201);
+    // A hub answer that lists the feature for a free account passes too.
+    const listed = fixture({
+      cloud: true,
+      principal: principal(),
+      hubProfile: { plan: 'free', limits: { 'things.max': 2 }, features: ['premium'] }
+    });
+    expect((await listed.app.request('/lockable', jsonPost({ password: 'hunter22' }))).status).toBe(201);
+  });
+
+  it('on a metered route the conditional feature is judged before the count, the count before the credits, and a refusal emits nothing', async () => {
+    const f = fixture({ cloud: true, principal: principal() });
+    const both = await f.app.request('/lockable-metered', jsonPost({ password: 'p4ss', count: 9 }));
+    expect((await errorOf(both)).error.details).toMatchObject({ key: 'premium' });
+    const count = await f.app.request('/lockable-metered', jsonPost({ count: 9 }));
+    expect((await errorOf(count)).error.details).toMatchObject({ key: 'things.max' });
+    expect(f.creditChecks).toEqual([]);
+    expect(f.emitted).toEqual([]);
+    const ok = await f.app.request('/lockable-metered', jsonPost({ count: 0 }));
+    expect(ok.status).toBe(201);
+    expect(f.creditChecks).toHaveLength(1);
+    await tick();
+    expect(f.emitted).toHaveLength(1);
+  });
+
+  it('oss: a conditional feature is never judged (a self-hosted instance has every feature)', async () => {
+    const f = fixture({ cloud: false, principal: localPrincipal() });
+    expect((await f.app.request('/lockable', jsonPost({ password: 'hunter22' }))).status).toBe(201);
+  });
+
+  it('a public door with an entry-level actor: the workspace the door opens is judged on the count, and the caller reads the neutral refusal, with or without a session', async () => {
+    hookRuns.count = 0;
+    const anonymous = fixture({ cloud: true, principal: null });
+    const over = await anonymous.app.request('/door/7', jsonPost({ count: 2 }));
+    expect(over.status).toBe(403);
+    const body = await errorOf(over);
+    expect(body.error.code).toBe('plan_required');
+    expect(body.error.details).toBeUndefined();
+    expect(body.error.message).toBe('The owner of this content cannot take this action right now');
+    expect(hookRuns.count).toBe(1);
+    expect((await anonymous.app.request('/door/7', jsonPost({ count: 1 }))).status).toBe(201);
+    // A signed-in person of another workspace at the same door is a viewer too.
+    const signedIn = fixture({
+      cloud: true,
+      principal: principal({ workspaceId: 'ws-other', accountRef: 'acct-other' })
+    });
+    const res = await signedIn.app.request('/door/7', jsonPost({ count: 2 }));
+    expect(res.status).toBe(403);
+    expect((await errorOf(res)).error.details).toBeUndefined();
+    expect(anonymous.emitted).toEqual([]);
+    expect(signedIn.emitted).toEqual([]);
+  });
+
+  it('a public door behind a conditional feature reads the same neutral sentence, and passes without the act', async () => {
+    const f = fixture({ cloud: true, principal: null });
+    const locked = await f.app.request('/door-lockable/7', jsonPost({ password: 'p4ss' }));
+    expect(locked.status).toBe(403);
+    expect((await errorOf(locked)).error.details).toBeUndefined();
+    expect((await f.app.request('/door-lockable/7', jsonPost({ name: 'x' }))).status).toBe(201);
+  });
+
+  it('oss never runs an entry-level hook: the door is unmetered and unjudged', async () => {
+    hookRuns.count = 0;
+    const f = fixture({ cloud: false, principal: null });
+    expect((await f.app.request('/door/7', jsonPost({ count: 50 }))).status).toBe(201);
+    expect(hookRuns.count).toBe(0);
+  });
+
+  it('the slot guard reads a conditional feature’s key: an undeclared one stops the boot naming the route', () => {
+    // A slot of its own: the fixture's `files.maxBytes` advertises a pro
+    // value above its oss ceiling on purpose (the gate's tests), which the
+    // guard refuses first.
+    const slot = { actions: [], limits: {}, features: TOOL.features };
+    expect(() =>
+      assertToolEntitlements({
+        ...slot,
+        routes: declareRouteEntitlements([
+          { route: { method: 'post', path: '/x' }, feature: { key: 'nothing.declared', when: () => true } }
+        ])
+      })
+    ).toThrow('route POST /x needs the feature "nothing.declared"');
+    expect(() =>
+      assertToolEntitlements({
+        ...slot,
+        routes: declareRouteEntitlements([
+          { route: { method: 'post', path: '/x' }, feature: { key: 'premium' } }
+        ])
+      })
+    ).not.toThrow();
+  });
+
+  it('only a size limit marks a deferring gate: a count route meets the cap at once, a size route after the plan (PRDCT-2632)', () => {
+    const f = fixture({ cloud: true, principal: principal() });
+    // The handlers as registered (`api.on`), the shape create-api.ts's cap reads them in.
+    const gatesOf = (path: string) =>
+      f.app.routes.filter((r) => r.method === 'POST' && r.path === path).map((r) => r.handler);
+    expect(gatesOf('/counted')).toHaveLength(2);
+    expect(gatesOf('/counted').some(isDeferringGate)).toBe(false);
+    expect(gatesOf('/counted-capped').some(isDeferringGate)).toBe(false);
+    expect(gatesOf('/door/:id').some(isDeferringGate)).toBe(false);
+    expect(gatesOf('/sized').some(isDeferringGate)).toBe(true);
+    expect(gatesOf('/files').some(isDeferringGate)).toBe(true);
+    expect(gatesOf('/premium-files').some(isDeferringGate)).toBe(true);
+  });
+
+  it('a conditional feature whose condition does not hold reads no plan: the hub is not asked', async () => {
+    const f = fixture({ cloud: true, principal: principal() });
+    expect((await f.app.request('/lockable', jsonPost({ name: 'open' }))).status).toBe(201);
+    expect(f.hub.reads).toBe(0);
+    expect((await f.app.request('/lockable', jsonPost({ password: 'hunter22' }))).status).toBe(403);
+    expect(f.hub.reads).toBe(1);
   });
 });
