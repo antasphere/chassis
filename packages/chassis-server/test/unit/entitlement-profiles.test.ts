@@ -11,8 +11,9 @@ import type { Logger } from '@antasphere/chassis-server/logger';
  * start, and a failure cached like an answer so a storm stays one read.
  * The read is off the request path (PRDCT-2633): a stale entry is served at
  * once while the refresh runs behind it, a cold account waits at most the
- * cold budget. The hub's answer shape is mirrored verbatim, a boolean limit
- * included (PRDCT-2636), and since phase 2 the hub's upgrade page and its
+ * cold budget. The hub's answer shape is the contract's copy (checked
+ * against the hub's wire snapshot, PRDCT-2677), a boolean limit included
+ * (PRDCT-2636), and since phase 2 the hub's upgrade page and its
  * features list as the truth once it serves limit rows (PRDCT-2664).
  */
 
@@ -32,6 +33,8 @@ const answerOf = (over: Record<string, unknown>) =>
     planUntil: null,
     limits: {},
     features: [],
+    // Required on the wire since PRDCT-2677: every hub since 0.11.0 sends it.
+    upgradeUrl: `${ISSUER}/billing/upgrade?org=acct&tool=things&plan=free`,
     ...over
   });
 
@@ -244,13 +247,15 @@ describe('EntitlementProfiles', () => {
     }
   });
 
-  it('carries the hub’s upgrade page through resolve, and none when the hub sent none or the plan is the default', async () => {
+  it('carries the hub’s upgrade page through resolve, and none when the plan is the default (an answer without the page no longer parses, PRDCT-2677)', async () => {
     const clock = { now: 1_000_000 };
     const page = `${ISSUER}/billing/upgrade?org=acct&tool=things&plan=pro`;
     const { p } = profiles(() => answerOf({ plan: 'pro', upgradeUrl: page }), clock);
     expect((await p.get('acct', TOOL)).upgradeUrl).toBe(page);
-    const older = profiles(() => answerOf({ plan: 'pro' }), clock);
-    expect((await older.p.get('acct', TOOL)).upgradeUrl).toBeNull();
+    const older = profiles(() => answerOf({ plan: 'pro', upgradeUrl: undefined }), clock);
+    const olderProfile = await older.p.get('acct', TOOL);
+    expect(olderProfile.upgradeUrl).toBeNull();
+    expect(olderProfile.source).toBe('default');
     const missing = profiles(() => Response.json({ error: {} }, { status: 500 }), clock);
     expect((await missing.p.get('acct', TOOL)).upgradeUrl).toBeNull();
   });

@@ -1,5 +1,12 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { usageCheckRequestSchema, usageEventSchema } from '@antasphere/chassis-contract';
+import {
+  entitlementProfileSchema,
+  usageCheckRequestSchema,
+  usageCheckSchema,
+  usageEventSchema,
+  usageEventsBatchSchema,
+  usageIngestResultSchema
+} from '@antasphere/chassis-contract';
 import { randomUUID } from 'node:crypto';
 import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
 
@@ -43,6 +50,13 @@ import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
  *    real hub). Ingest DEBITS: an accepted event is priced by the same rule
  *    as the check, its `credits` returned on its result, the balance moved
  *    and a `debit` appended to `ledger` with the event id as its source.
+ *    The check answers the hub's three reasons in the hub's order
+ *    (`account_suspended`, then `unpriceable` for a price past
+ *    `Number.MAX_SAFE_INTEGER`, `credits` clamped to it, then
+ *    `insufficient_credits`), and every answer of the three usage routes
+ *    goes through the chassis's own schema before it is sent (PRDCT-2677):
+ *    a fake answer the chassis could not parse throws in the test that
+ *    produced it.
  *
  * Access tokens still carry the TRANSITIONAL advisory org claims the real
  * hub emits through the compat window ({role, workspace_id, …}) — the tool
@@ -634,13 +648,14 @@ export class FakeHub {
     if (!this.machineBearer(req)) {
       return sendJson(res, 401, { error: { code: 'invalid_token', message: 'Unauthorized' } });
     }
-    const events = (body as { events?: unknown } | null)?.events;
-    if (!Array.isArray(events) || events.length === 0 || events.length > 500) {
+    const batch = usageEventsBatchSchema.safeParse(body);
+    if (!batch.success) {
       return sendJson(res, 400, { error: { code: 'validation_error', message: '1 to 500 events' } });
     }
+    const { events } = batch.data;
     // The real hub's per-element judgement (PRDCT-2625, `classifyBatch` in
     // its api/usage.ts), in its order: each element parses on its own
-    // against the hub's schema (mirrored verbatim in chassis-contract: the
+    // against the hub's schema (the chassis-contract copy, checked against the hub's wire snapshot: the
     // uuid account reference, the maximum lengths, the action key or its
     // alias — PRDCT-2629), a body that names a tool other than the token's
     // registry slug is `tool_mismatch`, the account must be an organization
@@ -682,12 +697,16 @@ export class FakeHub {
       return { id, status: 'accepted' as const, credits };
     });
     const count = (status: string) => results.filter((r) => r.status === status).length;
-    return sendJson(res, 200, {
-      results,
-      accepted: count('accepted'),
-      duplicate: count('duplicate'),
-      rejected: count('rejected')
-    });
+    return sendJson(
+      res,
+      200,
+      usageIngestResultSchema.parse({
+        results,
+        accepted: count('accepted'),
+        duplicate: count('duplicate'),
+        rejected: count('rejected')
+      })
+    );
   }
 
   // ── GET /api/v1/usage/entitlements?accountRef=: the account's plan ─────
@@ -714,14 +733,18 @@ export class FakeHub {
       });
     }
     const profile = this.entitlementProfiles.get(accountRef) ?? { plan: 'free' as const };
-    return sendJson(res, 200, {
-      accountRef,
-      plan: profile.plan,
-      planUntil: null,
-      limits: profile.limits ?? {},
-      features: profile.features ?? [],
-      upgradeUrl: `${this.issuer}/billing/upgrade?org=${accountRef}&tool=${this.toolSlug}&plan=${profile.plan}`
-    });
+    return sendJson(
+      res,
+      200,
+      entitlementProfileSchema.parse({
+        accountRef,
+        plan: profile.plan,
+        planUntil: null,
+        limits: profile.limits ?? {},
+        features: profile.features ?? [],
+        upgradeUrl: `${this.issuer}/billing/upgrade?org=${accountRef}&tool=${this.toolSlug}&plan=${profile.plan}`
+      })
+    );
   }
 
   // ── POST /api/v1/usage/check: the price and the balance, no side effect ─
@@ -764,26 +787,42 @@ export class FakeHub {
     for (const orgs of this.userOrgs.values()) {
       if (orgs.get(accountRef)?.status === 'suspended') suspended = true;
     }
-    const { credits, priced, unit } = this.priceOf(accountRef, actionKey, quantity);
+    const priced = this.priceOf(accountRef, actionKey, quantity);
+    const { unit } = priced;
+    // The hub's rule (its api/usage.ts): a price past the exactly
+    // representable range is answered as `unpriceable`, the credits clamped
+    // to the bound (PRDCT-2677).
+    const unpriceableNow = priced.credits > Number.MAX_SAFE_INTEGER;
+    const credits = unpriceableNow ? Number.MAX_SAFE_INTEGER : priced.credits;
     const balance = this.balanceOf(accountRef);
     // The hub's rule since its fix round (lane A, 23 September, ce2ce1b): a
     // 0-credit action is allowed whatever the balance, negative included; an
-    // unpriced action is never refused.
-    const allowed = !suspended && (credits === 0 || balance >= credits);
-    const reason = suspended ? 'account_suspended' : allowed ? null : 'insufficient_credits';
-    return sendJson(res, 200, {
-      accountRef,
-      actionKey,
-      quantity,
-      allowed,
-      credits,
-      balance,
-      unit,
-      priced,
-      plan: this.entitlementProfiles.get(accountRef)?.plan ?? 'free',
-      reason,
-      topUpUrl: `${this.issuer}/billing/top-up?org=${accountRef}&credits=${credits}&balance=${balance}&tool=${this.toolSlug}&action=${actionKey}`
-    });
+    // unpriced action is never refused. Suspension is tested first.
+    const covered = credits === 0 || balance >= credits;
+    const reason = suspended
+      ? ('account_suspended' as const)
+      : unpriceableNow
+        ? ('unpriceable' as const)
+        : covered
+          ? null
+          : ('insufficient_credits' as const);
+    return sendJson(
+      res,
+      200,
+      usageCheckSchema.parse({
+        accountRef,
+        actionKey,
+        quantity,
+        allowed: reason === null,
+        credits,
+        balance,
+        unit,
+        priced: priced.priced,
+        plan: this.entitlementProfiles.get(accountRef)?.plan ?? 'free',
+        reason,
+        topUpUrl: `${this.issuer}/billing/top-up?org=${accountRef}&credits=${credits}&balance=${balance}&tool=${this.toolSlug}&action=${actionKey}`
+      })
+    );
   }
 
   // ── GET /api/v1/orgs: the caller-scoped org list ──────────────────────

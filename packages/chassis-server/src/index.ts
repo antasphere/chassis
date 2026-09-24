@@ -7,6 +7,7 @@ export type { ExportEntriesFn, ExportEntry } from './api/export.js';
 export {
   EMPTY_TOOL_ENTITLEMENTS,
   HUB_USAGE_SCOPE,
+  HubCreditCheck,
   HubMachineToken,
   HubUsagePoster,
   EntitlementProfiles,

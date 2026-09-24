@@ -22,7 +22,7 @@ const DOMAIN_HINTS: Record<string, string> = {
   // The same code on both editions: the cloud's credit refusal (402, with the
   // top-up link) and a self-hosted instance's cap (413, no details).
   entitlement_denied:
-    'The instance refused this action: on the cloud the organization lacks the credits and the top-up link in this message is where a human adds them; on a self-hosted instance the request exceeds the operator’s cap.'
+    'The instance refused this action: on the cloud the organization lacks the credits and the top-up link in this message is where a human adds them, or the quantity is beyond what can be priced and no top-up covers it (no link then); on a self-hosted instance the request exceeds the operator’s cap.'
 };
 
 /** The chassis hints plus a tool's own: ONE table, the one every lookup reads. */

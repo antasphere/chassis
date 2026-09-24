@@ -47,6 +47,20 @@ describe('mcp error → hint mapping', () => {
     expect(text).not.toContain('undefined');
   });
 
+  it('a 413 entitlement_denied with the price and the balance but no link (an unpriceable quantity, PRDCT-2677) has no top-up sentence and its hint says so', () => {
+    const err = new ApiToolError(
+      413,
+      'entitlement_denied',
+      'This quantity cannot be priced (9007199254740991 credits or more, the organization holds 3); nothing was charged',
+      { credits: 9007199254740991, balance: 3 }
+    );
+    const text = err.toUserFacingText();
+    expect(text).toContain('HTTP 413');
+    expect(text).not.toContain('Top up:');
+    expect(text).toContain('beyond what can be priced');
+    expect(text).not.toContain('undefined');
+  });
+
   it('degrades gracefully for unknown codes', () => {
     const err = new ApiToolError(422, 'weird_domain_thing', 'nope');
     const text = err.toUserFacingText();

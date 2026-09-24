@@ -1,5 +1,10 @@
 import { Counter, Gauge } from 'prom-client';
-import { usageCheckSchema, type UsageCheck } from '@antasphere/chassis-contract';
+import {
+  USAGE_ROUTE_ERRORS,
+  usageCheckSchema,
+  type UsageCheck,
+  type UsageRouteError
+} from '@antasphere/chassis-contract';
 import type { Logger } from '../logger.js';
 import type { HubMachineToken } from './hub-machine-token.js';
 
@@ -20,7 +25,13 @@ import type { HubMachineToken } from './hub-machine-token.js';
  * hub always, so a fresh answer serves through an outage too.
  *
  * What the hub's answer means:
- *  - 200 that parses: the verdict (a success clears the failure clock);
+ *  - 200 that parses: the verdict (a success clears the failure clock).
+ *    `allowed: false` carries one of three reasons, each a REFUSAL:
+ *    `insufficient_credits`, `account_suspended`, and `unpriceable` (the
+ *    price of this quantity exceeds `Number.MAX_SAFE_INTEGER`, `credits`
+ *    clamped to that bound), never an outage (the drift of 23 September
+ *    2026, PRDCT-2677: the copy knew two reasons, read the third as an
+ *    unparseable answer, and failed open);
  *  - 401: the token is dead, invalidated and minted again ONCE, then an outage;
  *  - 404 `unknown_account`: no organization holds this id at the hub, so
  *    nothing can be charged: allowed, logged at warn, not an outage;
@@ -83,7 +94,7 @@ export type CreditVerdict =
     }
   | {
       allowed: false;
-      reason: 'insufficient_credits' | 'account_suspended' | 'hub_unavailable';
+      reason: 'insufficient_credits' | 'account_suspended' | 'unpriceable' | 'hub_unavailable';
       source: 'hub' | 'cache' | 'closed';
       check: UsageCheck | null;
     };
@@ -119,6 +130,7 @@ type Outcome =
   | 'allowed'
   | 'denied'
   | 'suspended'
+  | 'unpriceable'
   | 'cached_allowed'
   | 'cached_denied'
   | 'fail_open'
@@ -166,7 +178,7 @@ export class HubCreditCheck implements CreditCheck {
     // a check without one.
     this.verdicts = new Counter({
       name: 'usage_check_total',
-      help: 'Credit check verdicts by outcome: allowed, denied, suspended, cached_allowed, cached_denied, fail_open, closed, unknown_account, malformed',
+      help: 'Credit check verdicts by outcome: allowed, denied, suspended, unpriceable, cached_allowed, cached_denied, fail_open, closed, unknown_account, malformed',
       labelNames: ['outcome'] as const,
       registers: []
     });
@@ -240,12 +252,15 @@ export class HubCreditCheck implements CreditCheck {
         this.store(key, req.quantity, answer);
         if (answer.allowed) return this.verdict('allowed', { allowed: true, source: 'hub', check: answer });
         const reason = answer.reason ?? 'insufficient_credits';
-        return this.verdict(reason === 'account_suspended' ? 'suspended' : 'denied', {
-          allowed: false,
-          reason,
-          source: 'hub',
-          check: answer
-        });
+        return this.verdict(
+          reason === 'account_suspended' ? 'suspended' : reason === 'unpriceable' ? 'unpriceable' : 'denied',
+          {
+            allowed: false,
+            reason,
+            source: 'hub',
+            check: answer
+          }
+        );
       }
       // The hub ANSWERED, whatever it said: the outage, if one was running,
       // is over (verifier round 1: a clock cleared only by a 200 let a hub
@@ -379,9 +394,9 @@ export class HubCreditCheck implements CreditCheck {
       }
       return { kind: 'answer', answer: parsed.data };
     }
-    if (res.status === 404) {
+    if (res.status === USAGE_ROUTE_ERRORS.unknown_account) {
       const body = (await res.json().catch(() => null)) as { error?: { code?: unknown } } | null;
-      if (body?.error?.code === 'unknown_account') {
+      if (body?.error?.code === ('unknown_account' satisfies UsageRouteError)) {
         this.opts.logger.warn(
           { accountRef: req.accountRef, actionKey: req.actionKey },
           'usage check: no organization holds this account at the hub — nothing can be charged, the action is allowed'
@@ -390,7 +405,7 @@ export class HubCreditCheck implements CreditCheck {
       }
       return { kind: 'outage' };
     }
-    if (res.status === 400) {
+    if (res.status === USAGE_ROUTE_ERRORS.validation_error) {
       const body = await res.text().catch(() => '');
       // One error line per action key: a schema drift would otherwise write
       // one per metered request (the code review).

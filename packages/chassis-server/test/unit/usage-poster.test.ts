@@ -79,7 +79,14 @@ function hub(script: Script, now?: () => number) {
   };
 }
 
-const accepted = (ids: string[]) => Response.json({ results: ids.map((id) => ({ id, status: 'accepted' })) });
+/** The hub's answer accepting every id, with the three counts the hub always sends (required since PRDCT-2677). */
+const accepted = (ids: string[]) =>
+  Response.json({
+    results: ids.map((id) => ({ id, status: 'accepted' })),
+    accepted: ids.length,
+    duplicate: 0,
+    rejected: 0
+  });
 
 /** A prom-client counter's values by its `outcome` label, zero rows omitted. */
 async function counts(counter: {

@@ -160,6 +160,9 @@ interface Fixture {
   hub: { profile: unknown; reads: number };
 }
 
+/** The hub's upgrade page for the organization, as every hub since 0.11.0 sends it on the plan read. */
+const HUB_UPGRADE_PAGE = 'https://hub.test/billing/upgrade?org=acct-1&tool=things&plan=free';
+
 function fixture(opts: {
   cloud: boolean;
   principal: Principal | null;
@@ -187,13 +190,15 @@ function fixture(opts: {
     if (String(input).includes('/oauth2/token'))
       return Response.json({ access_token: 'mach', expires_in: 900 });
     hub.reads += 1;
-    // The hub's whole answer shape (mirrored verbatim in the contract): the
+    // The hub's whole answer shape (the contract's copy, checked against the
+    // hub's wire snapshot; `upgradeUrl` required since PRDCT-2677): the
     // test's `hubProfile` overrides its fields.
     return Response.json({
       accountRef: '77777777-aaaa-4bbb-8ccc-000000000001',
       planUntil: null,
       limits: {},
       features: [],
+      upgradeUrl: HUB_UPGRADE_PAGE,
       ...(hub.profile as object)
     });
   }) as typeof fetch;
@@ -330,7 +335,7 @@ describe('the gate on cloud, a hub-projected workspace', () => {
       key: 'files.maxBytes',
       plan: 'free',
       requiredPlan: 'pro',
-      upgradeUrl: 'https://hub.test'
+      upgradeUrl: `${HUB_UPGRADE_PAGE}&key=files.maxBytes&requiredPlan=pro`
     });
     expect(f.checks).toEqual([]);
     expect(f.creditChecks).toEqual([]);
@@ -468,6 +473,45 @@ describe('the gate on cloud, a hub-projected workspace', () => {
     await tick();
     expect(suspended.emitted).toEqual([]);
     expect(closed.emitted).toEqual([]);
+  });
+
+  it('a quantity the hub cannot price is 413 entitlement_denied with the price and the balance, no top-up link, and emits nothing (PRDCT-2677)', async () => {
+    const topUpUrl = 'https://hub.test/billing/top-up?org=acct-1&credits=9007199254740991&balance=3';
+    const f = fixture({
+      cloud: true,
+      principal: principal(),
+      credits: (req) => ({
+        allowed: false,
+        reason: 'unpriceable',
+        source: 'hub',
+        check: {
+          accountRef: req.accountRef,
+          actionKey: req.actionKey,
+          quantity: req.quantity,
+          allowed: false,
+          credits: Number.MAX_SAFE_INTEGER,
+          balance: 3,
+          unit: 'call',
+          priced: true,
+          plan: 'free',
+          reason: 'unpriceable',
+          topUpUrl
+        }
+      })
+    });
+    const res = await f.app.request('/things', { method: 'POST' });
+    expect(res.status).toBe(413);
+    expect(await errorOf(res)).toEqual({
+      error: {
+        code: 'entitlement_denied',
+        message:
+          'This quantity cannot be priced (9007199254740991 credits or more, the organization holds 3); nothing was charged',
+        // No link: a top-up cannot cover it, and a link would draw the top-up card (verifier round 1).
+        details: { credits: Number.MAX_SAFE_INTEGER, balance: 3 }
+      }
+    });
+    await tick();
+    expect(f.emitted).toEqual([]);
   });
 
   it('the local credit check is never asked on a metered account (PRDCT-2653): its refusal does not reach the request', async () => {
@@ -812,6 +856,39 @@ describe('the anonymous surface, round 3 of the verifier', () => {
       expect(body.error.message, reason).not.toMatch(/suspend|Antasphere|hub/i);
       expect(f.emitted, reason).toEqual([]);
     }
+  });
+
+  it('an unpriceable quantity reads the same neutral 402 to a viewer: no figure, no link (PRDCT-2677)', async () => {
+    const f = fixture({
+      cloud: true,
+      principal: null,
+      credits: () => ({
+        allowed: false,
+        reason: 'unpriceable',
+        source: 'hub',
+        check: {
+          accountRef: '77777777-aaaa-4bbb-8ccc-000000000001',
+          actionKey: 'things.make',
+          quantity: 1,
+          allowed: false,
+          credits: Number.MAX_SAFE_INTEGER,
+          balance: 0,
+          unit: 'call',
+          priced: true,
+          plan: 'free',
+          reason: 'unpriceable',
+          topUpUrl: 'https://hub.test/billing/top-up?org=secret-org'
+        }
+      })
+    });
+    const res = await f.app.request('/owned/deck-7', { method: 'POST' });
+    expect(res.status).toBe(402);
+    const body = (await res.json()) as { error: { code: string; message: string; details?: unknown } };
+    expect(body.error.code).toBe('entitlement_denied');
+    expect(body.error.details).toBeUndefined();
+    expect(body.error.message).toBe('The owner of this content cannot take this action right now');
+    await tick();
+    expect(f.emitted).toEqual([]);
   });
 
   it('a plan refusal on an anonymous surface is neutral too: no key, no plan, no upgrade link', async () => {

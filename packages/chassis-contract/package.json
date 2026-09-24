@@ -21,7 +21,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src test",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "wire:check": "node scripts/hub-wire-check.mjs"
   },
   "dependencies": {
     "@hono/zod-openapi": "^1.4.0",

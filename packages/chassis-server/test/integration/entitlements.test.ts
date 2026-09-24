@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import type { UsageEvent } from '@antasphere/chassis-contract';
+import { HubCreditCheck, HubMachineToken } from '@antasphere/chassis-server';
+import type { Logger } from '@antasphere/chassis-server/logger';
 import { FakeHub, type HubUserFixture } from '@antasphere/chassis-server/testing';
 import {
   createDatabase,
@@ -37,7 +39,8 @@ import * as sso from './sso-helpers.js';
  *    (PRDCT-2653) and its refusal links the hub's upgrade page with the key
  *    and the required plan; an upload with no declared size is 411
  *    (PRDCT-2652); a hub that does not answer the check fails open, on
- *    /metrics.
+ *    /metrics; a price past `Number.MAX_SAFE_INTEGER` reaches the check as
+ *    the hub's `unpriceable` refusal, never an outage (PRDCT-2677).
  *
  * The suite runs twice (the minimal host, then the Slideless composition):
  * what the two declare differently (the free upload value) is read from
@@ -536,6 +539,53 @@ describe('cloud: every metered action of a hub organization lands in the hub', (
     expect(hub.checkRequests).toHaveLength(checks);
     await new Promise((r) => setTimeout(r, 2_500));
     expect(hub.usageRequests).toHaveLength(posts);
+  });
+
+  it('a price past Number.MAX_SAFE_INTEGER is the hub’s unpriceable refusal, credits clamped, never an outage (PRDCT-2677)', async () => {
+    // No upload can carry a quantity this large (the instance cap refuses the
+    // declared size first), so the check is driven straight against the fake,
+    // with the machine token the instance itself would use.
+    hub.setPrice('big.action', { creditsPerUnit: 10_000_000, unit: 'call', per: 1 });
+    const logs: Array<{ level: string; msg: string }> = [];
+    const at = (level: string) => (ctx: unknown, msg?: string) =>
+      logs.push({ level, msg: msg ?? (typeof ctx === 'string' ? ctx : '') });
+    const logger = {
+      error: at('error'),
+      warn: at('warn'),
+      info: at('info'),
+      debug: at('debug')
+    } as unknown as Logger;
+    const token = new HubMachineToken({
+      issuerUrl: hub.issuer,
+      clientId: host.hubClientId,
+      clientSecret: HUB_SECRET,
+      resource: `${hub.issuer}/mcp`,
+      logger
+    });
+    const check = new HubCreditCheck({ issuerUrl: hub.issuer, token, logger });
+    // 10,000,000 × 1,000,000,000 = 10^16 credits, past 2^53 − 1.
+    const verdict = await check.check({
+      accountRef: ORG_A,
+      actionKey: 'big.action',
+      quantity: 1_000_000_000,
+      unit: 'call'
+    });
+    expect(verdict).toMatchObject({ allowed: false, reason: 'unpriceable', source: 'hub' });
+    expect(verdict.check).toMatchObject({
+      credits: Number.MAX_SAFE_INTEGER,
+      priced: true,
+      reason: 'unpriceable'
+    });
+    expect((await check.posture.get()).values[0]?.value ?? 0).toBe(0);
+    expect(logs.filter((l) => l.level === 'warn' || l.level === 'error')).toEqual([]);
+    // A quantity just inside the bound is priced and judged on the balance, as before.
+    const inside = await check.check({
+      accountRef: ORG_A,
+      actionKey: 'big.action',
+      quantity: 1,
+      unit: 'call'
+    });
+    expect(inside).toMatchObject({ allowed: false, reason: 'insufficient_credits', source: 'hub' });
   });
 
   it('a hub that does not answer the check fails open, on /metrics; its return clears the posture', async () => {

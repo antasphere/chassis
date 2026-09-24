@@ -173,6 +173,28 @@ describe('HubCreditCheck: the cache and its reuse rule', () => {
     expect(await h.outcome('suspended')).toBe(1);
   });
 
+  it('the hub’s unpriceable answer is a refusal, never an outage (PRDCT-2677)', async () => {
+    const h = hub((r) =>
+      Response.json(answer(r, { allowed: false, reason: 'unpriceable', credits: Number.MAX_SAFE_INTEGER }))
+    );
+    const first = await h.check.check(h.req(1_000_000_000));
+    expect(first).toMatchObject({ allowed: false, reason: 'unpriceable', source: 'hub' });
+    expect(first.check).toMatchObject({ credits: Number.MAX_SAFE_INTEGER });
+    expect(await h.gauge('posture')).toBe(0);
+    expect(await h.outcome('unpriceable')).toBe(1);
+    expect(await h.outcome('fail_open')).toBe(0);
+    expect(h.logs.filter((l) => l.level === 'warn' || l.level === 'error')).toEqual([]);
+    // The same request within the denial's 5 s: the cache, the same reason, no hub call.
+    h.clock.now += 4_000;
+    expect(await h.check.check(h.req(1_000_000_000))).toMatchObject({
+      allowed: false,
+      reason: 'unpriceable',
+      source: 'cache'
+    });
+    expect(h.check.hubCalls).toBe(1);
+    expect(await h.gauge('posture')).toBe(0);
+  });
+
   it('sweeps the expired entries once the cache grows above 5,000', async () => {
     const h = hub((r) => Response.json(answer(r)));
     for (let i = 0; i < 5_001; i += 1) await h.check.check(h.req(1, `a.${i}`));
@@ -380,13 +402,17 @@ describe('HubCreditCheck: the outage posture', () => {
   });
 
   it('counts every outcome as named', async () => {
-    let mode: 'allow' | 'deny' | 'suspend' | 'down' | 'unknown' | 'bad' = 'allow';
+    let mode: 'allow' | 'deny' | 'suspend' | 'unpriceable' | 'down' | 'unknown' | 'bad' = 'allow';
     const h = hub((r) => {
       if (mode === 'allow') return Response.json(answer(r));
       if (mode === 'deny')
         return Response.json(answer(r, { allowed: false, reason: 'insufficient_credits' }));
       if (mode === 'suspend')
         return Response.json(answer(r, { allowed: false, reason: 'account_suspended' }));
+      if (mode === 'unpriceable')
+        return Response.json(
+          answer(r, { allowed: false, reason: 'unpriceable', credits: Number.MAX_SAFE_INTEGER })
+        );
       if (mode === 'unknown') return Response.json({ error: { code: 'unknown_account' } }, { status: 404 });
       if (mode === 'bad') return Response.json({ error: { code: 'validation_error' } }, { status: 400 });
       return new Response('{}', { status: 500 });
@@ -398,6 +424,8 @@ describe('HubCreditCheck: the outage posture', () => {
     await h.check.check(h.req(30, 'deny.me')); // cached_denied
     mode = 'suspend';
     await h.check.check(h.req(1, 'suspend.me')); // suspended
+    mode = 'unpriceable';
+    await h.check.check(h.req(1, 'unpriceable.me')); // unpriceable
     mode = 'unknown';
     await h.check.check(h.req(1, 'unknown.me')); // unknown_account
     mode = 'bad';
@@ -412,6 +440,7 @@ describe('HubCreditCheck: the outage posture', () => {
       'denied',
       'cached_denied',
       'suspended',
+      'unpriceable',
       'unknown_account',
       'malformed',
       'fail_open',

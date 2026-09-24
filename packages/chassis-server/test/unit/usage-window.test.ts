@@ -1,6 +1,3 @@
-import { existsSync, readFileSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   USAGE_EVENT_MAX_FUTURE_MS,
@@ -9,11 +6,12 @@ import {
 } from '@antasphere/chassis-contract';
 
 /**
- * The pin of the hub's occurredAt window as the chassis mirrors it
+ * The pin of the hub's occurredAt window as the chassis copies it
  * (PRDCT-2644): the two bounds, their inclusive edges and the two messages
- * byte for byte, then the cross-read of the hub's own file when its checkout
- * sits beside this one (`labs/products/antasphere/hub`), so a change on
- * either side that the other did not make fails here.
+ * byte for byte. The agreement with the hub's own definitions is the wire
+ * check's (PRDCT-2677): `pnpm --filter @antasphere/chassis-contract
+ * wire:check`, the `hub-wire` CI job, whose snapshot carries the bounds and
+ * the occurrence table on the hub's offsets.
  */
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -46,30 +44,5 @@ describe('the hub’s occurredAt window, mirrored (PRDCT-2644)', () => {
       path: 'occurredAt',
       message: FUTURE_MESSAGE
     });
-  });
-});
-
-// From packages/chassis-server/test/unit/ up to labs/products/antasphere/, then the hub checkout.
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const HUB_BILLING = path.resolve(HERE, '../../../../../../../hub/packages/contract/src/schemas/billing.ts');
-const hubPresent = existsSync(HUB_BILLING);
-
-describe('the hub’s own file agrees (cross-read)', () => {
-  if (!hubPresent) {
-    it.skip(`skipped: the hub checkout is not beside this one (looked for ${HUB_BILLING})`, () => {});
-    return;
-  }
-  it(`carries the same bounds and messages (${HUB_BILLING})`, () => {
-    const src = readFileSync(HUB_BILLING, 'utf8');
-    expect(src).toContain('export const USAGE_EVENT_MAX_PAST_MS = 7 * 24 * 60 * 60 * 1000;');
-    expect(src).toContain('export const USAGE_EVENT_MAX_FUTURE_MS = 5 * 60 * 1000;');
-    expect(src).toContain(
-      'message: `more than ${USAGE_EVENT_MAX_PAST_MS / 86_400_000} days before the hub received the event`'
-    );
-    expect(src).toContain(
-      'message: `more than ${USAGE_EVENT_MAX_FUTURE_MS / 60_000} minutes after the hub received the event`'
-    );
-    expect(src).toContain('if (delta < -USAGE_EVENT_MAX_PAST_MS)');
-    expect(src).toContain('if (delta > USAGE_EVENT_MAX_FUTURE_MS)');
   });
 });
