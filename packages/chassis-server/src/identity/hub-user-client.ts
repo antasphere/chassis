@@ -75,6 +75,24 @@ export type HubOrgsResult =
   | { kind: 'inconclusive' };
 
 /**
+ * The organization's WHOLE team list as one member reads it (`GET
+ * <hub>/api/v1/teams`, PRDCT-2813), every team of the org whether or not the
+ * reader sits in it. `complete` is false when the drain stopped at its page
+ * cap with more pages left: the list is then a prefix, good for upserting,
+ * never for deleting what it does not name.
+ */
+export type HubOrgTeamsResult =
+  | { kind: 'ok'; teams: HubTeam[]; complete: boolean }
+  | { kind: 'inconclusive' }
+  | { kind: 'no_link' }
+  | { kind: 'grant_dead' };
+
+/** The page size of the team-list drain (the hub's own maximum). */
+const ORG_TEAMS_PAGE_LIMIT = 100;
+/** At most this many pages per read (1,000 teams), then the drain stops. */
+const ORG_TEAMS_MAX_PAGES = 10;
+
+/**
  * The answer of one as-the-user org creation (PRDCT-2443):
  *  - 'created': the hub answered 201 with a well-formed org;
  *  - 'limit_reached': the hub's own per-user organization cap refused it;
@@ -235,6 +253,8 @@ export interface HubUserClientOptions {
 export class HubUserClient {
   private readonly base: string;
   private readonly fetchImpl: typeof fetch;
+  /** An older hub without `GET /teams` is said once per client, never on every pass. */
+  private warnedNoTeamsRoute = false;
 
   constructor(private readonly opts: HubUserClientOptions) {
     this.base = opts.issuerUrl.replace(/\/+$/, '');
@@ -336,6 +356,95 @@ export class HubUserClient {
   }
 
   /**
+   * The organization's whole team list, read AS THE USER (PRDCT-2813): `GET
+   * <hub>/api/v1/teams` with the person's own grant token and the hub org in
+   * `X-Workspace-Id`, which the hub answers for any member of that org. Same
+   * posture as `orgs()`: one forced refresh and one retry on a 401/403 (once
+   * for the whole drain), `inconclusive` on any doubt (network, non-2xx,
+   * unparseable or malformed page). The pages are drained through
+   * `nextCursor`, at most ORG_TEAMS_MAX_PAGES of them; a list cut there is
+   * returned with `complete: false`.
+   */
+  async orgTeams(localUserId: string, hubOrgId: string): Promise<HubOrgTeamsResult> {
+    const access = await this.opts.grant.accessToken(localUserId);
+    if (access.kind !== 'ok') return { kind: access.kind };
+    let token = access.accessToken;
+    let retried = false;
+    const teams: HubTeam[] = [];
+    const seen = new Set<string>();
+    let cursor: string | null = null;
+
+    for (let page = 0; page < ORG_TEAMS_MAX_PAGES; page++) {
+      let res = await this.getTeamsPage(token, hubOrgId, cursor);
+      if (res.kind === 'error') return { kind: 'inconclusive' };
+      if ((res.response.status === 401 || res.response.status === 403) && !retried) {
+        retried = true;
+        this.opts.grant.invalidateAccess(localUserId);
+        const refreshed: GrantAccess = await this.opts.grant.refresh(localUserId);
+        if (refreshed.kind !== 'ok') return { kind: refreshed.kind };
+        token = refreshed.accessToken;
+        res = await this.getTeamsPage(token, hubOrgId, cursor);
+        if (res.kind === 'error') return { kind: 'inconclusive' };
+      }
+      const { response } = res;
+      if (response.status === 404) {
+        if (!this.warnedNoTeamsRoute) {
+          this.warnedNoTeamsRoute = true;
+          this.opts.logger.warn(
+            'hub /teams answered 404 — a hub without the team list; only the members’ own teams are projected'
+          );
+        }
+        return { kind: 'inconclusive' };
+      }
+      if (!response.ok) {
+        this.opts.logger.warn(
+          { status: response.status, hubOrgId },
+          'hub /teams answered non-2xx — failing open'
+        );
+        return { kind: 'inconclusive' };
+      }
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch {
+        this.opts.logger.warn({ hubOrgId }, 'hub /teams body unparseable — failing open');
+        return { kind: 'inconclusive' };
+      }
+      const raw = (body as { teams?: unknown; nextCursor?: unknown } | null) ?? {};
+      if (!Array.isArray(raw.teams)) {
+        this.opts.logger.warn({ hubOrgId }, 'hub /teams body malformed — failing open');
+        return { kind: 'inconclusive' };
+      }
+      const pageTeams = parseTeams(raw.teams, this.opts.logger);
+      // The hub pages on the id of the last row alone, and its teams are
+      // hard-deleted: a cursor whose team went between two page reads answers
+      // an EMPTY page with no cursor, which reads exactly like the end of the
+      // list. It is not: what was never read must not be deleted here
+      // (verifier round 1, F1). A page reached THROUGH a cursor that carries
+      // nothing is a cut list, upserted and deleted from nothing.
+      if (page > 0 && pageTeams.length === 0) {
+        this.opts.logger.warn(
+          { hubOrgId, teams: teams.length },
+          'hub /teams answered an empty page behind a cursor (the cursor’s team went) — upserting what was read, deleting nothing'
+        );
+        return { kind: 'ok', teams, complete: false };
+      }
+      for (const team of pageTeams) {
+        if (seen.has(team.id)) continue;
+        seen.add(team.id);
+        teams.push(team);
+      }
+      cursor = typeof raw.nextCursor === 'string' && raw.nextCursor !== '' ? raw.nextCursor : null;
+      if (cursor === null) return { kind: 'ok', teams, complete: true };
+    }
+    this.opts.logger.warn(
+      { hubOrgId, teams: teams.length },
+      'hub /teams has more pages than one read drains — upserting what was read, deleting nothing'
+    );
+    return { kind: 'ok', teams, complete: false };
+  }
+
+  /**
    * Create an organization at the hub AS THE USER (PRDCT-2443): `POST
    * <hub>/api/v1/orgs` `{ name }` presented with the user's OWN grant token,
    * obtained through the SAME HubGrantService path `orgs()` uses (cache →
@@ -404,6 +513,28 @@ export class HubUserClient {
       return { kind: 'ok', response };
     } catch (err) {
       this.opts.logger.warn({ err }, 'hub POST /orgs fetch failed — the organization may or may not exist');
+      return { kind: 'error' };
+    }
+  }
+
+  private async getTeamsPage(
+    token: string,
+    hubOrgId: string,
+    cursor: string | null
+  ): Promise<{ kind: 'ok'; response: Response } | { kind: 'error' }> {
+    const query = `limit=${ORG_TEAMS_PAGE_LIMIT}${cursor === null ? '' : `&cursor=${encodeURIComponent(cursor)}`}`;
+    try {
+      const response = await this.fetchImpl(`${this.base}/api/v1/teams?${query}`, {
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: 'application/json',
+          'x-workspace-id': hubOrgId
+        },
+        signal: AbortSignal.timeout(this.opts.timeoutMs)
+      });
+      return { kind: 'ok', response };
+    } catch (err) {
+      this.opts.logger.warn({ err, hubOrgId }, 'hub /teams fetch failed — failing open');
       return { kind: 'error' };
     }
   }

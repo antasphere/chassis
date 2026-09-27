@@ -31,6 +31,7 @@ const SAMPLE_TOKEN = 'x'.repeat(24);
 /** contract route → a client call. Keyed by `METHOD path` (contract shape). */
 /** A Better Auth user id: text, never a uuid. */
 const SAMPLE_USER_ID = 'usr_projects_coverage';
+const SAMPLE_TEAM_ID = '7b0c3d1e-2f4a-4b6c-8d9e-0f1a2b3c4d5e';
 
 const INVOKERS: Record<string, (c: Client) => Promise<unknown>> = {
   'GET /instance': (c) => c.instance(),
@@ -63,6 +64,16 @@ const INVOKERS: Record<string, (c: Client) => Promise<unknown>> = {
   'POST /projects/{id}/members': (c) => c.addProjectMember(SAMPLE_ID, { email: 'a@b.co', role: 'viewer' }),
   'PATCH /projects/{id}/members/{userId}': (c) => c.setProjectMemberRole(SAMPLE_ID, SAMPLE_USER_ID, 'editor'),
   'DELETE /projects/{id}/members/{userId}': (c) => c.removeProjectMember(SAMPLE_ID, SAMPLE_USER_ID),
+  'PATCH /projects/{id}/teams/{teamId}': (c) => c.setProjectTeamRole(SAMPLE_ID, SAMPLE_TEAM_ID, 'editor'),
+  'DELETE /projects/{id}/teams/{teamId}': (c) => c.removeProjectTeam(SAMPLE_ID, SAMPLE_TEAM_ID),
+  'GET /teams': (c) => c.teams(),
+  'GET /teams/{id}': (c) => c.team(SAMPLE_ID),
+  'POST /teams': (c) => c.createTeam({ name: 'Design' }),
+  'PATCH /teams/{id}': (c) => c.updateTeam(SAMPLE_ID, { name: 'Design' }),
+  'DELETE /teams/{id}': (c) => c.deleteTeam(SAMPLE_ID),
+  'GET /teams/{id}/members': (c) => c.teamMembers(SAMPLE_ID),
+  'POST /teams/{id}/members': (c) => c.addTeamMember(SAMPLE_ID, { email: 'a@b.co' }),
+  'DELETE /teams/{id}/members/{userId}': (c) => c.removeTeamMember(SAMPLE_ID, SAMPLE_USER_ID),
   'GET /api-keys': (c) => c.apiKeys(),
   'POST /api-keys': (c) => c.createApiKey({ name: 'k', scopes: ['things:read'] }),
   'DELETE /api-keys/{id}': (c) => c.revokeApiKey(SAMPLE_ID),
@@ -118,7 +129,10 @@ function recordingClient(): { client: Client; calls: Array<{ method: string; pat
 
 /** The contract path with every param substituted, to compare against the client's real path. */
 function expectedPath(contractPath: string): string {
-  return `/api/v1${contractPath.replace('{id}', SAMPLE_ID).replace('{userId}', SAMPLE_USER_ID)}`;
+  return `/api/v1${contractPath
+    .replace('{id}', SAMPLE_ID)
+    .replace('{userId}', SAMPLE_USER_ID)
+    .replace('{teamId}', SAMPLE_TEAM_ID)}`;
 }
 
 describe('chassis client route coverage (contract drift guard)', () => {

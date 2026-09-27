@@ -162,7 +162,7 @@ describe('the chassis with an empty tool', () => {
 
     // /mcp lists exactly the generic tools: the chassis registers `<toolPrefix>whoami`
     // itself, third, so the name its other tools point at exists for every tool,
-    // then the nine project tools (projects are a chassis concept, so a tool
+    // then the eleven project tools and the two team reads (projects are a chassis concept, so a tool
     // that declares none of its own still serves them).
     const rpc = (body: unknown) =>
       booted.app.request('/mcp', {
@@ -189,7 +189,11 @@ describe('the chassis with an empty tool', () => {
       'things_archive_project',
       'things_add_project_member',
       'things_set_project_member_role',
-      'things_remove_project_member'
+      'things_remove_project_member',
+      'things_set_project_team_role',
+      'things_remove_project_team',
+      'things_list_teams',
+      'things_list_team_members'
     ]);
 
     // …and it answers `/me`, as the key it was called with.

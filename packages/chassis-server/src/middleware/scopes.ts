@@ -51,6 +51,7 @@ const PROJECT_RE = new RegExp(`^/api/v1/projects/${PROJECT_ID}$`);
 const PROJECT_ARCHIVE_RE = new RegExp(`^/api/v1/projects/${PROJECT_ID}/(?:archive|unarchive)$`);
 const PROJECT_MEMBERS_RE = new RegExp(`^/api/v1/projects/${PROJECT_ID}/members$`);
 const PROJECT_MEMBER_RE = new RegExp(`^/api/v1/projects/${PROJECT_ID}/members/[^/]+$`);
+const PROJECT_TEAM_RE = new RegExp(`^/api/v1/projects/${PROJECT_ID}/teams/${PROJECT_ID}$`);
 
 function projectAccess(path: string, method: string): 'read' | 'write' | null {
   if (path === '/api/v1/projects') return method === 'GET' ? 'read' : method === 'POST' ? 'write' : null;
@@ -58,6 +59,29 @@ function projectAccess(path: string, method: string): 'read' | 'write' | null {
   if (PROJECT_ARCHIVE_RE.test(path)) return method === 'POST' ? 'write' : null;
   if (PROJECT_MEMBERS_RE.test(path)) return method === 'GET' ? 'read' : method === 'POST' ? 'write' : null;
   if (PROJECT_MEMBER_RE.test(path)) return method === 'PATCH' || method === 'DELETE' ? 'write' : null;
+  if (PROJECT_TEAM_RE.test(path)) return method === 'PATCH' || method === 'DELETE' ? 'write' : null;
+  return null;
+}
+
+/**
+ * The chassis team routes a machine principal may reach (PRDCT-2813), EXACT
+ * shapes only, the projects' pattern: the reads under the read scope, the
+ * writes under the write scope, the handler's owner-or-admin check staying
+ * the authority (and the hub-managed gate the refusal in a hub-origin
+ * workspace). A person is named by their user id in the path, never by a
+ * membership id.
+ */
+const TEAM_RE = new RegExp(`^/api/v1/teams/${PROJECT_ID}$`);
+const TEAM_MEMBERS_RE = new RegExp(`^/api/v1/teams/${PROJECT_ID}/members$`);
+const TEAM_MEMBER_RE = new RegExp(`^/api/v1/teams/${PROJECT_ID}/members/[^/]+$`);
+
+function teamAccess(path: string, method: string): 'read' | 'write' | null {
+  if (path === '/api/v1/teams') return method === 'GET' ? 'read' : method === 'POST' ? 'write' : null;
+  if (TEAM_RE.test(path)) {
+    return method === 'GET' ? 'read' : method === 'PATCH' || method === 'DELETE' ? 'write' : null;
+  }
+  if (TEAM_MEMBERS_RE.test(path)) return method === 'GET' ? 'read' : method === 'POST' ? 'write' : null;
+  if (TEAM_MEMBER_RE.test(path)) return method === 'DELETE' ? 'write' : null;
   return null;
 }
 
@@ -97,6 +121,9 @@ export function createScopeAllowlist<S extends string>({
     // Projects: each route listed by its exact shape and method (above).
     const project = projectAccess(path, method);
     if (project !== null) return project === 'read' ? read : write;
+    // Teams: the same discipline (above).
+    const team = teamAccess(path, method);
+    if (team !== null) return team === 'read' ? read : write;
     for (const rule of rules) {
       const needed = rule(path, method, isRead);
       if (needed !== null) return needed;

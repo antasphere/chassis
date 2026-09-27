@@ -41,20 +41,21 @@ import { apiError } from '../api/errors.js';
  * handler runs its own hub-origin check on the invitation's workspace), and
  * every other gated route 401s in its requireAuth/requireRole gate.
  */
-export function hubManagedMembershipGate(manageUrl: string): MiddlewareHandler {
+export function hubManagedMembershipGate(
+  manageUrl: string,
+  message = 'Membership of this workspace is managed at the Antasphere hub — invite, remove, and change roles there'
+): MiddlewareHandler {
   return async (c, next) => {
     const method = c.req.method;
     if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return next();
     const principal = c.get('principal');
     if (principal?.accountRef) {
-      return apiError(
-        c,
-        403,
-        'hub_managed',
-        'Membership of this workspace is managed at the Antasphere hub — invite, remove, and change roles there',
-        { manageUrl }
-      );
+      return apiError(c, 403, 'hub_managed', message, { manageUrl });
     }
     return next();
   };
 }
+
+/** The teams' sentence for the same gate (PRDCT-2813): a projected team is shaped on the account site. */
+export const HUB_MANAGED_TEAMS_MESSAGE =
+  'Teams of this workspace are managed at the Antasphere hub — create, rename, and seat people there';

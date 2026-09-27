@@ -11,6 +11,7 @@ import type {
 } from '@antasphere/chassis-contract';
 import { CliApiRefusal, CliUsageError, drainPages, printJson, table, type CliIo } from '../context.js';
 import type { CliKit } from '../kit.js';
+import { resolveTeam, teamName } from './teams.js';
 
 /**
  * The project commands: a project is a subgroup of the workspace with its own
@@ -77,7 +78,8 @@ export function memberRef(value: string): { email: string } | { userId: string }
  * `role` / `remove` (the lookup is inside the project). Same code, two
  * different things to do about it.
  */
-export type ProjectLookup = 'project' | 'workspace-member' | 'project-member';
+export type ProjectLookup =
+  'project' | 'workspace-member' | 'project-member' | 'workspace-team' | 'project-team';
 
 /**
  * The role an `insufficient_project_role` answer names (`This needs the
@@ -108,7 +110,13 @@ export function explainProjectRefusal(e: PlatformApiError, what: ProjectLookup):
     case 'project_not_archived':
       return 'This project is not archived, so there is nothing to unarchive.';
     case 'already_member':
-      return 'That person is already a member of this project. Change their role with `members role` instead.';
+      return what === 'workspace-team'
+        ? 'That team is already a member of this project. Change its role with `members role --team` instead.'
+        : 'That person is already a member of this project. Change their role with `members role` instead.';
+    case 'team_not_found':
+      return what === 'project-team'
+        ? 'That team is not a member of this project.'
+        : 'No team of this workspace matches — check the slug or id.';
     case 'member_not_found':
       return what === 'workspace-member'
         ? 'No active member of this workspace matches — check the user id or email. Only a member of the workspace can join a project.'
@@ -148,9 +156,15 @@ function projectLines(p: Project): string {
   );
 }
 
-/** One member, as the human sees it. */
+/** `a manager`, `an editor`: the article a role takes. */
+const article = (role: string) => (/^[aeiou]/i.test(role) ? 'an' : 'a');
+
+/** One member, a person or a team, as the human sees it. */
 function memberLine(m: ProjectMember): string {
-  return `${m.name} <${m.email}> is a ${m.role} of this project (user ${m.userId}).\n`;
+  if (m.kind === 'team') {
+    return `team ${teamName(m)} (${m.slug}) is ${article(m.role)} ${m.role} of this project for its ${m.membersCount} member${m.membersCount === 1 ? '' : 's'} (team ${m.teamId}).\n`;
+  }
+  return `${m.name} <${m.email}> is ${article(m.role)} ${m.role} of this project (user ${m.userId}).\n`;
 }
 
 export function registerProjectCommands<TClient extends ChassisClient<string>>(
@@ -341,7 +355,21 @@ export function registerProjectCommands<TClient extends ChassisClient<string>>(
           io.out.write('No members.\n');
           return;
         }
-        io.out.write(table(rows.map((m) => [m.userId, m.role, m.email, m.name])));
+        io.out.write(
+          table(
+            rows.map((m) =>
+              m.kind === 'team'
+                ? [
+                    'team',
+                    m.slug,
+                    m.role,
+                    `${m.membersCount} member${m.membersCount === 1 ? '' : 's'}`,
+                    teamName(m)
+                  ]
+                : ['person', m.userId, m.role, m.email, m.name]
+            )
+          )
+        );
         if (nextCursor) {
           io.out.write(`More available: rerun with --cursor ${nextCursor} or --all\n`);
         }
@@ -349,42 +377,83 @@ export function registerProjectCommands<TClient extends ChassisClient<string>>(
     );
 
   members
-    .command('add <project> <userIdOrEmail>')
-    .description('Add a member of the workspace to the project (manager)')
+    .command('add <project> [userIdOrEmail]')
+    .description('Add a member of the workspace, or one of its teams with --team, to the project (manager)')
     .requiredOption('--role <viewer|editor|manager>', 'the role they get on this project')
-    .action(async (project: string, who: string, opts: { role: string }, cmd: Command) => {
-      const role = parseRole(opts.role);
-      const ctx = resolveContext(cmd, io);
-      await requireApiKey(ctx);
-      const body: ProjectMemberAdd = { ...memberRef(who), role };
-      // `add` looks the person up across the WORKSPACE, so its
-      // `member_not_found` is about the workspace, not about the project.
-      const member = await explained('workspace-member', () => ctx.client.addProjectMember(project, body));
-      if (ctx.json) return printJson(io, member);
-      io.out.write(`Added ${memberLine(member)}`);
-    });
+    .option('--team <team>', 'add this team (a slug or an id) instead of a person: its members hold the role')
+    .action(
+      async (
+        project: string,
+        who: string | undefined,
+        opts: { role: string; team?: string },
+        cmd: Command
+      ) => {
+        if ((who === undefined) === (opts.team === undefined)) {
+          throw new CliUsageError('Name exactly one: a person (<userIdOrEmail>) or a team (--team <team>).');
+        }
+        const role = parseRole(opts.role);
+        const ctx = resolveContext(cmd, io);
+        await requireApiKey(ctx);
+        if (opts.team !== undefined) {
+          const team = await resolveTeam(ctx.client, opts.team);
+          const body: ProjectMemberAdd = { teamId: team.id, role };
+          const entry = await explained('workspace-team', () => ctx.client.addProjectMember(project, body));
+          if (ctx.json) return printJson(io, entry);
+          io.out.write(`Added ${memberLine(entry)}`);
+          return;
+        }
+        const body: ProjectMemberAdd = { ...memberRef(who!), role };
+        // `add` looks the person up across the WORKSPACE, so its
+        // `member_not_found` is about the workspace, not about the project.
+        const member = await explained('workspace-member', () => ctx.client.addProjectMember(project, body));
+        if (ctx.json) return printJson(io, member);
+        io.out.write(`Added ${memberLine(member)}`);
+      }
+    );
 
   members
-    .command('role <project> <userId> <role>')
-    .description("Change a member's role on the project (manager)")
-    .action(async (project: string, userId: string, role: string, _opts, cmd: Command) => {
+    .command('role <project> <userIdOrTeam> <role>')
+    .description("Change a member's role on the project, or a team's with --team (manager)")
+    .option('--team', 'the second argument names a team (a slug or an id), not a person', false)
+    .action(async (project: string, target: string, role: string, opts: { team: boolean }, cmd: Command) => {
       const parsed = parseRole(role);
       const ctx = resolveContext(cmd, io);
       await requireApiKey(ctx);
+      if (opts.team) {
+        const team = await resolveTeam(ctx.client, target);
+        const entry = await explained('project-team', () =>
+          ctx.client.setProjectTeamRole(project, team.id, parsed)
+        );
+        if (ctx.json) return printJson(io, entry);
+        io.out.write(`Now ${memberLine(entry)}`);
+        return;
+      }
       const member = await explained('project-member', () =>
-        ctx.client.setProjectMemberRole(project, userId, parsed)
+        ctx.client.setProjectMemberRole(project, target, parsed)
       );
       if (ctx.json) return printJson(io, member);
       io.out.write(`Now ${memberLine(member)}`);
     });
 
   members
-    .command('remove <project> <userId>')
-    .description('Remove a member from the project (a manager removes anyone; anyone removes themselves)')
-    .action(async (project: string, userId: string, _opts, cmd: Command) => {
+    .command('remove <project> <userIdOrTeam>')
+    .description(
+      'Remove a member from the project, or a team with --team (a manager removes anyone; anyone removes themselves)'
+    )
+    .option('--team', 'the second argument names a team (a slug or an id), not a person', false)
+    .action(async (project: string, target: string, opts: { team: boolean }, cmd: Command) => {
       const ctx = resolveContext(cmd, io);
       await requireApiKey(ctx);
-      const member = await explained('project-member', () => ctx.client.removeProjectMember(project, userId));
+      if (opts.team) {
+        const team = await resolveTeam(ctx.client, target);
+        const entry = await explained('project-team', () => ctx.client.removeProjectTeam(project, team.id));
+        if (ctx.json) return printJson(io, entry);
+        io.out.write(
+          `Removed team ${teamName(entry)} (${entry.slug}) from this project. Its people keep their own entries.\n`
+        );
+        return;
+      }
+      const member = await explained('project-member', () => ctx.client.removeProjectMember(project, target));
       if (ctx.json) return printJson(io, member);
       io.out.write(`Removed ${member.name} <${member.email}> from this project.\n`);
     });

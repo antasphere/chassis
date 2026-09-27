@@ -1,5 +1,5 @@
 import { Counter } from 'prom-client';
-import { and, eq, inArray, isNotNull, ne, notInArray } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, ne, notInArray, sql } from 'drizzle-orm';
 import {
   projectMembers,
   workspaceMembers,
@@ -9,7 +9,7 @@ import {
 } from '@antasphere/chassis-db';
 import type { AuditService } from '../audit/service.js';
 import type { Logger } from '../logger.js';
-import { projectOrgMembership, projectTeamSeats } from './hub-projection.js';
+import { projectOrgMembership, projectOrgTeams, projectTeamSeats } from './hub-projection.js';
 import type { HubDeniedOrg, HubUserClient, LoginAccessToken } from './hub-user-client.js';
 
 /**
@@ -55,6 +55,12 @@ export interface HubFederationDials {
   accessSkewMs: number;
   /** Watchdog cutting a wedged refresh's dedicated lock connection (hub-grant.ts). */
   lockWatchdogMs: number;
+  /**
+   * How old an organization's whole team list (`GET /teams`, PRDCT-2813) may
+   * grow before a pass reads it again, per org per replica. A failed read is
+   * re-tried at most once per `retryMs`.
+   */
+  orgTeamsTtlMs: number;
 }
 
 export const DEFAULT_FEDERATION_DIALS: HubFederationDials = {
@@ -66,7 +72,8 @@ export const DEFAULT_FEDERATION_DIALS: HubFederationDials = {
   accessSkewMs: 60_000,
   // Must cover probe + presentation under the refresh lock (hub-grant.ts
   // clamps it up if not): 5 s + 5 s + 2 s headroom.
-  lockWatchdogMs: 12_000
+  lockWatchdogMs: 12_000,
+  orgTeamsTtlMs: 5 * 60_000
 };
 
 /**
@@ -107,6 +114,17 @@ interface CacheEntry {
   denied: HubDeniedOrg[];
 }
 
+/** When an organization's whole team list was last read, per replica. */
+interface OrgTeamsEntry {
+  /** The last successful read (0 = never). */
+  refreshedAt: number;
+  /** The last failed read (0 = none): the retry throttle and the once-per-window log. */
+  lastAttemptAt: number;
+}
+
+/** What one team-list refresh ended on (the metric's `outcome` label). */
+type OrgTeamsRefreshOutcome = 'ok' | 'inconclusive' | 'grant_dead' | 'no_link' | 'error';
+
 /** Bound the cache — a user-id flood must never balloon memory. */
 const MAX_CACHE_ENTRIES = 10_000;
 
@@ -124,12 +142,15 @@ export class HubOrgReconciler {
   /** local userId → pass freshness. */
   private readonly cache = new Map<string, CacheEntry>();
   private readonly inFlight = new Map<string, Promise<ReconcilePassOutcome>>();
+  /** hub org id → its whole team list's freshness (bounded like the user cache). */
+  private readonly orgTeams = new Map<string, OrgTeamsEntry>();
   private readonly now: () => number;
   readonly dials: HubFederationDials;
 
   /** Registered into the Prometheus registry by boot (cloud only). */
   readonly promMetrics: Counter[];
   private readonly passes: Counter;
+  private readonly orgTeamsRefreshes: Counter;
 
   constructor(private readonly deps: HubOrgReconcilerDeps) {
     this.now = deps.now ?? Date.now;
@@ -142,7 +163,13 @@ export class HubOrgReconciler {
       labelNames: ['outcome'] as const,
       registers: []
     });
-    this.promMetrics = [this.passes];
+    this.orgTeamsRefreshes = new Counter({
+      name: 'hub_org_teams_refresh_total',
+      help: 'Reads of a hub organization’s whole team list by outcome',
+      labelNames: ['outcome'] as const,
+      registers: []
+    });
+    this.promMetrics = [this.passes, this.orgTeamsRefreshes];
   }
 
   /**
@@ -351,6 +378,8 @@ export class HubOrgReconciler {
                 teams: org.teams
               });
             });
+            // Then the org's whole team list, when it is due (never fails the pass).
+            await this.refreshOrgTeams(localUserId, org.id, projected.workspaceId, login !== undefined);
           }
           // Org-level suspension is LOCALLY MATERIALIZED truth: the gate
           // (and guests' requests — the accepted staleness bound) read this
@@ -430,6 +459,76 @@ export class HubOrgReconciler {
         'hub org reconcile pass failed — serving local state'
       );
       return 'error';
+    }
+  }
+
+  /**
+   * Read the organization's WHOLE team list as this person and project it
+   * (PRDCT-2813), when the last read is older than `orgTeamsTtlMs` (or never
+   * happened) and no failed read happened within `retryMs`. The LOGIN pass
+   * reads it whatever the window says (`force`): a login is the freshest
+   * signal there is, and Romain's rule is "at login, then every five minutes". A refinement
+   * of a pass whose org list already succeeded: it never throws and never
+   * fails the pass; a failed read keeps the previous list and is logged once
+   * per throttle window.
+   *
+   * No lock: two replicas (or two passes) may both refresh the same org. The
+   * upsert is idempotent and the delete is by membership of the list each
+   * one read, so the last writer leaves the hub's list, whichever it is.
+   */
+  private async refreshOrgTeams(
+    localUserId: string,
+    hubOrgId: string,
+    workspaceId: string,
+    /** A login: the freshest signal there is, read whatever the window says (the login pass's own rule). */
+    force = false
+  ): Promise<void> {
+    const now = this.now();
+    const entry = this.orgTeams.get(hubOrgId);
+    if (entry) {
+      // A login skips the window, never the failure throttle: a hub whose
+      // team list hangs must not cost every sign-in one timeout per org
+      // (verifier round 2).
+      if (!force && entry.refreshedAt > 0 && now - entry.refreshedAt < this.dials.orgTeamsTtlMs) return;
+      if (entry.lastAttemptAt > entry.refreshedAt && now - entry.lastAttemptAt < this.dials.retryMs) return;
+    }
+    let outcome: OrgTeamsRefreshOutcome;
+    try {
+      // Stamped BEFORE the read, on the DATABASE's clock (the one the rows'
+      // `created_at` is written from, whatever the app host's says; never the
+      // test seam): a team projected here while the hub answered is newer
+      // than the list and is not deleted by it.
+      const [clock] = (await this.deps.db.execute(sql`SELECT now() AS now`)).rows as Array<{
+        now: Date | string;
+      }>;
+      const readAt = new Date(clock!.now);
+      const result = await this.deps.client.orgTeams(localUserId, hubOrgId);
+      if (result.kind === 'ok') {
+        await this.deps.db.transaction(async (tx) => {
+          await projectOrgTeams(tx, { workspaceId, teams: result.teams, complete: result.complete, readAt });
+        });
+        outcome = 'ok';
+      } else {
+        outcome = result.kind;
+      }
+    } catch (err) {
+      this.deps.logger.warn({ err, hubOrgId }, 'hub reconcile: projecting the org’s team list failed');
+      outcome = 'error';
+    }
+    this.orgTeamsRefreshes.inc({ outcome });
+    const at = this.now();
+    pruneOversized(this.orgTeams, (e) => at - e.refreshedAt >= this.dials.orgTeamsTtlMs);
+    const prev = this.orgTeams.get(hubOrgId);
+    if (outcome === 'ok') {
+      this.orgTeams.set(hubOrgId, { refreshedAt: at, lastAttemptAt: prev?.lastAttemptAt ?? 0 });
+      return;
+    }
+    this.orgTeams.set(hubOrgId, { refreshedAt: prev?.refreshedAt ?? 0, lastAttemptAt: at });
+    if (outcome !== 'error') {
+      this.deps.logger.warn(
+        { hubOrgId, outcome },
+        'hub reconcile: the org’s team list could not be read — keeping the previous one'
+      );
     }
   }
 

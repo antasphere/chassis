@@ -207,6 +207,9 @@ describe('GET /workspace/export', () => {
       'api-keys.json',
       'projects.json',
       'project_members.json',
+      'teams.json',
+      'team_members.json',
+      'project_teams.json',
       'audit-log.ndjson',
       'files.json',
       'skipped-blobs.json'

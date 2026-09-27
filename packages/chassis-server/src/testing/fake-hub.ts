@@ -36,6 +36,10 @@ import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
  *    unknown / rotated-out / torn-down → `active:false`, and — the property
  *    the grant service's probe relies on — introspection is READ-ONLY: it
  *    never rotates and never tears a family down.
+ *  - `GET /api/v1/teams` (PRDCT-2813): the org's whole team list for any
+ *    member of the org `X-Workspace-Id` names (`setOrgTeams`, else the
+ *    union of the members' own teams), paged; `teamsMode` adds `http404`
+ *    (an older hub without the route), `teamsRequests` logs each read.
  *  - failure injection per surface: `orgsMode`/`tokenMode` ∈ ok | http500 |
  *    network (+ token-only: invalid_grant | invalid_client | hang |
  *    commit_then_hang — the latter ROTATES, then never answers: the
@@ -166,6 +170,14 @@ export class FakeHub {
 
   /** sub → orgId → entry: the caller-scoped truth GET /orgs serves. */
   private readonly userOrgs = new Map<string, Map<string, HubOrgEntry>>();
+  /**
+   * orgId → the organization's WHOLE team list (what GET /teams serves,
+   * PRDCT-2813). An org with no entry here serves the union of the teams its
+   * members' `GET /orgs` entries carry (the real hub's list always holds
+   * every team a member sits in), so a suite that seats teams through
+   * `setUserOrg` alone never sees them swept by the team-list read.
+   */
+  private readonly orgTeamRegistry = new Map<string, Array<{ id: string; slug: string; name: string }>>();
   /** sub → the orgs that do NOT open the tool to them (GET /orgs' top-level `denied`). */
   private readonly userDenied = new Map<string, Array<{ id: string; name: string }>>();
   /** Every JWT access token this fake minted (bearer lookup for /api/v1). */
@@ -178,8 +190,19 @@ export class FakeHub {
   // ── Failure injection ─────────────────────────────────────────────────
   /** GET /api/v1/orgs behavior. */
   orgsMode: 'ok' | 'http500' | 'network' = 'ok';
+  /** GET /api/v1/teams behavior (`http404` = an older hub without the route). */
+  teamsMode: 'ok' | 'http500' | 'network' | 'http404' = 'ok';
   /** Hold every /orgs answer this long (single-flight/race tests). */
   orgsDelayMs = 0;
+  /** Hold every GET /api/v1/teams answer this long (the stale-delete race). */
+  teamsDelayMs = 0;
+  /**
+   * The real hub's answer when the cursor's team was deleted between two page
+   * reads: an unknown keyset cursor answers an EMPTY page with no cursor. When
+   * true, every GET /api/v1/teams carrying a `cursor` answers exactly that;
+   * the first page is unaffected.
+   */
+  teamsCursorLost = false;
   /**
    * POST /api/v1/orgs behavior (the as-the-user org creation, PRDCT-2443).
    * `limit` = the hub's per-user cap (403 org_limit_reached, the real hub's
@@ -208,6 +231,8 @@ export class FakeHub {
   /** Lifetime of newly minted access tokens (seconds). */
   accessTokenTtlSeconds = 900;
 
+  /** Every GET /api/v1/teams request: the presented Authorization header and the org it named. */
+  readonly teamsRequests: Array<{ auth: string | null; orgId: string | null }> = [];
   /** Every /api/v1/orgs request: the presented Authorization header. */
   readonly orgsRequests: Array<{ auth: string | null }> = [];
   /** Every refresh-grant presentation (single-flight/rotation pins). */
@@ -362,6 +387,16 @@ export class FakeHub {
     this.userOrgs.delete(sub);
   }
 
+  /** The organization's whole team list, as GET /teams serves it. */
+  setOrgTeams(orgId: string, teams: Array<{ id: string; slug: string; name: string }>): void {
+    this.orgTeamRegistry.set(orgId, teams);
+  }
+
+  /** Back to the default: the union of the members' own teams. */
+  clearOrgTeams(orgId: string): void {
+    this.orgTeamRegistry.delete(orgId);
+  }
+
   /** The orgs GET /orgs names in `denied` for this sub (default none). */
   setUserDenied(sub: string, denied: Array<{ id: string; name: string }>): void {
     this.userDenied.set(sub, denied);
@@ -505,6 +540,9 @@ export class FakeHub {
     }
     if (req.method === 'GET' && url.pathname === '/api/v1/orgs') {
       return this.handleOrgs(req, res);
+    }
+    if (req.method === 'GET' && url.pathname === '/api/v1/teams') {
+      return this.handleTeams(req, res, url);
     }
     if (req.method === 'POST' && url.pathname === '/api/v1/orgs') {
       return this.handleOrgCreate(req, res);
@@ -865,6 +903,58 @@ export class FakeHub {
       })
     );
     return sendJson(res, 200, { orgs, denied: this.userDenied.get(record.sub) ?? [] });
+  }
+
+  // ── GET /api/v1/teams: the organization's whole team list ─────────────
+  // Mirrors the hub's api/teams.ts: the org is the one `X-Workspace-Id`
+  // names, any member of it reads the list, paged by `limit` / `cursor`.
+  private async handleTeams(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    const header = req.headers['x-workspace-id'];
+    const orgId = (Array.isArray(header) ? header[0] : header) ?? null;
+    this.teamsRequests.push({ auth: req.headers.authorization ?? null, orgId });
+    if (this.teamsDelayMs > 0) await new Promise((r) => setTimeout(r, this.teamsDelayMs));
+    if (this.teamsMode === 'network') {
+      req.destroy();
+      return;
+    }
+    if (this.teamsMode === 'http500') return sendJson(res, 500, { error: { code: 'internal' } });
+    if (this.teamsMode === 'http404') return sendJson(res, 404, { error: 'not_found' });
+    const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? '')?.[1] ?? null;
+    const record = bearer ? this.accessTokens.get(bearer) : undefined;
+    if (!record || record.expMs <= Date.now() || !record.aud.includes(this.apiResource)) {
+      return sendJson(res, 401, { error: { code: 'invalid_token', message: 'Unauthorized' } });
+    }
+    if (!orgId || !this.userOrgs.get(record.sub)?.has(orgId)) {
+      return sendJson(res, 403, { error: { code: 'workspace_mismatch' } });
+    }
+    let all = this.orgTeamRegistry.get(orgId);
+    if (!all) {
+      const union = new Map<string, { id: string; slug: string; name: string }>();
+      for (const orgs of this.userOrgs.values()) {
+        for (const team of orgs.get(orgId)?.teams ?? []) if (!union.has(team.id)) union.set(team.id, team);
+      }
+      all = [...union.values()];
+    }
+    if (this.teamsCursorLost && url.searchParams.has('cursor')) {
+      return sendJson(res, 200, { teams: [], nextCursor: null });
+    }
+    const rawLimit = Number(url.searchParams.get('limit') ?? 50);
+    const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 100) : 50;
+    const start = Number(url.searchParams.get('cursor') ?? 0) || 0;
+    const page = all.slice(start, start + limit);
+    const stamp = new Date(0).toISOString();
+    return sendJson(res, 200, {
+      teams: page.map((team) => ({
+        id: team.id,
+        slug: team.slug,
+        name: team.name,
+        membersCount: 0,
+        isMember: false,
+        createdAt: stamp,
+        updatedAt: stamp
+      })),
+      nextCursor: start + limit < all.length ? String(start + limit) : null
+    });
   }
 
   // ── POST /api/v1/orgs: create an org AS THE BEARER ────────────────────

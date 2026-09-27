@@ -7,6 +7,7 @@ import { readSecretFromStdin } from './stdin.js';
 import { registerAuthCommands } from './commands/auth.js';
 import { registerWorkspaceCommands } from './commands/workspaces.js';
 import { registerProjectCommands } from './commands/projects.js';
+import { registerTeamCommands } from './commands/teams.js';
 import { registerFileCommands } from './commands/files.js';
 import { registerCompletionCommand } from './commands/completion.js';
 
@@ -55,6 +56,8 @@ export function createProgram<TClient extends ChassisClient<string>>(
     registerWorkspaceCommands(kit, program, io);
     // The subgroups of the workspace: projects *, projects members *.
     registerProjectCommands(kit, program, io);
+    // The named groups of the workspace's people: teams *.
+    registerTeamCommands(kit, program, io);
     // The tool's own groups, where they have always sat in `--help`.
     registerTool(program, io);
     // Platform substrate (template heritage): instance, export, files *.

@@ -11,9 +11,12 @@ import {
   invitations,
   projectMembers,
   projects,
+  projectTeams,
   user as userTable,
   workspaceMembers,
   workspaces,
+  workspaceTeamMembers,
+  workspaceTeams,
   type Db
 } from '@antasphere/chassis-db';
 import type { Env } from '../env.js';
@@ -76,6 +79,9 @@ export const RESERVED_EXPORT_ENTRY_NAMES = [
   'api-keys',
   'projects',
   'project_members',
+  'teams',
+  'team_members',
+  'project_teams',
   'audit-log',
   'files',
   'skipped-blobs'
@@ -342,6 +348,55 @@ export function registerExportRoutes(api: OpenAPIHono, deps: ExportRouteDeps): v
         .where(eq(projects.workspaceId, workspaceId))
         .orderBy(asc(projectMembers.createdAt), asc(projectMembers.id));
       zip.addBuffer(jsonBuffer(projectMemberRows), 'project_members.json');
+
+      // The teams (PRDCT-2813): the tool's own and the hub's projections
+      // alike (`hubTeamId` tells them apart), their seats, and their places
+      // on projects (PRDCT-2794). The same three tables on both editions.
+      const teamRows = await db
+        .select({
+          id: workspaceTeams.id,
+          hubTeamId: workspaceTeams.hubTeamId,
+          slug: workspaceTeams.slug,
+          name: workspaceTeams.name,
+          createdBy: workspaceTeams.createdBy,
+          createdAt: workspaceTeams.createdAt,
+          updatedAt: workspaceTeams.updatedAt
+        })
+        .from(workspaceTeams)
+        .where(eq(workspaceTeams.workspaceId, workspaceId))
+        .orderBy(asc(workspaceTeams.createdAt), asc(workspaceTeams.id));
+      zip.addBuffer(jsonBuffer(teamRows), 'teams.json');
+
+      const teamMemberRows = await db
+        .select({
+          id: workspaceTeamMembers.id,
+          teamId: workspaceTeamMembers.teamId,
+          memberId: workspaceTeamMembers.memberId,
+          userId: workspaceMembers.userId,
+          addedBy: workspaceTeamMembers.addedBy,
+          createdAt: workspaceTeamMembers.createdAt
+        })
+        .from(workspaceTeamMembers)
+        .innerJoin(workspaceTeams, eq(workspaceTeamMembers.teamId, workspaceTeams.id))
+        .innerJoin(workspaceMembers, eq(workspaceTeamMembers.memberId, workspaceMembers.id))
+        .where(eq(workspaceTeams.workspaceId, workspaceId))
+        .orderBy(asc(workspaceTeamMembers.createdAt), asc(workspaceTeamMembers.id));
+      zip.addBuffer(jsonBuffer(teamMemberRows), 'team_members.json');
+
+      const projectTeamRows = await db
+        .select({
+          id: projectTeams.id,
+          projectId: projectTeams.projectId,
+          teamId: projectTeams.teamId,
+          role: projectTeams.role,
+          addedBy: projectTeams.addedBy,
+          createdAt: projectTeams.createdAt
+        })
+        .from(projectTeams)
+        .innerJoin(projects, eq(projectTeams.projectId, projects.id))
+        .where(eq(projects.workspaceId, workspaceId))
+        .orderBy(asc(projectTeams.createdAt), asc(projectTeams.id));
+      zip.addBuffer(jsonBuffer(projectTeamRows), 'project_teams.json');
 
       // 3. Audit log as NDJSON, keyset-batched (this table is unbounded).
       zip.addReadStream(Readable.from(auditNdjson(db, workspaceId)), 'audit-log.ndjson');

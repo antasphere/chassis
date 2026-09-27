@@ -1,4 +1,4 @@
-import { and, eq, inArray, notInArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, lt, notInArray, sql } from 'drizzle-orm';
 import {
   workspaceMembers,
   workspaceTeamMembers,
@@ -176,4 +176,76 @@ export async function projectTeamSeats(db: DbConn, projection: TeamSeatsProjecti
         ...(seatTeamIds.length > 0 ? [notInArray(workspaceTeamMembers.teamId, seatTeamIds)] : [])
       )
     );
+}
+
+/**
+ * The organization's teams in ONE projected workspace, as the hub's `GET
+ * /teams` lists them (PRDCT-2813). This is the organization's DEFINITIVE
+ * list as one member reads it: every team of the org, whether anyone who
+ * signed in here sits in it or not, so a team can be added to a project
+ * before any of its members arrived. The rosters stay the seats of the
+ * people who signed in (`projectTeamSeats`); this touches no seat itself.
+ *
+ * Upserts every listed team by its hub id (slug and name follow the hub,
+ * `updated_at` moves on drift only, never across organizations: the same
+ * rule as `projectTeamSeats`), then, when `complete`, DELETES this
+ * workspace's projected teams (`hub_team_id IS NOT NULL`) the list does not
+ * name: a team deleted at the hub goes, and the foreign keys' cascade takes
+ * its seats and its project entries with it. A local team (`hub_team_id IS
+ * NULL`) is never touched. An incomplete list (the drain's page cap) only
+ * upserts.
+ *
+ * Run inside one transaction by the caller. Throws raw.
+ */
+export interface OrgTeamsProjection {
+  /** The projected workspace (from `projectOrgMembership`). */
+  workspaceId: string;
+  teams: ReadonlyArray<{ id: string; slug: string; name: string }>;
+  /** False when the list is a prefix: nothing is deleted then. Default true. */
+  complete?: boolean | undefined;
+  /**
+   * When the read of the list BEGAN. A projected team created here after that
+   * moment (another replica's pass, another person's seat) is not in this
+   * list because it is newer than the read, not because the hub dropped it:
+   * the delete leaves it alone (verifier round 1, F5). Default: now, which
+   * deletes nothing newer than the call.
+   */
+  readAt?: Date | undefined;
+}
+
+export async function projectOrgTeams(db: DbConn, projection: OrgTeamsProjection): Promise<void> {
+  const { workspaceId, teams } = projection;
+  if (teams.length > 0) {
+    await db
+      .insert(workspaceTeams)
+      .values(teams.map((team) => ({ workspaceId, hubTeamId: team.id, slug: team.slug, name: team.name })))
+      .onConflictDoUpdate({
+        target: workspaceTeams.hubTeamId,
+        set: {
+          slug: sql`excluded.slug`,
+          name: sql`excluded.name`,
+          updatedAt: sql`now()`
+        },
+        setWhere: sql`${workspaceTeams.workspaceId} = ${workspaceId}
+          AND (${workspaceTeams.slug} IS DISTINCT FROM excluded.slug
+            OR ${workspaceTeams.name} IS DISTINCT FROM excluded.name)`
+      });
+  }
+  if (projection.complete === false) return;
+  const readAt = projection.readAt ?? new Date();
+  await db.delete(workspaceTeams).where(
+    and(
+      eq(workspaceTeams.workspaceId, workspaceId),
+      isNotNull(workspaceTeams.hubTeamId),
+      lt(workspaceTeams.createdAt, readAt),
+      ...(teams.length > 0
+        ? [
+            notInArray(
+              workspaceTeams.hubTeamId,
+              teams.map((team) => team.id)
+            )
+          ]
+        : [])
+    )
+  );
 }

@@ -11,14 +11,18 @@ import {
   projectMemberRoleRoute,
   projectMembersListRoute,
   projectsListRoute,
+  projectTeamRemoveRoute,
+  projectTeamRoleRoute,
   projectUnarchiveRoute,
   projectUpdateRoute
 } from '@antasphere/chassis-contract/routes';
 import {
   projectMembers,
   projects,
+  projectTeams,
   user as userTable,
   workspaceMembers,
+  workspaceTeams,
   type Db,
   type DbConn
 } from '@antasphere/chassis-db';
@@ -29,7 +33,6 @@ import {
   decodeKeysetCursor,
   encodeKeysetCursor,
   keysetBefore,
-  keysetBeforeValue,
   pageOf
 } from '../pagination.js';
 import {
@@ -43,9 +46,11 @@ import {
  * The project routes. NOT under the hub-managed gate, on purpose: project
  * membership is the tool's own on both editions (the gate is mounted on
  * `/members/*` and `/invitations/*`, and this subtree is neither). Members are
- * picked among the workspace's own ACTIVE non-guest members: no invitation, no
- * claim token and no account is ever minted here, so nothing in this file can
- * diverge from the hub.
+ * picked among the workspace's own ACTIVE non-guest members, and its TEAMS
+ * (PRDCT-2794: a team holds a role like a person, on both editions; on cloud
+ * the team is the hub's projection, on self-hosted the tool's own): no
+ * invitation, no claim token and no account is ever minted here, so nothing
+ * in this file can diverge from the hub.
  *
  * The tiered answer, on every route (the ADR 013 posture):
  *   404  whoever cannot read the project (`projectRole` = null);
@@ -60,6 +65,18 @@ export interface ProjectRouteDeps {
 
 const err = (code: string, message: string) => ({ error: { code, message } });
 const notFound = () => err('not_found', 'Project not found');
+
+/** A Postgres foreign-key violation (SQLSTATE 23503) on the named constraint, down drizzle's `cause` chain. */
+function isForeignKeyViolation(e: unknown, constraint: string): boolean {
+  for (let cur: unknown = e, depth = 0; cur instanceof Error && depth < 10; cur = cur.cause, depth++) {
+    const link = cur as { code?: unknown; constraint?: unknown };
+    if (link.code === '23503') return link.constraint === constraint;
+  }
+  return false;
+}
+
+/** The foreign key a team's place on a project rides on: the one violation that means "the team went". */
+const PROJECT_TEAM_FK = 'project_teams_team_id_workspace_teams_id_fk';
 
 type ProjectWireRow = {
   id: string;
@@ -95,6 +112,7 @@ const memberToWire = (m: {
   addedBy: string | null;
   createdAt: Date;
 }) => ({
+  kind: 'person' as const,
   userId: m.userId,
   email: m.email,
   name: m.name,
@@ -102,6 +120,30 @@ const memberToWire = (m: {
   addedBy: m.addedBy,
   createdAt: m.createdAt.toISOString()
 });
+
+const teamToWire = (t: {
+  teamId: string;
+  slug: string;
+  name: string;
+  membersCount: number;
+  hubTeamId: string | null;
+  role: ProjectRole;
+  addedBy: string | null;
+  createdAt: Date;
+}) => ({
+  kind: 'team' as const,
+  teamId: t.teamId,
+  slug: t.slug,
+  name: t.name,
+  membersCount: Number(t.membersCount),
+  hubTeamId: t.hubTeamId,
+  role: t.role,
+  addedBy: t.addedBy,
+  createdAt: t.createdAt.toISOString()
+});
+
+/** How many people a team seats: the people who hold the project role through it. */
+const TEAM_MEMBERS_COUNT = sql<number>`(SELECT count(*)::int FROM workspace_team_members prj_tmc WHERE prj_tmc.team_id = ${sql.raw('"workspace_teams"."id"')})`;
 
 /** The wire columns of a project, the caller's role and the member count computed in the same read. */
 const projectSelection = (principal: Principal) => ({
@@ -114,7 +156,9 @@ const projectSelection = (principal: Principal) => ({
   createdAt: projects.createdAt,
   updatedAt: projects.updatedAt,
   myRole: projectRoleExpression(principal, PROJECTS_ID),
-  memberCount: sql<number>`(SELECT count(*)::int FROM project_members prj_count WHERE prj_count.project_id = ${PROJECTS_ID})`
+  // People and teams alike: what the members list shows.
+  memberCount: sql<number>`(SELECT count(*)::int FROM project_members prj_count WHERE prj_count.project_id = ${PROJECTS_ID})
+    + (SELECT count(*)::int FROM project_teams prj_tcount WHERE prj_tcount.project_id = ${PROJECTS_ID})`
 });
 
 // The members list pages with the value-carrying cursor (`keysetBeforeValue`):
@@ -132,6 +176,37 @@ const memberSelection = {
   addedBy: projectMembers.addedBy,
   createdAt: projectMembers.createdAt
 };
+
+/** A team's entry on a project, joined to the team; the same cursor columns as a person's. */
+const teamSelection = {
+  id: projectTeams.id,
+  createdAtText: createdAtText(projectTeams.createdAt),
+  teamId: workspaceTeams.id,
+  slug: workspaceTeams.slug,
+  name: workspaceTeams.name,
+  membersCount: TEAM_MEMBERS_COUNT,
+  hubTeamId: workspaceTeams.hubTeamId,
+  role: projectTeams.role,
+  addedBy: projectTeams.addedBy,
+  createdAt: projectTeams.createdAt
+};
+
+/** One row of the members list's union: a person's or a team's entry, the unused columns null. */
+interface MemberUnionRow {
+  kind: 'person' | 'team';
+  id: string;
+  created_at_text: string;
+  created_at: Date;
+  role: ProjectRole;
+  added_by: string | null;
+  user_id: string | null;
+  email: string | null;
+  name: string;
+  team_id: string | null;
+  slug: string | null;
+  members_count: number | null;
+  hub_team_id: string | null;
+}
 
 export function registerProjectRoutes(api: OpenAPIHono, deps: ProjectRouteDeps): void {
   const { db } = deps;
@@ -385,37 +460,69 @@ export function registerProjectRoutes(api: OpenAPIHono, deps: ProjectRouteDeps):
   });
 
   // ── Members ──────────────────────────────────────────────────────────────
+  // People and teams in ONE list, newest first, on one value-carrying cursor
+  // (`created_at`, `id`) that both tables answer: the cursor is applied inside
+  // each branch, so a page is the same page whichever kind the boundary row
+  // is. Raw SQL because a set operation is where drizzle's builder stops.
   api.openapi(projectMembersListRoute, async (c) => {
     const principal = c.get('principal')!;
     const { id } = c.req.valid('param');
     const { cursor, limit } = c.req.valid('query');
     if ((await projectRole(db, principal, id)) === null) return c.json(notFound(), 404);
     const after = decodeKeysetCursor(cursor);
-    const rows = await db
-      .select(memberSelection)
-      .from(projectMembers)
-      .innerJoin(workspaceMembers, eq(projectMembers.memberId, workspaceMembers.id))
-      .innerJoin(userTable, eq(workspaceMembers.userId, userTable.id))
-      .where(
-        and(
-          eq(projectMembers.projectId, id),
-          ...(after
-            ? [
-                keysetBeforeValue({
-                  id: projectMembers.id,
-                  createdAt: projectMembers.createdAt,
-                  cursor: after
-                })
-              ]
-            : [])
-        )
-      )
-      .orderBy(desc(projectMembers.createdAt), desc(projectMembers.id))
-      .limit(limit + 1);
+    const before = (createdAt: string, rowId: string) =>
+      after
+        ? sql`AND (${sql.raw(createdAt)}, ${sql.raw(rowId)}) < (${after.createdAt}::timestamptz, ${after.id}::uuid)`
+        : sql``;
+    const result = await db.execute(sql`
+      SELECT 'person' AS kind, pm.id, pm.created_at::text AS created_at_text, pm.created_at, pm.role, pm.added_by,
+             wm.user_id, u.email, u.name,
+             NULL::uuid AS team_id, NULL::text AS slug, NULL::int AS members_count, NULL::text AS hub_team_id
+        FROM project_members pm
+        JOIN workspace_members wm ON wm.id = pm.member_id
+        JOIN "user" u ON u.id = wm.user_id
+       WHERE pm.project_id = ${id} ${before('pm.created_at', 'pm.id')}
+      UNION ALL
+      SELECT 'team' AS kind, pt.id, pt.created_at::text AS created_at_text, pt.created_at, pt.role, pt.added_by,
+             NULL::text AS user_id, NULL::text AS email, t.name,
+             t.id AS team_id, t.slug,
+             (SELECT count(*)::int FROM workspace_team_members tm WHERE tm.team_id = t.id) AS members_count,
+             t.hub_team_id
+        FROM project_teams pt
+        JOIN workspace_teams t ON t.id = pt.team_id
+       WHERE pt.project_id = ${id} ${before('pt.created_at', 'pt.id')}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ${limit + 1}
+    `);
+    const rows = result.rows as unknown as MemberUnionRow[];
     const page = rows.slice(0, limit);
     const last = rows.length > limit ? page[page.length - 1] : undefined;
+    const members = page.map((row) =>
+      row.kind === 'person'
+        ? memberToWire({
+            userId: row.user_id!,
+            email: row.email!,
+            name: row.name,
+            role: row.role,
+            addedBy: row.added_by,
+            createdAt: new Date(row.created_at)
+          })
+        : teamToWire({
+            teamId: row.team_id!,
+            slug: row.slug!,
+            name: row.name,
+            membersCount: row.members_count ?? 0,
+            hubTeamId: row.hub_team_id,
+            role: row.role,
+            addedBy: row.added_by,
+            createdAt: new Date(row.created_at)
+          })
+    );
     return c.json(
-      { members: page.map(memberToWire), nextCursor: last ? encodeKeysetCursor(last) : null },
+      {
+        members,
+        nextCursor: last ? encodeKeysetCursor({ id: last.id, createdAtText: last.created_at_text }) : null
+      },
       200
     );
   });
@@ -432,12 +539,73 @@ export function registerProjectRoutes(api: OpenAPIHono, deps: ProjectRouteDeps):
     return row;
   }
 
+  /** One team's entry on one project, by the team id, or undefined. */
+  async function findProjectTeam(conn: DbConn, projectId: string, teamId: string) {
+    const [row] = await conn
+      .select(teamSelection)
+      .from(projectTeams)
+      .innerJoin(workspaceTeams, eq(projectTeams.teamId, workspaceTeams.id))
+      .where(and(eq(projectTeams.projectId, projectId), eq(workspaceTeams.id, teamId)))
+      .limit(1);
+    return row;
+  }
+
+  /**
+   * Adds a team of the request's workspace to the project (PRDCT-2794): the
+   * team side of the members POST. A team of another workspace, or none, is
+   * 404 `team_not_found`; a repeat is 409 `already_member`.
+   */
+  async function addTeam(c: Context, id: string, teamId: string, role: ProjectRole): Promise<Response> {
+    const principal = c.get('principal')!;
+    const [team] = await db
+      .select({
+        teamId: workspaceTeams.id,
+        slug: workspaceTeams.slug,
+        name: workspaceTeams.name,
+        membersCount: TEAM_MEMBERS_COUNT,
+        hubTeamId: workspaceTeams.hubTeamId
+      })
+      .from(workspaceTeams)
+      .where(and(eq(workspaceTeams.id, teamId), eq(workspaceTeams.workspaceId, principal.workspaceId)))
+      .limit(1);
+    if (!team) return c.json(err('team_not_found', 'No team of this workspace matches'), 404);
+    let inserted: { createdAt: Date }[] | null;
+    try {
+      inserted = await whileLive(principal, id, (tx) =>
+        tx
+          .insert(projectTeams)
+          .values({ projectId: id, teamId: team.teamId, role, addedBy: principal.userId })
+          .onConflictDoNothing({ target: [projectTeams.projectId, projectTeams.teamId] })
+          .returning({ createdAt: projectTeams.createdAt })
+      );
+    } catch (cause) {
+      // The team went between the read above and the insert (a delete at the
+      // hub's next pass, an admin's): the foreign key says so, and the answer
+      // is the same 404 as a team that never was (verifier round 1, F2).
+      if (isForeignKeyViolation(cause, PROJECT_TEAM_FK)) {
+        return c.json(err('team_not_found', 'No team of this workspace matches'), 404);
+      }
+      throw cause;
+    }
+    if (inserted === null) return c.json(archived(), 409);
+    const [row] = inserted;
+    if (!row) return c.json(err('already_member', 'This team is already a member of the project'), 409);
+    c.set('audit', {
+      action: 'project.team_add',
+      resourceType: 'project',
+      resourceId: id,
+      metadata: { teamId: team.teamId, role }
+    });
+    return c.json(teamToWire({ ...team, role, addedBy: principal.userId, createdAt: row.createdAt }), 201);
+  }
+
   api.openapi(projectMemberAddRoute, async (c) => {
     const principal = c.get('principal')!;
     const { id } = c.req.valid('param');
     const body = c.req.valid('json');
     const gate = await gateMutation(c, id, 'manager');
     if ('response' in gate) return gate.response as never;
+    if (body.teamId !== undefined) return (await addTeam(c, id, body.teamId, body.role)) as never;
 
     // The target comes from THIS workspace's own roster, by user id or by
     // email, and nowhere else: nothing is invited, claimed or minted here.
@@ -544,5 +712,50 @@ export function registerProjectRoutes(api: OpenAPIHono, deps: ProjectRouteDeps):
       metadata: { targetUserId: userId, role: target.role, self }
     });
     return c.json(memberToWire(target), 200);
+  });
+
+  // ── Teams on a project (PRDCT-2794) ──────────────────────────────────────
+  // The same gate and order as a person's entry: 404, 403, 409. A team is
+  // never "itself" (no self-removal branch): a manager acts, or an owner or
+  // admin of the workspace.
+  api.openapi(projectTeamRoleRoute, async (c) => {
+    const principal = c.get('principal')!;
+    const { id, teamId } = c.req.valid('param');
+    const { role } = c.req.valid('json');
+    const gate = await gateMutation(c, id, 'manager');
+    if ('response' in gate) return gate.response as never;
+    const target = await findProjectTeam(db, id, teamId);
+    if (!target) return c.json(err('team_not_found', 'This team is not a member of the project'), 404);
+    const done = await whileLive(principal, id, (tx) =>
+      tx.update(projectTeams).set({ role }).where(eq(projectTeams.id, target.id))
+    );
+    if (done === null) return c.json(archived(), 409);
+    c.set('audit', {
+      action: 'project.team_role',
+      resourceType: 'project',
+      resourceId: id,
+      metadata: { teamId, from: target.role, to: role }
+    });
+    return c.json(teamToWire({ ...target, role }), 200);
+  });
+
+  api.openapi(projectTeamRemoveRoute, async (c) => {
+    const principal = c.get('principal')!;
+    const { id, teamId } = c.req.valid('param');
+    const gate = await gateMutation(c, id, 'manager');
+    if ('response' in gate) return gate.response as never;
+    const target = await findProjectTeam(db, id, teamId);
+    if (!target) return c.json(err('team_not_found', 'This team is not a member of the project'), 404);
+    const done = await whileLive(principal, id, (tx) =>
+      tx.delete(projectTeams).where(eq(projectTeams.id, target.id))
+    );
+    if (done === null) return c.json(archived(), 409);
+    c.set('audit', {
+      action: 'project.team_remove',
+      resourceType: 'project',
+      resourceId: id,
+      metadata: { teamId, role: target.role }
+    });
+    return c.json(teamToWire(target), 200);
   });
 }

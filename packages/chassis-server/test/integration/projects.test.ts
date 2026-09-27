@@ -2,7 +2,15 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import AdmZip from 'adm-zip';
 import { and, eq, sql } from 'drizzle-orm';
-import { auditLog, projectMembers, projects, workspaceMembers } from '@antasphere/chassis-db';
+import {
+  auditLog,
+  projectMembers,
+  projects,
+  projectTeams,
+  workspaceMembers,
+  workspaceTeamMembers,
+  workspaceTeams
+} from '@antasphere/chassis-db';
 import type { Principal } from '@antasphere/chassis-contract';
 import { projectGrantPredicate, projectRole } from '@antasphere/chassis-server/projects';
 import {
@@ -881,6 +889,379 @@ describe('machine principals: each route consciously opened, and nothing else', 
   });
 });
 
+describe('a team is a project member like a person (PRDCT-2794)', () => {
+  // Teams and seats are written straight to the tables: the team routes are
+  // not what this describe pins, the project side of a team is.
+  let teamCounter = 0;
+  async function makeTeam(ws = workspaceId): Promise<{ id: string; slug: string; name: string }> {
+    const slug = `team-${++teamCounter}`;
+    const name = `Team ${teamCounter}`;
+    const [row] = await app.db.db
+      .insert(workspaceTeams)
+      .values({ workspaceId: ws, slug, name, hubTeamId: null })
+      .returning({ id: workspaceTeams.id });
+    return { id: row!.id, slug, name };
+  }
+  const seat = async (teamId: string, who: Actor) =>
+    app.db.db.insert(workspaceTeamMembers).values({ teamId, memberId: who.memberId });
+  const unseat = async (teamId: string, who: Actor) =>
+    app.db.db
+      .delete(workspaceTeamMembers)
+      .where(and(eq(workspaceTeamMembers.teamId, teamId), eq(workspaceTeamMembers.memberId, who.memberId)));
+  const addTeam = (who: Actor | { key: string }, id: string, teamId: string, role: string) =>
+    send('POST', `/projects/${id}/members`, who, { teamId, role });
+  const roleOf = async (who: Actor, id: string) =>
+    (await readJson(await send('GET', `/projects/${id}`, who))).myRole;
+
+  beforeAll(async () => {
+    for (const name of ['tp1', 'tp2', 'tp3', 'seated', 'both']) await addActor(name);
+    await addActor('tguest', { origin: 'guest' });
+  });
+
+  /** A project the manager creates, one team on it at `viewer`, `seated` seated in it (and nobody else). */
+  let seatedProject = '';
+  let seatedTeam = '';
+
+  it('the owner adds a team: 201 with the team’s shape; a repeat, a foreign team and a bad body are refused', async () => {
+    const id = await createProject(actors.manager!, 'Teams: add');
+    const team = await makeTeam();
+    await seat(team.id, actors.tp1!);
+    await seat(team.id, actors.tp2!);
+    const res = await addTeam(actors.owner!, id, team.id, 'viewer');
+    expect(res.status).toBe(201);
+    expect(await readJson(res)).toMatchObject({
+      kind: 'team',
+      teamId: team.id,
+      slug: team.slug,
+      name: team.name,
+      membersCount: 2,
+      hubTeamId: null,
+      role: 'viewer',
+      addedBy: actors.owner!.userId
+    });
+    await expectError(await addTeam(actors.owner!, id, team.id, 'editor'), 409, 'already_member');
+    const foreign = await makeTeam(otherWorkspaceId);
+    await expectError(await addTeam(actors.owner!, id, foreign.id, 'viewer'), 404, 'team_not_found');
+    await expectError(
+      await addTeam(actors.owner!, id, '00000000-0000-4000-8000-0000000000aa', 'viewer'),
+      404,
+      'team_not_found'
+    );
+    const path = `/projects/${id}/members`;
+    await expectError(
+      await send('POST', path, actors.owner!, { email: actors.tp3!.email, teamId: team.id, role: 'viewer' }),
+      400,
+      'validation_error'
+    );
+    await expectError(await send('POST', path, actors.owner!, { role: 'viewer' }), 400, 'validation_error');
+  });
+
+  it('the members list carries people and teams, newest first, paged across the two kinds', async () => {
+    const id = await createProject(actors.manager!, 'Teams: list');
+    const t1 = await makeTeam();
+    const t2 = await makeTeam();
+    // Interleaved, so a page boundary falls between the two kinds.
+    const addPerson = async (who: Actor) =>
+      expect(
+        (
+          await send('POST', `/projects/${id}/members`, actors.manager!, {
+            userId: who.userId,
+            role: 'viewer'
+          })
+        ).status
+      ).toBe(201);
+    await addPerson(actors.tp1!);
+    expect((await addTeam(actors.manager!, id, t1.id, 'viewer')).status).toBe(201);
+    await addPerson(actors.tp2!);
+    expect((await addTeam(actors.manager!, id, t2.id, 'editor')).status).toBe(201);
+    await addPerson(actors.tp3!);
+
+    type Entry = { kind: 'person' | 'team'; userId?: string; teamId?: string; createdAt: string };
+    const seen: Entry[] = [];
+    let cursor: string | null = null;
+    for (let pages = 0; pages < 10; pages++) {
+      const res = await readJson(
+        await send(
+          'GET',
+          `/projects/${id}/members?limit=2${cursor ? `&cursor=${cursor}` : ''}`,
+          actors.manager!
+        )
+      );
+      expect(res.members.length).toBeLessThanOrEqual(2);
+      seen.push(...res.members);
+      cursor = res.nextCursor;
+      if (!cursor) break;
+    }
+    const keyOf = (e: Entry) => (e.kind === 'person' ? `p:${e.userId}` : `t:${e.teamId}`);
+    // The creator's own manager entry, the three people, the two teams: six, none repeated, none skipped.
+    expect(seen.map(keyOf)).toEqual([
+      `p:${actors.tp3!.userId}`,
+      `t:${t2.id}`,
+      `p:${actors.tp2!.userId}`,
+      `t:${t1.id}`,
+      `p:${actors.tp1!.userId}`,
+      `p:${actors.manager!.userId}`
+    ]);
+    const times = seen.map((e) => Date.parse(e.createdAt));
+    expect([...times].sort((a, b) => b - a)).toEqual(times);
+    const team = seen.find((e) => e.kind === 'team' && e.teamId === t2.id);
+    expect(team).toMatchObject({
+      kind: 'team',
+      slug: t2.slug,
+      name: t2.name,
+      role: 'editor',
+      membersCount: 0
+    });
+    expect((await readJson(await send('GET', `/projects/${id}`, actors.manager!))).memberCount).toBe(6);
+  });
+
+  it('a person seated in the team, with no entry of their own, reads the project; a member outside it does not', async () => {
+    seatedProject = await createProject(actors.manager!, 'Teams: seated');
+    seatedTeam = (await makeTeam()).id;
+    await seat(seatedTeam, actors.seated!);
+    expect((await addTeam(actors.manager!, seatedProject, seatedTeam, 'viewer')).status).toBe(201);
+    const res = await send('GET', `/projects/${seatedProject}`, actors.seated!);
+    expect(res.status).toBe(200);
+    expect(await readJson(res)).toMatchObject({ id: seatedProject, myRole: 'viewer' });
+    const listed = (await readJson(await send('GET', '/projects?limit=100', actors.seated!))).projects;
+    expect(listed).toEqual([expect.objectContaining({ id: seatedProject, myRole: 'viewer' })]);
+    await expectError(await send('GET', `/projects/${seatedProject}`, actors.outsider!), 404, 'not_found');
+    await expectError(await send('GET', `/projects/${seatedProject}`, actors.tp3!), 404, 'not_found');
+  });
+
+  it('the ladder through a team: viewer refuses a manager act, manager allows it', async () => {
+    const path = `/projects/${seatedProject}/members`;
+    await expectError(
+      await send('POST', path, actors.seated!, { userId: actors.tp1!.userId, role: 'viewer' }),
+      403,
+      'insufficient_project_role'
+    );
+    const raised = await send('PATCH', `/projects/${seatedProject}/teams/${seatedTeam}`, actors.manager!, {
+      role: 'manager'
+    });
+    expect(raised.status).toBe(200);
+    expect(await readJson(raised)).toMatchObject({ kind: 'team', teamId: seatedTeam, role: 'manager' });
+    expect(await roleOf(actors.seated!, seatedProject)).toBe('manager');
+    expect(
+      (await send('POST', path, actors.seated!, { userId: actors.tp1!.userId, role: 'viewer' })).status
+    ).toBe(201);
+    // Back to viewer for what follows.
+    expect(
+      (
+        await send('PATCH', `/projects/${seatedProject}/teams/${seatedTeam}`, actors.manager!, {
+          role: 'viewer'
+        })
+      ).status
+    ).toBe(200);
+    // A team not on the project is 404 team_not_found on both team routes.
+    const stray = await makeTeam();
+    await expectError(
+      await send('PATCH', `/projects/${seatedProject}/teams/${stray.id}`, actors.manager!, {
+        role: 'editor'
+      }),
+      404,
+      'team_not_found'
+    );
+    await expectError(
+      await send('DELETE', `/projects/${seatedProject}/teams/${stray.id}`, actors.manager!),
+      404,
+      'team_not_found'
+    );
+  });
+
+  it('the effective role is the highest of the person’s own entry and their teams’', async () => {
+    const id = await createProject(actors.manager!, 'Teams: highest');
+    const team = await makeTeam();
+    await seat(team.id, actors.both!);
+    expect(
+      (
+        await send('POST', `/projects/${id}/members`, actors.manager!, {
+          userId: actors.both!.userId,
+          role: 'viewer'
+        })
+      ).status
+    ).toBe(201);
+    expect((await addTeam(actors.manager!, id, team.id, 'manager')).status).toBe(201);
+    expect(await roleOf(actors.both!, id)).toBe('manager');
+    const removed = await send('DELETE', `/projects/${id}/teams/${team.id}`, actors.manager!);
+    expect(removed.status).toBe(200);
+    expect(await readJson(removed)).toMatchObject({
+      kind: 'team',
+      teamId: team.id,
+      slug: team.slug,
+      role: 'manager',
+      membersCount: 1
+    });
+    expect(await roleOf(actors.both!, id)).toBe('viewer');
+    await expectError(
+      await send('DELETE', `/projects/${id}/teams/${team.id}`, actors.manager!),
+      404,
+      'team_not_found'
+    );
+  });
+
+  it('unseating the person ends the read on the next request; seating them again restores it', async () => {
+    await unseat(seatedTeam, actors.seated!);
+    await expectError(await send('GET', `/projects/${seatedProject}`, actors.seated!), 404, 'not_found');
+    expect((await readJson(await send('GET', '/projects', actors.seated!))).projects).toEqual([]);
+    await seat(seatedTeam, actors.seated!);
+    expect(await roleOf(actors.seated!, seatedProject)).toBe('viewer');
+  });
+
+  it('a deactivated membership seated in the team holds nothing', async () => {
+    const seated = actors.seated!;
+    await app.db.db
+      .update(workspaceMembers)
+      .set({ isActive: false })
+      .where(eq(workspaceMembers.id, seated.memberId));
+    try {
+      // The predicate itself, for a principal that still claims the membership.
+      expect(await projectRole(app.db.db, principalOf(seated), seatedProject)).toBeNull();
+      // Over HTTP a deactivated membership resolves no principal in this workspace at all.
+      expect((await send('GET', `/projects/${seatedProject}`, seated)).status).not.toBe(200);
+    } finally {
+      await app.db.db
+        .update(workspaceMembers)
+        .set({ isActive: true })
+        .where(eq(workspaceMembers.id, seated.memberId));
+    }
+    expect(await roleOf(seated, seatedProject)).toBe('viewer');
+  });
+
+  it('a guest seated by force is refused the subtree, and the predicate refuses the row', async () => {
+    const guest = actors.tguest!;
+    await seat(seatedTeam, guest);
+    await expectError(await send('GET', `/projects/${seatedProject}`, guest), 403, 'guest_forbidden');
+    await expectError(await send('GET', '/projects', guest), 403, 'guest_forbidden');
+    expect(await projectRole(app.db.db, principalOf(guest, { origin: 'guest' }), seatedProject)).toBeNull();
+    // Even a principal that wrongly says `local`: the membership row says guest.
+    expect(await projectRole(app.db.db, principalOf(guest), seatedProject)).toBeNull();
+    await unseat(seatedTeam, guest);
+  });
+
+  it('deleting the team takes its place on the project (cascade) and the seated person’s read', async () => {
+    const id = await createProject(actors.manager!, 'Teams: deleted');
+    const team = await makeTeam();
+    await seat(team.id, actors.tp2!);
+    expect((await addTeam(actors.manager!, id, team.id, 'editor')).status).toBe(201);
+    expect(await roleOf(actors.tp2!, id)).toBe('editor');
+    await app.db.db.delete(workspaceTeams).where(eq(workspaceTeams.id, team.id));
+    const rows = await app.db.db.select().from(projectTeams).where(eq(projectTeams.teamId, team.id));
+    expect(rows).toHaveLength(0);
+    await expectError(await send('GET', `/projects/${id}`, actors.tp2!), 404, 'not_found');
+  });
+
+  it('an archived project refuses the three team changes, in the order 404, 403, 409', async () => {
+    const m = actors.manager!;
+    const id = await createProject(m, 'Teams: archived');
+    const onIt = await makeTeam();
+    const other = await makeTeam();
+    expect((await addTeam(m, id, onIt.id, 'viewer')).status).toBe(201);
+    expect(
+      (await send('POST', `/projects/${id}/members`, m, { userId: actors.viewer!.userId, role: 'viewer' }))
+        .status
+    ).toBe(201);
+    expect((await send('POST', `/projects/${id}/archive`, m)).status).toBe(200);
+    const acts = [
+      (who: Actor) => addTeam(who, id, other.id, 'viewer'),
+      (who: Actor) => send('PATCH', `/projects/${id}/teams/${onIt.id}`, who, { role: 'editor' }),
+      (who: Actor) => send('DELETE', `/projects/${id}/teams/${onIt.id}`, who)
+    ];
+    for (const act of acts) {
+      await expectError(await act(actors.outsider!), 404, 'not_found');
+      await expectError(await act(actors.viewer!), 403, 'insufficient_project_role');
+      await expectError(await act(m), 409, 'project_archived');
+    }
+    expect(await app.db.db.select().from(projectTeams).where(eq(projectTeams.projectId, id))).toEqual([
+      expect.objectContaining({ teamId: onIt.id, role: 'viewer' })
+    ]);
+  });
+
+  it('machine principals: the write scope adds a team and changes its role; the read scope does not', async () => {
+    const writeKey = await mintKey(actors.manager!.cookie, [host.scopes.write]);
+    const readKey = await mintKey(actors.manager!.cookie, [host.scopes.read]);
+    const both = await mintKey(actors.manager!.cookie, [host.scopes.read, host.scopes.write]);
+    const id = await createProject(actors.manager!, 'Teams: keys');
+    const team = await makeTeam();
+    await expectError(await addTeam({ key: readKey }, id, team.id, 'viewer'), 403, 'insufficient_scope');
+    expect((await addTeam({ key: writeKey }, id, team.id, 'viewer')).status).toBe(201);
+    const patched = await send(
+      'PATCH',
+      `/projects/${id}/teams/${team.id}`,
+      { key: writeKey },
+      { role: 'editor' }
+    );
+    expect(patched.status).toBe(200);
+    expect(await readJson(patched)).toMatchObject({ kind: 'team', role: 'editor' });
+    // The two team routes are write routes: a read-only key meets the scope gate.
+    await expectError(
+      await send('PATCH', `/projects/${id}/teams/${team.id}`, { key: readKey }, { role: 'viewer' }),
+      403,
+      'insufficient_scope'
+    );
+    await expectError(
+      await send('DELETE', `/projects/${id}/teams/${team.id}`, { key: readKey }),
+      403,
+      'insufficient_scope'
+    );
+    // A shape that is not one of the two team routes stays closed to any key.
+    const code = 'endpoint_not_allowed';
+    await expectError(await send('GET', `/projects/${id}/teams/${team.id}`, { key: both }), 403, code);
+    await expectError(await send('POST', `/projects/${id}/teams/${team.id}`, { key: both }, {}), 403, code);
+    await expectError(await send('GET', `/projects/${id}/teams`, { key: both }), 403, code);
+    await expectError(
+      await send('PATCH', `/projects/${id}/teams/not-a-uuid`, { key: both }, { role: 'viewer' }),
+      403,
+      code
+    );
+    expect((await send('DELETE', `/projects/${id}/teams/${team.id}`, { key: writeKey })).status).toBe(200);
+  });
+
+  it('a seat and a project entry forced across workspaces grant nothing (verifier round 1, mutation #1)', async () => {
+    // Rows only a direct write can make: the member's membership of THIS
+    // workspace seated in a team of ANOTHER, and that team put on a project of
+    // this workspace. The predicate's `prj_t.workspace_id = prj_wm.workspace_id`
+    // is what refuses it.
+    const crossed = await addActor('crossed');
+    const id = await createProject(actors.manager!, 'Teams: crossed');
+    const foreign = await makeTeam(otherWorkspaceId);
+    await seat(foreign.id, crossed);
+    await app.db.db.insert(projectTeams).values({ projectId: id, teamId: foreign.id, role: 'manager' });
+    await expectError(await send('GET', `/projects/${id}`, crossed), 404, 'not_found');
+    expect(await projectRole(app.db.db, principalOf(crossed), id)).toBeNull();
+    const listed = (await readJson(await send('GET', '/projects?limit=100', crossed))).projects as Array<{
+      id: string;
+    }>;
+    expect(listed.map((p) => p.id)).not.toContain(id);
+  });
+
+  it('a team deleted between the read and the insert answers 404 team_not_found, never 500 (verifier round 1, F2)', async () => {
+    const id = await createProject(actors.manager!, 'Teams: vanishing');
+    const team = await makeTeam();
+    // The race, made certain: the team goes the moment its project entry is inserted.
+    await app.db.pool.query(`
+      CREATE FUNCTION test_vanish_team() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        DELETE FROM workspace_teams WHERE id = NEW.team_id;
+        RETURN NEW;
+      END $$`);
+    try {
+      await app.db.pool.query(`
+        CREATE TRIGGER test_vanish_team BEFORE INSERT ON project_teams
+        FOR EACH ROW EXECUTE FUNCTION test_vanish_team()`);
+      await expectError(await addTeam(actors.manager!, id, team.id, 'viewer'), 404, 'team_not_found');
+    } finally {
+      await app.db.pool.query(`DROP TRIGGER IF EXISTS test_vanish_team ON project_teams`);
+      await app.db.pool.query(`DROP FUNCTION IF EXISTS test_vanish_team()`);
+    }
+    expect(await app.db.db.select().from(projectTeams).where(eq(projectTeams.projectId, id))).toEqual([]);
+    // The refused insert rolled its transaction back, the trigger's delete with it.
+    expect(await app.db.db.select().from(workspaceTeams).where(eq(workspaceTeams.id, team.id))).toHaveLength(
+      1
+    );
+  });
+});
+
 describe('the record: one audit action per change, and the export', () => {
   it('every mutation wrote its audit action', async () => {
     const rows = await app.db.db
@@ -894,6 +1275,9 @@ describe('the record: one audit action per change, and the export', () => {
       'project.member_add',
       'project.member_remove',
       'project.member_role',
+      'project.team_add',
+      'project.team_remove',
+      'project.team_role',
       'project.unarchive',
       'project.update'
     ]);

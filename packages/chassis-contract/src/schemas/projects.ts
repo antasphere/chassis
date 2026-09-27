@@ -94,7 +94,16 @@ export const projectUpdateSchema = z
   });
 export type ProjectUpdate = z.infer<typeof projectUpdateSchema>;
 
-export const projectMemberSchema = z.object({
+/**
+ * A project's members are people AND teams, each with a role (PRDCT-2794):
+ * one list, told apart by `kind`. A team entry's role is what every active
+ * non-guest member of the team holds through it; a person's effective role
+ * is the highest of their own entry and their teams' entries. `kind` is
+ * `person` on every entry that predates teams, so a reader that never asked
+ * for teams still reads what it did.
+ */
+export const projectPersonMemberSchema = z.object({
+  kind: z.literal('person'),
   userId: z.string(),
   email: z.string(),
   name: z.string(),
@@ -102,6 +111,31 @@ export const projectMemberSchema = z.object({
   addedBy: z.string().nullable(),
   createdAt: z.string()
 });
+export type ProjectPersonMember = z.infer<typeof projectPersonMemberSchema>;
+
+export const projectTeamMemberSchema = z.object({
+  kind: z.literal('team'),
+  teamId: z.string(),
+  slug: z.string(),
+  name: z.string(),
+  /**
+   * How many seats the team holds here, the account site's count. A
+   * deactivated member keeps their seat (a pause) and holds nothing through
+   * it until reactivated; the team's page shows each seat's state.
+   */
+  membersCount: z.number().int(),
+  /** The hub's team id when the team is the account site's projection; null for the tool's own. */
+  hubTeamId: z.string().nullable(),
+  role: projectRoleSchema,
+  addedBy: z.string().nullable(),
+  createdAt: z.string()
+});
+export type ProjectTeamMember = z.infer<typeof projectTeamMemberSchema>;
+
+export const projectMemberSchema = z.discriminatedUnion('kind', [
+  projectPersonMemberSchema,
+  projectTeamMemberSchema
+]);
 export type ProjectMember = z.infer<typeof projectMemberSchema>;
 
 export const projectMembersListSchema = z.object({
@@ -112,17 +146,18 @@ export type ProjectMembersList = z.infer<typeof projectMembersListSchema>;
 
 /**
  * Add one of the workspace's OWN active members, named by user id or by
- * email: exactly one of the two. No invitation, no claim token, no account is
- * ever minted here.
+ * email, or one of the workspace's teams by its id: exactly one of the three.
+ * No invitation, no claim token, no account is ever minted here.
  */
 export const projectMemberAddSchema = z
   .object({
     userId: plainText(1, 200).optional(),
     email: z.email().optional(),
+    teamId: z.uuid().optional(),
     role: projectRoleSchema
   })
-  .refine((v) => (v.userId === undefined) !== (v.email === undefined), {
-    error: 'exactly one of userId or email is required'
+  .refine((v) => [v.userId, v.email, v.teamId].filter((k) => k !== undefined).length === 1, {
+    error: 'exactly one of userId, email or teamId is required'
   });
 export type ProjectMemberAdd = z.infer<typeof projectMemberAddSchema>;
 
@@ -134,3 +169,6 @@ export const projectMemberParamsSchema = z.object({
   id: z.uuid(),
   userId: noControlChars(z.string().min(1).max(200))
 });
+
+/** `{id}` the project and `{teamId}` the team, both uuids. */
+export const projectTeamParamsSchema = z.object({ id: z.uuid(), teamId: z.uuid() });

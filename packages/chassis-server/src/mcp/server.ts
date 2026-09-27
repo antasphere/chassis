@@ -3,6 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { mcpInputs } from './inputs.js';
 import { jsonText, mergeErrorHints, wrapToolErrors, type ErrorHints } from './errors.js';
 import { projectErrorHints, registerProjectTools } from './projects.js';
+import { registerTeamTools } from './teams.js';
 import {
   callApi,
   createScopeCheck,
@@ -158,10 +159,13 @@ export function buildMcpServer(
 
   // ── Projects: a chassis concept, so a chassis tool set ─────────────────────
   // A project is a subgroup of a workspace with its own members and roles —
-  // the chassis owns it, and therefore owns the nine tools over it. Registered
+  // the chassis owns it, and therefore owns the eleven tools over it. Registered
   // under the tool's prefix, after whoami and before the tool's own set, so
   // `tools/list` keeps one stable order across every instance.
   registerProjectTools(server, ctx, identity, tool.scopes, checkScope, hints);
+  // Teams (PRDCT-2813): a chassis concept too, read-only over MCP, right after
+  // the projects they can be members of.
+  registerTeamTools(server, ctx, identity, tool.scopes, checkScope, hints);
 
   // The product surface: the tool's own set, after the chassis tools.
   tool.registerTools(server, ctx);

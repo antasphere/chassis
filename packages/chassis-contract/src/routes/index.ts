@@ -50,11 +50,25 @@ import {
   projectMemberRoleSchema,
   projectMemberSchema,
   projectMembersListSchema,
+  projectPersonMemberSchema,
   projectSchema,
   projectsListQuerySchema,
   projectsListSchema,
+  projectTeamMemberSchema,
+  projectTeamParamsSchema,
   projectUpdateSchema
 } from '../schemas/projects.js';
+import {
+  teamCreateSchema,
+  teamMemberAddSchema,
+  teamMemberParamsSchema,
+  teamMemberSchema,
+  teamMembersListSchema,
+  teamSchema,
+  teamsListQuerySchema,
+  teamsListSchema,
+  teamUpdateSchema
+} from '../schemas/teams.js';
 
 /**
  * Server-only entry: route contracts for @hono/zod-openapi. Importing this
@@ -380,17 +394,18 @@ export const projectMemberAddRoute = createRoute({
   method: 'post',
   path: '/projects/{id}/members',
   tags: ['projects'],
-  summary: "Add one of the workspace's own active members to a project, by user id or email (manager)",
+  summary:
+    "Add one of the workspace's own active members (by user id or email) or one of its teams (by id) to a project (manager)",
   request: {
     params: uuidParams,
     body: jsonRequestBody(projectMemberAddSchema, 'Who, and with which role'),
     headers: idempotencyHeaders
   },
   responses: {
-    201: jsonBody(projectMemberSchema, 'The new project member'),
+    201: jsonBody(projectMemberSchema, 'The new project member, a person or a team'),
     ...projectErrors,
     403: jsonBody(apiErrorSchema, 'guest_forbidden, insufficient_project_role, or guest_target'),
-    404: jsonBody(apiErrorSchema, 'Project not found, or member_not_found in this workspace'),
+    404: jsonBody(apiErrorSchema, 'Project not found, member_not_found or team_not_found in this workspace'),
     409: jsonBody(apiErrorSchema, 'project_archived, already_member, or idempotency conflict')
   }
 });
@@ -405,7 +420,7 @@ export const projectMemberRoleRoute = createRoute({
     body: jsonRequestBody(projectMemberRoleSchema, 'The new role')
   },
   responses: {
-    200: jsonBody(projectMemberSchema, 'The member as it now is'),
+    200: jsonBody(projectPersonMemberSchema, 'The member as it now is'),
     ...projectErrors,
     409: projectArchived409
   }
@@ -418,10 +433,151 @@ export const projectMemberRemoveRoute = createRoute({
   summary: 'Remove a member from a project (manager; a member may remove themselves)',
   request: { params: projectMemberParamsSchema },
   responses: {
-    200: jsonBody(projectMemberSchema, 'The removed member (final snapshot)'),
+    200: jsonBody(projectPersonMemberSchema, 'The removed member (final snapshot)'),
     ...projectErrors,
     409: projectArchived409
   }
+});
+
+export const projectTeamRoleRoute = createRoute({
+  method: 'patch',
+  path: '/projects/{id}/teams/{teamId}',
+  tags: ['projects'],
+  summary: "Change a team's role on a project (manager)",
+  request: {
+    params: projectTeamParamsSchema,
+    body: jsonRequestBody(projectMemberRoleSchema, 'The new role')
+  },
+  responses: {
+    200: jsonBody(projectTeamMemberSchema, 'The team entry as it now is'),
+    ...projectErrors,
+    409: projectArchived409
+  }
+});
+
+export const projectTeamRemoveRoute = createRoute({
+  method: 'delete',
+  path: '/projects/{id}/teams/{teamId}',
+  tags: ['projects'],
+  summary: 'Remove a team from a project (manager); its people keep their own entries',
+  request: { params: projectTeamParamsSchema },
+  responses: {
+    200: jsonBody(projectTeamMemberSchema, 'The removed team entry (final snapshot)'),
+    ...projectErrors,
+    409: projectArchived409
+  }
+});
+
+// ── Teams ────────────────────────────────────────────────────────────────────
+// Named groups of the workspace's people, on both editions (PRDCT-2813). Every
+// non-guest member reads them; owners and admins write, and in a hub-origin
+// workspace every write answers 403 `hub_managed` (the members' pattern).
+
+/** The refusals every team route shares (the writes add their own). */
+const teamErrors = {
+  401: errorResponses[401],
+  403: jsonBody(apiErrorSchema, 'guest_forbidden, forbidden (not an owner or admin), or hub_managed'),
+  404: errorResponses[404]
+};
+const slugTaken409 = jsonBody(
+  apiErrorSchema,
+  'Another team of this workspace already uses that slug (slug_taken)'
+);
+
+export const teamsListRoute = createRoute({
+  method: 'get',
+  path: '/teams',
+  tags: ['teams'],
+  summary: "List the workspace's teams (every member; cursor-paginated)",
+  request: { query: teamsListQuerySchema },
+  responses: {
+    200: jsonBody(teamsListSchema, 'Teams, newest first'),
+    401: errorResponses[401],
+    403: teamErrors[403]
+  }
+});
+
+export const teamGetRoute = createRoute({
+  method: 'get',
+  path: '/teams/{id}',
+  tags: ['teams'],
+  summary: 'Read one team of the workspace (every member)',
+  request: { params: uuidParams },
+  responses: { 200: jsonBody(teamSchema, 'The team'), ...teamErrors }
+});
+
+export const teamCreateRoute = createRoute({
+  method: 'post',
+  path: '/teams',
+  tags: ['teams'],
+  summary: 'Create a team (owner or admin; refused in a hub-origin workspace)',
+  request: { body: jsonRequestBody(teamCreateSchema, 'Name, optional slug'), headers: idempotencyHeaders },
+  responses: {
+    201: jsonBody(teamSchema, 'The created team'),
+    400: errorResponses[400],
+    ...teamErrors,
+    409: jsonBody(apiErrorSchema, 'slug_taken, or idempotency conflict')
+  }
+});
+
+export const teamUpdateRoute = createRoute({
+  method: 'patch',
+  path: '/teams/{id}',
+  tags: ['teams'],
+  summary: 'Rename a team or change its slug (owner or admin; refused in a hub-origin workspace)',
+  request: { params: uuidParams, body: jsonRequestBody(teamUpdateSchema, 'Fields to change') },
+  responses: {
+    200: jsonBody(teamSchema, 'The updated team'),
+    400: errorResponses[400],
+    ...teamErrors,
+    409: slugTaken409
+  }
+});
+
+export const teamDeleteRoute = createRoute({
+  method: 'delete',
+  path: '/teams/{id}',
+  tags: ['teams'],
+  summary: 'Delete a team (owner or admin; the memberships stay; refused in a hub-origin workspace)',
+  request: { params: uuidParams },
+  responses: { 200: jsonBody(teamSchema, 'The deleted team (final snapshot)'), ...teamErrors }
+});
+
+export const teamMembersListRoute = createRoute({
+  method: 'get',
+  path: '/teams/{id}/members',
+  tags: ['teams'],
+  summary: "List a team's members (every member of the workspace; cursor-paginated)",
+  request: { params: uuidParams, query: cursorPageQuerySchema },
+  responses: { 200: jsonBody(teamMembersListSchema, 'Team members, newest first'), ...teamErrors }
+});
+
+export const teamMemberAddRoute = createRoute({
+  method: 'post',
+  path: '/teams/{id}/members',
+  tags: ['teams'],
+  summary: "Seat one of the workspace's own active members in a team, by user id or email (owner or admin)",
+  request: {
+    params: uuidParams,
+    body: jsonRequestBody(teamMemberAddSchema, 'Who'),
+    headers: idempotencyHeaders
+  },
+  responses: {
+    201: jsonBody(teamMemberSchema, 'The team member'),
+    400: errorResponses[400],
+    ...teamErrors,
+    404: jsonBody(apiErrorSchema, 'Team not found, or member_not_found in this workspace'),
+    409: jsonBody(apiErrorSchema, 'already_member, or idempotency conflict')
+  }
+});
+
+export const teamMemberRemoveRoute = createRoute({
+  method: 'delete',
+  path: '/teams/{id}/members/{userId}',
+  tags: ['teams'],
+  summary: 'Unseat a member from a team (owner or admin; the membership stays)',
+  request: { params: teamMemberParamsSchema },
+  responses: { 200: jsonBody(teamMemberSchema, 'The removed team member'), ...teamErrors }
 });
 
 // ── Invitations ──────────────────────────────────────────────────────────────
