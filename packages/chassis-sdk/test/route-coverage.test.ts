@@ -42,6 +42,7 @@ const INVOKERS: Record<string, (c: Client) => Promise<unknown>> = {
     }),
   'GET /me': (c) => c.me(),
   'POST /me/onboarding/dismiss': (c) => c.dismissOnboarding(),
+  'PUT /me/default-workspace': (c) => c.setDefaultWorkspace(SAMPLE_ID),
   'POST /workspaces': (c) => c.createWorkspace('Second'),
   'POST /sso/logout': (c) => c.ssoLogout(),
   'POST /cli/auth/request': (c) => c.cliAuthRequest({ email: 'a@b.co' }),

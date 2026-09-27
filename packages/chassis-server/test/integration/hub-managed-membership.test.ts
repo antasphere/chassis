@@ -525,3 +525,29 @@ describe('machine credentials: the fail-closed scope map is the first wall', () 
     }
   });
 });
+
+describe('the default workspace is the account’s on cloud (PRDCT-2815)', () => {
+  it('PUT /me/default-workspace answers hub_managed on the projection, on the cloud-local workspace and for null; no row moves', async () => {
+    const readDefaults = async () =>
+      (
+        await app.db.pool.query(
+          `SELECT wm.workspace_id, wm.is_default FROM workspace_members wm JOIN "user" u ON u.id = wm.user_id
+           WHERE u.email = $1 ORDER BY wm.workspace_id`,
+          [HUB_ADMIN_EMAIL]
+        )
+      ).rows;
+    const before = await readDefaults();
+    // The caller holds both kinds of membership: the contrast is the point.
+    expect(before.map((r: { workspace_id: string }) => r.workspace_id).sort()).toEqual(
+      [projectedWorkspaceId, operatorWorkspaceId].sort()
+    );
+    for (const workspaceId of [projectedWorkspaceId, operatorWorkspaceId, null]) {
+      const res = await app.app.request('/api/v1/me/default-workspace', {
+        ...json({ workspaceId }, { cookie: hubAdminCookie }),
+        method: 'PUT'
+      });
+      await expectHubManaged(res);
+    }
+    expect(await readDefaults()).toEqual(before);
+  });
+});
