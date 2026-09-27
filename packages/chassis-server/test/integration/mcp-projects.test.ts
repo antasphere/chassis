@@ -13,7 +13,8 @@ import {
 } from './helpers.js';
 
 /**
- * The nine PROJECT tools the chassis registers beside `<toolPrefix>whoami`,
+ * The eleven PROJECT tools the chassis registers beside `<toolPrefix>whoami`,
+ * and the two TEAM reads after them (PRDCT-2813, PRDCT-2794),
  * driven as a real MCP client would: raw JSON-RPC POSTs against the stateless
  * /mcp (Phase 7's harness), authenticated with the host's own API keys.
  *
@@ -40,12 +41,17 @@ const TOOL = {
   listMembers: `${PREFIX}list_project_members`,
   addMember: `${PREFIX}add_project_member`,
   setRole: `${PREFIX}set_project_member_role`,
-  removeMember: `${PREFIX}remove_project_member`
+  removeMember: `${PREFIX}remove_project_member`,
+  setTeamRole: `${PREFIX}set_project_team_role`,
+  removeTeam: `${PREFIX}remove_project_team`,
+  listTeams: `${PREFIX}list_teams`,
+  listTeamMembers: `${PREFIX}list_team_members`
 };
 
 let container: StartedPostgreSqlContainer;
 let app: TestApp;
 let workspaceId = '';
+let ownerCookie = '';
 /** The manager's key drives the life of the project; the other two prove the refusals. */
 let managerKey = '';
 let viewerKey = '';
@@ -152,7 +158,7 @@ beforeAll(async () => {
     json({ setupToken: SETUP_TOKEN, instanceName: 'MCP Projects', owner: OWNER })
   );
   expect(setup.status).toBe(201);
-  const ownerCookie = await signIn(OWNER.email);
+  ownerCookie = await signIn(OWNER.email);
   // The owner acts as a manager on every project: they are the "manager" here.
   managerKey = await mintKey(ownerCookie, 'manager-rw', [host.scopes.read, host.scopes.write]);
   workspaceId = (await readJson(await app.app.request('/api/v1/me', { headers: { cookie: ownerCookie } })))
@@ -169,8 +175,8 @@ afterAll(async () => {
   await container?.stop();
 });
 
-describe('the nine project tools are served under the host prefix', () => {
-  it('tools/list carries all nine, with the read ones flagged read-only', async () => {
+describe('the project and team tools are served under the host prefix', () => {
+  it('tools/list carries all of them, with the read ones flagged read-only', async () => {
     interface ToolInfo {
       name: string;
       description: string;
@@ -184,10 +190,16 @@ describe('the nine project tools are served under the host prefix', () => {
       // Org as a parameter: every tool of the set takes the workspace argument.
       expect(byName.get(name)!.inputSchema?.properties?.workspace, `${name} lacks workspace`).toBeDefined();
     }
-    for (const name of [TOOL.list, TOOL.get, TOOL.listMembers]) {
+    for (const name of [TOOL.list, TOOL.get, TOOL.listMembers, TOOL.listTeams, TOOL.listTeamMembers]) {
       expect(byName.get(name)!.annotations?.readOnlyHint, `${name} readOnlyHint`).toBe(true);
     }
     expect(byName.get(TOOL.removeMember)!.annotations?.destructiveHint, 'remove destructiveHint').toBe(true);
+    expect(byName.get(TOOL.removeTeam)!.annotations?.destructiveHint, 'remove team destructiveHint').toBe(
+      true
+    );
+    // The team tools are reads only: shaping a team is a person's act.
+    expect(byName.get(TOOL.listTeams)!.description).toContain('never through these tools');
+    expect(byName.get(TOOL.addMember)!.inputSchema?.properties?.teamId).toBeDefined();
     // Archiving is a reversible switch (the same tool brings the project
     // back), so it carries no destructive flag: a host that gates
     // destructive tools must not block the restore.
@@ -200,7 +212,9 @@ describe('the nine project tools are served under the host prefix', () => {
       TOOL.archive,
       TOOL.addMember,
       TOOL.setRole,
-      TOOL.removeMember
+      TOOL.removeMember,
+      TOOL.setTeamRole,
+      TOOL.removeTeam
     ]) {
       expect(byName.get(name)!.description, `${name} confirm-first`).toContain('confirm with the user');
     }
@@ -274,11 +288,12 @@ describe('a manager runs the life of a project through the tools', () => {
   it('refuses a member named both ways, or neither, before any API call', async () => {
     for (const args of [
       { projectId, role: 'viewer' },
-      { projectId, role: 'viewer', userId: viewerUserId, email: viewerEmail }
+      { projectId, role: 'viewer', userId: viewerUserId, email: viewerEmail },
+      { projectId, role: 'viewer', email: viewerEmail, teamId: '00000000-0000-4000-8000-000000000000' }
     ]) {
       const res = await callTool(managerKey, TOOL.addMember, args);
       expect(res.isError).toBe(true);
-      expect(res.text).toContain('exactly one way');
+      expect(res.text).toContain('Name exactly one member');
     }
   });
 
@@ -375,5 +390,74 @@ describe('the refusals read as sentences', () => {
     expect(refused.text).toContain(`Missing scope "${host.scopes.write}"`);
     // The read half of the set still works on the same key.
     expect((await ok(readOnly, TOOL.list)).projects).toBeInstanceOf(Array);
+  });
+});
+
+describe('a team, read through the tools and put on a project', () => {
+  let teamId = '';
+  let projectId = '';
+
+  beforeAll(async () => {
+    // The team is shaped over the app, as a person does on the People page:
+    // the tools only read teams.
+    const created = await app.app.request(
+      '/api/v1/teams',
+      json({ name: 'Cartographers' }, { cookie: ownerCookie })
+    );
+    expect(created.status).toBe(201);
+    teamId = (await readJson(created)).id as string;
+    const seated = await app.app.request(
+      `/api/v1/teams/${teamId}/members`,
+      json({ email: viewerEmail }, { cookie: ownerCookie })
+    );
+    expect(seated.status).toBe(201);
+    projectId = (await ok(managerKey, TOOL.create, { name: 'Compass' })).id;
+  });
+
+  it('list_teams shows the team, list_team_members its member', async () => {
+    const teams = await ok(managerKey, TOOL.listTeams);
+    const team = teams.teams.find((t: { id: string }) => t.id === teamId);
+    expect(team).toMatchObject({
+      slug: 'cartographers',
+      name: 'Cartographers',
+      membersCount: 1,
+      hubTeamId: null
+    });
+    expect(teams).toHaveProperty('nextCursor');
+
+    const members = await ok(viewerKey, TOOL.listTeamMembers, { teamId });
+    expect(members.members.map((m: { userId: string }) => m.userId)).toEqual([viewerUserId]);
+  });
+
+  it('add_project_member with teamId puts the team on the project, and its member reads it', async () => {
+    const before = await callTool(viewerKey, TOOL.get, { projectId });
+    expect(before.isError).toBe(true);
+
+    const added = await ok(managerKey, TOOL.addMember, { projectId, teamId, role: 'viewer' });
+    expect(added).toMatchObject({ kind: 'team', teamId, slug: 'cartographers', role: 'viewer' });
+
+    const members = await ok(managerKey, TOOL.listMembers, { projectId });
+    const entry = members.members.find((m: { kind: string; teamId?: string }) => m.teamId === teamId);
+    expect(entry?.kind).toBe('team');
+
+    const read = await ok(viewerKey, TOOL.get, { projectId });
+    expect(read.myRole).toBe('viewer');
+  });
+
+  it('set_project_team_role raises the team, remove_project_team takes it off', async () => {
+    const raised = await ok(managerKey, TOOL.setTeamRole, { projectId, teamId, role: 'editor' });
+    expect(raised.role).toBe('editor');
+    expect((await ok(viewerKey, TOOL.get, { projectId })).myRole).toBe('editor');
+
+    const removed = await ok(managerKey, TOOL.removeTeam, { projectId, teamId });
+    expect(removed.teamId).toBe(teamId);
+    const after = await callTool(viewerKey, TOOL.get, { projectId });
+    expect(after.isError).toBe(true);
+    expect(after.text).toContain('not_found');
+
+    const again = await callTool(managerKey, TOOL.removeTeam, { projectId, teamId });
+    expect(again.isError).toBe(true);
+    expect(again.text).toContain('team_not_found');
+    expectSentence(again.text, /team/i);
   });
 });

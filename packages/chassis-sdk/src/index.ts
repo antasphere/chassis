@@ -33,14 +33,23 @@ import type {
   ProjectMember,
   ProjectMemberAdd,
   ProjectMembersList,
+  ProjectPersonMember,
   ProjectRole,
   ProjectsArchivedFilter,
   ProjectsList,
+  ProjectTeamMember,
   ProjectUpdate,
   SetupRequest,
   SetupResponse,
   SsoCliConnect,
   SsoLogoutResponse,
+  Team,
+  TeamCreate,
+  TeamMemberAdd,
+  TeamMemberInfo,
+  TeamMembersList,
+  TeamsList,
+  TeamUpdate,
   WorkspaceCreated,
   WorkspaceLook,
   WorkspaceRole,
@@ -463,7 +472,11 @@ export class ChassisClient<TScope extends string> {
     return this.request('GET', this.pathWithQuery(`/projects/${encodeURIComponent(id)}/members`, params));
   }
 
-  /** Adds one of the workspace's own active members, by user id or by email: exactly one of the two. */
+  /**
+   * Adds one of the workspace's own active members, by user id or by email,
+   * or one of its teams by `teamId`: exactly one of the three. A team entry
+   * gives every member of the team the role.
+   */
   addProjectMember(
     id: string,
     req: ProjectMemberAdd,
@@ -472,7 +485,7 @@ export class ChassisClient<TScope extends string> {
     return this.request('POST', `/projects/${encodeURIComponent(id)}/members`, req, idempotencyHeader(opts));
   }
 
-  setProjectMemberRole(id: string, userId: string, role: ProjectRole): Promise<ProjectMember> {
+  setProjectMemberRole(id: string, userId: string, role: ProjectRole): Promise<ProjectPersonMember> {
     return this.request(
       'PATCH',
       `/projects/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
@@ -481,11 +494,75 @@ export class ChassisClient<TScope extends string> {
   }
 
   /** A manager removes anyone; any member removes themselves. */
-  removeProjectMember(id: string, userId: string): Promise<ProjectMember> {
+  removeProjectMember(id: string, userId: string): Promise<ProjectPersonMember> {
     return this.request(
       'DELETE',
       `/projects/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`
     );
+  }
+
+  /** Changes the role a team holds on a project (manager). */
+  setProjectTeamRole(projectId: string, teamId: string, role: ProjectRole): Promise<ProjectTeamMember> {
+    return this.request(
+      'PATCH',
+      `/projects/${encodeURIComponent(projectId)}/teams/${encodeURIComponent(teamId)}`,
+      { role }
+    );
+  }
+
+  /** Removes a team from a project (manager); its people keep their own entries. */
+  removeProjectTeam(projectId: string, teamId: string): Promise<ProjectTeamMember> {
+    return this.request(
+      'DELETE',
+      `/projects/${encodeURIComponent(projectId)}/teams/${encodeURIComponent(teamId)}`
+    );
+  }
+
+  // ── Teams ─────────────────────────────────────────────────────────────────
+  // A team is a named group of the workspace's own members, on both editions.
+  // Every non-guest member reads them; owners and admins shape them. In a
+  // workspace managed by the account site every write answers 403
+  // `hub_managed` with `details.manageUrl`.
+
+  /** The workspace's teams, newest first. */
+  teams(params: ListParams = {}): Promise<TeamsList> {
+    return this.request('GET', this.pathWithQuery('/teams', params));
+  }
+
+  team(id: string): Promise<Team> {
+    return this.request('GET', `/teams/${encodeURIComponent(id)}`);
+  }
+
+  /** Owner or admin. The slug is derived from the name when absent. */
+  createTeam(req: TeamCreate, opts: IdempotentRequestOptions = {}): Promise<Team> {
+    return this.request('POST', '/teams', req, idempotencyHeader(opts));
+  }
+
+  updateTeam(id: string, patch: TeamUpdate): Promise<Team> {
+    return this.request('PATCH', `/teams/${encodeURIComponent(id)}`, patch);
+  }
+
+  /** The memberships stay; answers the team's final snapshot. */
+  deleteTeam(id: string): Promise<Team> {
+    return this.request('DELETE', `/teams/${encodeURIComponent(id)}`);
+  }
+
+  teamMembers(id: string, params: ListParams = {}): Promise<TeamMembersList> {
+    return this.request('GET', this.pathWithQuery(`/teams/${encodeURIComponent(id)}/members`, params));
+  }
+
+  /** Seats one of the workspace's own active members, by user id or by email. */
+  addTeamMember(
+    id: string,
+    req: TeamMemberAdd,
+    opts: IdempotentRequestOptions = {}
+  ): Promise<TeamMemberInfo> {
+    return this.request('POST', `/teams/${encodeURIComponent(id)}/members`, req, idempotencyHeader(opts));
+  }
+
+  /** Unseats a member; the workspace membership stays. */
+  removeTeamMember(id: string, userId: string): Promise<TeamMemberInfo> {
+    return this.request('DELETE', `/teams/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`);
   }
 
   // ── Break-glass (superadmin recovery, ADR 010) ────────────────────────────

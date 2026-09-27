@@ -18,7 +18,7 @@ import {
 import type { McpIdentity } from './server.js';
 
 /**
- * The nine PROJECT tools, registered by the chassis beside
+ * The eleven PROJECT tools, registered by the chassis beside
  * `<toolPrefix>whoami` — a project is a chassis concept (a subgroup of a
  * workspace with its own members and roles), so every tool an instance serves
  * over it is the chassis', not a tool's. Each one is a thin shim over the
@@ -96,7 +96,12 @@ export function projectErrorHints(toolPrefix: string): ErrorHints {
       `address they joined with. On ${t('set_project_member_role')} or ${t('remove_project_member')}: ` +
       `this person is not on the project (${t('list_project_members')} shows who is).`,
     already_member:
-      'This person is already a member of the project — change their role instead of adding them again.',
+      'This person or team is already a member of the project — change the role instead of adding ' +
+      'them again.',
+    team_not_found:
+      `No such team. On ${t('add_project_member')}: no team of the organization has this id ` +
+      `(${t('list_teams')} lists them). On ${t('set_project_team_role')} or ${t('remove_project_team')}: ` +
+      `this team is not on the project (${t('list_project_members')} shows who is).`,
     guest_target:
       'This person is an external guest invited to one item: their account is not this organization’s ' +
       'to put on a project.',
@@ -113,6 +118,10 @@ export function projectErrorHints(toolPrefix: string): ErrorHints {
 const projectIdInput = z
   .uuid()
   .describe('The project id, from the list or the create answer (never the project name).');
+
+const teamIdInput = z
+  .uuid()
+  .describe('The team id, as the teams list or the project member list reports it (never its name or slug).');
 
 const userIdInput = z
   .string()
@@ -135,7 +144,7 @@ const metadataInput = z
   );
 
 /**
- * Register the nine project tools on a server. Called by `buildMcpServer`
+ * Register the eleven project tools on a server. Called by `buildMcpServer`
  * after `<toolPrefix>whoami` and before the tool's own set, so `tools/list`
  * keeps one stable order: the chassis examples, whoami, the projects, the
  * tool's own.
@@ -235,9 +244,13 @@ export function registerProjectTools(
     `${prefix}list_project_members`,
     {
       description:
-        `List a project's members and what each of them may do. ${ROLE_LADDER} Returns ` +
-        '{ members: [{ userId, email, name, role, addedBy, createdAt }], nextCursor }; pass the ' +
-        '`userId` of a row to the tools that change or remove a member.',
+        `List a project's members and what each of them may do. ${ROLE_LADDER} A member is a ` +
+        'person or a team, told apart by `kind`: a person entry is { kind: "person", userId, email, ' +
+        'name, role, addedBy, createdAt }, a team entry { kind: "team", teamId, slug, name, ' +
+        'membersCount, hubTeamId, role, addedBy, createdAt }, and every member of a team holds the ' +
+        'team’s role; a person’s effective role is the highest of their own entry and their teams’. ' +
+        'Returns { members, nextCursor }; pass a person’s `userId` to the tools that change or remove ' +
+        `a member, a team’s \`teamId\` to ${prefix}set_project_team_role and ${prefix}remove_project_team.`,
       inputSchema: {
         workspace: workspaceInput,
         projectId: projectIdInput,
@@ -354,30 +367,31 @@ export function registerProjectTools(
       description:
         'Put one of the organization’s own members on a project, with a role — confirm with the ' +
         `user first. Needs the manager role on the project. ${ROLE_LADDER} Name the person by ` +
-        'either `userId` or `email`, exactly one of the two, and it must be someone who is already ' +
-        'an active member of the organization: this invites nobody and creates no account. Returns ' +
-        'the new project member.',
+        'either `userId` or `email`, and it must be someone who is already an active member of the ' +
+        'organization: this invites nobody and creates no account. Or a team by `teamId` (from ' +
+        `${prefix}list_teams), which puts every member of the team on the project with that role. ` +
+        'Exactly one of `userId`, `email` or `teamId`. Returns the new project member, a person or a ' +
+        'team entry.',
       inputSchema: {
         workspace: workspaceInput,
         projectId: projectIdInput,
         userId: userIdInput.optional(),
         email: z.email().optional().describe('The email address the person joined the organization with.'),
+        teamId: teamIdInput.optional(),
         role: roleInput
       }
     },
-    async ({ workspace, projectId, userId, email, role }) => {
-      if ((userId === undefined) === (email === undefined)) {
+    async ({ workspace, projectId, userId, email, teamId, role }) => {
+      if ([userId, email, teamId].filter((k) => k !== undefined).length !== 1) {
         return deny(
-          'Name the person exactly one way: either userId or email, not both and not neither. ' +
-            'The organization member list has both for everyone who has joined.'
+          'Name exactly one member: a person by userId or email, or a team by teamId, not several ' +
+            `and not none. The organization member list has both for everyone who has joined; ` +
+            `${prefix}list_teams has the team ids.`
         );
       }
+      const who = userId !== undefined ? { userId } : email !== undefined ? { email } : { teamId };
       return run(scopes.write, workspace, (c) =>
-        callApi(
-          c,
-          `/api/v1/projects/${projectId}/members`,
-          jsonBody({ ...(userId !== undefined ? { userId } : { email }), role })
-        )
+        callApi(c, `/api/v1/projects/${projectId}/members`, jsonBody({ ...who, role }))
       );
     }
   );
@@ -421,6 +435,46 @@ export function registerProjectTools(
         callApi(c, `/api/v1/projects/${projectId}/members/${encodeURIComponent(userId)}`, {
           method: 'DELETE'
         })
+      )
+  );
+
+  server.registerTool(
+    `${prefix}set_project_team_role`,
+    {
+      description:
+        'Change the role a team holds on a project — confirm with the user first. Every member of ' +
+        `the team holds this role on the project through it. Needs the manager role on the project. ` +
+        `${ROLE_LADDER} Returns the team entry as it now is.`,
+      inputSchema: {
+        workspace: workspaceInput,
+        projectId: projectIdInput,
+        teamId: teamIdInput,
+        role: roleInput
+      }
+    },
+    async ({ workspace, projectId, teamId, role }) =>
+      run(scopes.write, workspace, (c) =>
+        callApi(c, `/api/v1/projects/${projectId}/teams/${teamId}`, {
+          ...jsonBody({ role }),
+          method: 'PATCH'
+        })
+      )
+  );
+
+  server.registerTool(
+    `${prefix}remove_project_team`,
+    {
+      description:
+        'Take a team off a project — confirm with the user first; the access its members held ' +
+        'THROUGH the team stops immediately. Needs the manager role on the project. People who also ' +
+        'have their own entry on the project keep it, and the team itself stays in the organization. ' +
+        'Returns a last snapshot of the team entry that was removed.',
+      inputSchema: { workspace: workspaceInput, projectId: projectIdInput, teamId: teamIdInput },
+      annotations: { destructiveHint: true }
+    },
+    async ({ workspace, projectId, teamId }) =>
+      run(scopes.write, workspace, (c) =>
+        callApi(c, `/api/v1/projects/${projectId}/teams/${teamId}`, { method: 'DELETE' })
       )
   );
 }
