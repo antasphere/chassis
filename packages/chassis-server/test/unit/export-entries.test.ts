@@ -45,6 +45,9 @@ describe('resolveExportEntries (the `api.exportEntries` slot)', () => {
       'api-keys',
       'projects',
       'project_members',
+      'teams',
+      'team_members',
+      'project_teams',
       'audit-log',
       'files',
       'skipped-blobs'
