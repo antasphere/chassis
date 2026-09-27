@@ -51,6 +51,7 @@ const INVOKERS: Record<string, (c: Client) => Promise<unknown>> = {
   'GET /members': (c) => c.members(),
   'PATCH /members/{id}': (c) => c.updateMember(SAMPLE_ID, { role: 'admin' }),
   'DELETE /members/{id}': (c) => c.deleteMember(SAMPLE_ID),
+  'POST /members/{id}/remove': (c) => c.removeMember(SAMPLE_ID),
   'POST /members/{id}/reset-link': (c) => c.createMemberResetLink(SAMPLE_ID),
   'POST /members/{id}/change-email-link': (c) =>
     c.createMemberChangeEmailLink(SAMPLE_ID, { newEmail: 'a@b.co' }),

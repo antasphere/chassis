@@ -34,3 +34,14 @@ describe('requiredScopeFor — teams (PRDCT-2813)', () => {
     expect(requiredScopeFor('/api/v1/teams/not-a-uuid', 'GET')).toBeNull();
   });
 });
+
+describe('requiredScopeFor — members stay closed to machines (ADR 014, PRDCT-2816)', () => {
+  const MEMBER = '/api/v1/members/11111111-2222-3333-4444-555555555555';
+
+  it('the account deletion and the removal are UNLISTED for every method: sessions only', () => {
+    for (const method of ['POST', 'GET', 'PUT', 'PATCH', 'DELETE']) {
+      expect(requiredScopeFor(MEMBER, method)).toBeNull();
+      expect(requiredScopeFor(`${MEMBER}/remove`, method)).toBeNull();
+    }
+  });
+});
