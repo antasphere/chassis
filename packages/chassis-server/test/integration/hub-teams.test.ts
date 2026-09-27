@@ -505,6 +505,22 @@ describe('the organization’s whole team list (PRDCT-2813)', () => {
     expect(hub.teamsRequests.length).toBe(teamsBefore + 1);
   });
 
+  it('a login reads the list whatever the window says: a team made at the hub a moment ago lands at once', async () => {
+    // The list was just read (the test above): inside orgTeamsTtlMs a pass
+    // leaves it, a LOGIN does not (Romain's rule: at login, then every five
+    // minutes). The team D made at the hub between the two is here right after.
+    const D = { id: '26260000-dddd-4ddd-8ddd-00000000000d', slug: 'delta', name: 'Delta' };
+    hub.setOrgTeams(ORG_T, [A, B, C, D]);
+    const teamsBefore = hub.teamsRequests.length;
+    cookie = await sso.ssoLogin(app, hub, tom);
+    expect(hub.teamsRequests.length).toBe(teamsBefore + 1);
+    expect(await hubIdsOf()).toContain(D.id);
+    hub.setOrgTeams(ORG_T, [A, B, C]);
+    await expireOrgTeams();
+    expect((await me(cookie)).status).toBe(200);
+    expect(await hubIdsOf()).not.toContain(D.id);
+  });
+
   it('a team deleted at the hub goes with its project entries; a local team stays', async () => {
     const workspaceId = await workspaceIdOf(ORG_T);
     const teamC = (await teamsOf(ORG_T)).find((t) => t.hub_team_id === TEAM_C)!;

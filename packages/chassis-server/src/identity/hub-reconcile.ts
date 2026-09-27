@@ -379,7 +379,7 @@ export class HubOrgReconciler {
               });
             });
             // Then the org's whole team list, when it is due (never fails the pass).
-            await this.refreshOrgTeams(localUserId, org.id, projected.workspaceId);
+            await this.refreshOrgTeams(localUserId, org.id, projected.workspaceId, login !== undefined);
           }
           // Org-level suspension is LOCALLY MATERIALIZED truth: the gate
           // (and guests' requests — the accepted staleness bound) read this
@@ -465,8 +465,9 @@ export class HubOrgReconciler {
   /**
    * Read the organization's WHOLE team list as this person and project it
    * (PRDCT-2813), when the last read is older than `orgTeamsTtlMs` (or never
-   * happened) and no failed read happened within `retryMs`. The login pass
-   * comes through here too, so a login refreshes a stale list. A refinement
+   * happened) and no failed read happened within `retryMs`. The LOGIN pass
+   * reads it whatever the window says (`force`): a login is the freshest
+   * signal there is, and Romain's rule is "at login, then every five minutes". A refinement
    * of a pass whose org list already succeeded: it never throws and never
    * fails the pass; a failed read keeps the previous list and is logged once
    * per throttle window.
@@ -475,10 +476,16 @@ export class HubOrgReconciler {
    * upsert is idempotent and the delete is by membership of the list each
    * one read, so the last writer leaves the hub's list, whichever it is.
    */
-  private async refreshOrgTeams(localUserId: string, hubOrgId: string, workspaceId: string): Promise<void> {
+  private async refreshOrgTeams(
+    localUserId: string,
+    hubOrgId: string,
+    workspaceId: string,
+    /** A login: the freshest signal there is, read whatever the window says (the login pass's own rule). */
+    force = false
+  ): Promise<void> {
     const now = this.now();
     const entry = this.orgTeams.get(hubOrgId);
-    if (entry) {
+    if (entry && !force) {
       if (entry.refreshedAt > 0 && now - entry.refreshedAt < this.dials.orgTeamsTtlMs) return;
       if (entry.lastAttemptAt > entry.refreshedAt && now - entry.lastAttemptAt < this.dials.retryMs) return;
     }
