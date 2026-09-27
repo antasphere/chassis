@@ -228,6 +228,8 @@ export interface ToolAppSlots<TEnvShape extends z.ZodRawShape, TDomain, TBuckets
   rootMiddleware?: (env: ToolEnv<TEnvShape>) => MiddlewareHandler | undefined;
   /** Extra `frame-src` origins of the dashboard CSP (slot 18). */
   cspFrameSrc?: (env: ToolEnv<TEnvShape>) => string[];
+  /** Extra `img-src` sources of the dashboard CSP (slot 18, the same place): `blob:` for a dashboard that shows images it fetched through the API. */
+  cspImgSrc?: (env: ToolEnv<TEnvShape>) => string[];
   /** A public Hono app (slot 19), mounted after well-known, before static and the SPA fallback. */
   publicRoutes?: (core: PlatformCore<TEnvShape, TBuckets, TEvents, never>, tool: TDomain) => Hono;
 }

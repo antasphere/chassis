@@ -31,11 +31,21 @@ export interface CspOptions {
    * that preview a blank frame with no error anywhere but the console.
    */
   frameSrc?: readonly string[];
+  /**
+   * Extra `img-src` sources beyond 'self' and `data:`. A dashboard that
+   * fetches an image through its API (a request that must carry a header an
+   * `<img>` cannot send) shows it from an object URL, and `blob:` must be
+   * allowed for that or the browser refuses the picture with no error
+   * anywhere but the console. A scheme source here is a tool's declaration,
+   * never a chassis default.
+   */
+  imgSrc?: readonly string[];
 }
 
-export function buildCsp(scriptHashes: string[], { frameSrc = [] }: CspOptions = {}): string {
+export function buildCsp(scriptHashes: string[], { frameSrc = [], imgSrc = [] }: CspOptions = {}): string {
   const script = ["'self'", ...scriptHashes].join(' ');
   const frame = ["'self'", ...frameSrc].join(' ');
+  const img = ["'self'", 'data:', ...imgSrc].join(' ');
   return [
     "default-src 'self'",
     `script-src ${script}`,
@@ -47,7 +57,7 @@ export function buildCsp(scriptHashes: string[], { frameSrc = [] }: CspOptions =
     // font files from their two file hosts, and nothing else — the
     // dashboard's own origin stays the only script and connect source.
     "style-src 'self' 'unsafe-inline' https://api.fontshare.com https://fonts.googleapis.com",
-    "img-src 'self' data:",
+    `img-src ${img}`,
     "connect-src 'self'",
     "font-src 'self' https://cdn.fontshare.com https://fonts.gstatic.com",
     `frame-src ${frame}`,

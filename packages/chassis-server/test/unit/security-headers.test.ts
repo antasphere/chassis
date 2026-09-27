@@ -119,6 +119,11 @@ describe('HSTS', () => {
         }
       }
       expect(csp).toContain("img-src 'self' data:;");
+      // A tool's declaration widens img-src by exactly what it names (PRDCT-2725: `blob:`
+      // for an image fetched through the API and shown from an object URL); the chassis
+      // default carries no scheme source but data:.
+      expect(buildCsp([], { imgSrc: ['blob:'] })).toContain("img-src 'self' data: blob:;");
+      expect(buildCsp([], { imgSrc: ['blob:'] })).not.toMatch(/img-src[^;]*https:/);
       expect(csp).toContain("connect-src 'self';");
       expect(csp).toContain("default-src 'self';");
     });

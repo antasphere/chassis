@@ -921,7 +921,8 @@ export async function bootPlatform<
     probeStorage: () => storage.healthcheck(),
     hsts: hstsValue(env),
     rootMiddleware: tool.app?.rootMiddleware?.(env),
-    cspFrameSrc: tool.app?.cspFrameSrc?.(env) ?? []
+    cspFrameSrc: tool.app?.cspFrameSrc?.(env) ?? [],
+    cspImgSrc: tool.app?.cspImgSrc?.(env) ?? []
   });
   rootApp.current = app;
 

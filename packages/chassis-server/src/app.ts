@@ -55,6 +55,8 @@ export interface AppDeps {
   rootMiddleware?: MiddlewareHandler | undefined;
   /** Extra `frame-src` origins of the dashboard CSP (e.g. a tool's viewer origin, for the preview). */
   cspFrameSrc?: readonly string[] | undefined;
+  /** Extra `img-src` sources of the dashboard CSP (e.g. `blob:` for a tool whose dashboard shows images it fetched). */
+  cspImgSrc?: readonly string[] | undefined;
 }
 
 /**
@@ -88,7 +90,8 @@ export async function createApp({
   probeStorage,
   hsts,
   rootMiddleware,
-  cspFrameSrc
+  cspFrameSrc,
+  cspImgSrc
 }: AppDeps): Promise<Hono> {
   const app = new Hono();
 
@@ -101,7 +104,8 @@ export async function createApp({
     logger.warn({ publicDir }, 'no dashboard build found — serving a placeholder at /');
   }
   const csp = buildCsp(indexHtml ? inlineScriptHashes(indexHtml) : [], {
-    frameSrc: [...(cspFrameSrc ?? [])]
+    frameSrc: [...(cspFrameSrc ?? [])],
+    imgSrc: [...(cspImgSrc ?? [])]
   });
 
   app.use('*', requestId(logger));
