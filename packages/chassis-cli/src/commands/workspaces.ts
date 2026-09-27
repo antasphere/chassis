@@ -1,6 +1,6 @@
 import type { Command } from 'commander';
-import type { ChassisClient } from '@antasphere/chassis-sdk';
-import { CliUsageError, printJson, type CliIo } from '../context.js';
+import { PlatformApiError, type ChassisClient } from '@antasphere/chassis-sdk';
+import { CliApiRefusal, CliUsageError, printJson, type CliIo } from '../context.js';
 import type { CliKit } from '../kit.js';
 import { findWorkspace, matchWorkspace } from '../workspace.js';
 
@@ -13,6 +13,12 @@ import { findWorkspace, matchWorkspace } from '../workspace.js';
  * commands a person repairs a stale selection with, so a selection the
  * server refuses must never stop them. There is deliberately no
  * `workspaces create`: `POST /workspaces` is a session-only act.
+ *
+ * `workspace default` (PRDCT-2815) is the other half: not what THIS profile
+ * runs in, but what the SERVER resolves for the person when a request names
+ * no workspace, for every credential of theirs. Set here on a self-hosted
+ * instance; on the cloud it is a setting of the Antasphere account, and the
+ * refusal names the page.
  */
 
 const stripSlashes = (url: string): string => url.replace(/\/+$/, '');
@@ -144,6 +150,57 @@ export function registerWorkspaceCommands<TClient extends ChassisClient<string>>
       const louder = ctx.workspaceSelection;
       if (louder?.source === 'env') {
         io.err.write(`Note: ${describeSelection(louder)} is set and wins over the profile while it is.\n`);
+      }
+    });
+  workspace
+    .command('default [workspace]')
+    .description('Choose the workspace (id or name) the server uses when a command names none')
+    .option('--clear', 'remove the choice (back to the workspace you joined first)', false)
+    .action(async (value: string | undefined, opts: { clear: boolean }, cmd: Command) => {
+      if ((value !== undefined) === opts.clear) {
+        throw new CliUsageError('Pass exactly one of <workspace> (an id or a name) or --clear.');
+      }
+      const ctx = resolveContext(cmd, io);
+      await requireApiKey(ctx, { workspace: false });
+      const target = opts.clear ? null : matchWorkspace((await ctx.client.me()).workspaces, value!);
+      try {
+        await ctx.client.setDefaultWorkspace(target?.id ?? null);
+      } catch (e) {
+        if (e instanceof PlatformApiError && e.code === 'hub_managed') {
+          const url = (e.details as { manageUrl?: unknown } | undefined)?.manageUrl;
+          throw new CliApiRefusal(
+            'Your default workspace is a setting of your Antasphere account' +
+              (typeof url === 'string' && url ? `: choose it on ${url}` : '.') +
+              `\nTo choose where this profile runs, use \`${identity.bin} workspace use\`.`,
+            e.status
+          );
+        }
+        if (e instanceof PlatformApiError && e.code === 'key_pinned') {
+          throw new CliApiRefusal(
+            'This key is pinned to one workspace and cannot change your default workspace. Use a key that is not pinned.',
+            e.status
+          );
+        }
+        throw e;
+      }
+      if (ctx.json) {
+        return printJson(io, {
+          defaultWorkspaceId: target?.id ?? null,
+          ...(target ? { workspace: { id: target.id, name: target.name, role: target.role } } : {})
+        });
+      }
+      io.out.write(
+        target
+          ? `"${target.name}" (${target.id}) is now your default workspace: a command naming none runs in it.\n`
+          : 'No default workspace is chosen: a command naming none runs in the workspace you joined first.\n'
+      );
+      // A selection still wins over the server's default; say so rather than
+      // let the next command land somewhere else in silence.
+      const selection = ctx.workspaceSelection;
+      if (selection && (!target || findWorkspace([target], selection.value).match === null)) {
+        io.err.write(
+          `Note: ${describeSelection(selection)} selects another workspace and wins over the default while it is set.\n`
+        );
       }
     });
 }

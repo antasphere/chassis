@@ -14,6 +14,7 @@ import type {
   CliAuthRequest,
   CliAuthRequested,
   CliAuthRevoked,
+  DefaultWorkspace,
   FileInfo,
   InstanceInfo,
   InvitationAccept,
@@ -293,6 +294,18 @@ export class ChassisClient<TScope extends string> {
    */
   dismissOnboarding(): Promise<OnboardingDismissed> {
     return this.request('POST', '/me/onboarding/dismiss');
+  }
+
+  /**
+   * Choose the workspace a request naming none resolves to, or clear the
+   * choice with `null` (the oldest active membership answers again). The
+   * person's own setting, open to their keys under the write scope; a key
+   * pinned to one workspace answers 403 `key_pinned`. On the cloud edition
+   * the default is set on the account site: 403 `hub_managed` with
+   * `details.manageUrl`. 404 for a workspace the caller is no active member of.
+   */
+  setDefaultWorkspace(workspaceId: string | null): Promise<DefaultWorkspace> {
+    return this.request('PUT', '/me/default-workspace', { workspaceId });
   }
 
   /**

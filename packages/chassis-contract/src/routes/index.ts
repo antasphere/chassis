@@ -6,6 +6,8 @@ import { instanceInfoSchema } from '../schemas/instance.js';
 import { setupRequestSchema, setupResponseSchema } from '../schemas/setup.js';
 import { onboardingDismissedSchema } from '../schemas/me.js';
 import {
+  defaultWorkspaceSchema,
+  defaultWorkspaceSetSchema,
   workspaceCreatedSchema,
   workspaceCreateSchema,
   workspaceUpdatedSchema,
@@ -187,6 +189,29 @@ export const workspaceCreateRoute = createRoute({
     ),
     409: jsonBody(apiErrorSchema, 'Idempotency conflict'),
     429: errorResponses[429]
+  }
+});
+
+// ── The person's default workspace (PRDCT-2815) ─────────────────────────────
+// A setting of the PERSON, not of a workspace: the route names no workspace
+// in its path and is open to every credential of the person (the machine
+// scope allowlist lists it under the write scope, so the CLI sets it), a key
+// pinned to one workspace excepted.
+
+export const defaultWorkspaceSetRoute = createRoute({
+  method: 'put',
+  path: '/me/default-workspace',
+  tags: ['workspaces'],
+  summary: 'Choose the workspace a request naming none resolves to, or clear the choice (self-hosted)',
+  request: {
+    body: jsonRequestBody(defaultWorkspaceSetSchema, 'A workspace the caller is an active member of, or null')
+  },
+  responses: {
+    200: jsonBody(defaultWorkspaceSchema, 'The default as it now is'),
+    400: errorResponses[400],
+    401: errorResponses[401],
+    403: jsonBody(apiErrorSchema, 'hub_managed (cloud: set on the account site), key_pinned'),
+    404: jsonBody(apiErrorSchema, 'Not a workspace the caller is an active member of')
   }
 });
 

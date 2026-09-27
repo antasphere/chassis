@@ -110,6 +110,12 @@ export function createScopeAllowlist<S extends string>({
     // the PUBLIC mint routes (/cli/auth/request, /cli/auth/complete — which
     // never reach this gate anyway), stay fail-closed.
     if (path === '/api/v1/cli/auth/key' && method === 'DELETE') return write;
+    // The person's default workspace (api/workspaces.ts, PRDCT-2815): a
+    // setting of the PERSON a credential stands for, which the CLI sets.
+    // The route names no workspace and acts on the caller's own membership
+    // rows only; a key pinned to one workspace is refused by the handler.
+    // Exact path + method: nothing else under /me opens with it.
+    if (path === '/api/v1/me/default-workspace' && method === 'PUT') return write;
     // Full-workspace export: a dedicated opt-in scope, NEVER the read scope — any
     // admin read key would otherwise be a whole-tenant exfiltration tool.
     // (Account deletion, DELETE /members/{id}, stays deliberately UNLISTED:

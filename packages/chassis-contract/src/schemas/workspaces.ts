@@ -64,6 +64,25 @@ export const workspaceCreatedSchema = z.object({
 export type WorkspaceCreated = z.infer<typeof workspaceCreatedSchema>;
 
 /**
+ * PUT /api/v1/me/default-workspace — the workspace a request naming none
+ * resolves to, chosen by the person for themselves (PRDCT-2815). `null`
+ * clears the choice: the oldest active membership answers again. On the
+ * cloud edition the default is a setting of the person's Antasphere account,
+ * projected here at every sign-in: the route answers 403 `hub_managed` with
+ * the account site to set it on.
+ */
+export const defaultWorkspaceSetSchema = z.object({
+  workspaceId: z.string().uuid().nullable()
+});
+export type DefaultWorkspaceSet = z.infer<typeof defaultWorkspaceSetSchema>;
+
+export const defaultWorkspaceSchema = z.object({
+  /** The LOCAL id of the person's default workspace, or null when none is chosen. */
+  defaultWorkspaceId: z.string().nullable()
+});
+export type DefaultWorkspace = z.infer<typeof defaultWorkspaceSchema>;
+
+/**
  * PATCH /api/v1/workspace — the ACTIVE workspace's own settings (its name,
  * its look), by an owner or an admin of it, from a browser session. The
  * route names no id: a request works in exactly one workspace (ADR 014),
