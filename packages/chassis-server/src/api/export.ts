@@ -11,9 +11,12 @@ import {
   invitations,
   projectMembers,
   projects,
+  projectTeams,
   user as userTable,
   workspaceMembers,
   workspaces,
+  workspaceTeamMembers,
+  workspaceTeams,
   type Db
 } from '@antasphere/chassis-db';
 import type { Env } from '../env.js';

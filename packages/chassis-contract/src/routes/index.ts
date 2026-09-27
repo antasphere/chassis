@@ -394,7 +394,8 @@ export const projectMemberAddRoute = createRoute({
   method: 'post',
   path: '/projects/{id}/members',
   tags: ['projects'],
-  summary: "Add one of the workspace's own active members (by user id or email) or one of its teams (by id) to a project (manager)",
+  summary:
+    "Add one of the workspace's own active members (by user id or email) or one of its teams (by id) to a project (manager)",
   request: {
     params: uuidParams,
     body: jsonRequestBody(projectMemberAddSchema, 'Who, and with which role'),
@@ -478,7 +479,10 @@ const teamErrors = {
   403: jsonBody(apiErrorSchema, 'guest_forbidden, forbidden (not an owner or admin), or hub_managed'),
   404: errorResponses[404]
 };
-const slugTaken409 = jsonBody(apiErrorSchema, 'Another team of this workspace already uses that slug (slug_taken)');
+const slugTaken409 = jsonBody(
+  apiErrorSchema,
+  'Another team of this workspace already uses that slug (slug_taken)'
+);
 
 export const teamsListRoute = createRoute({
   method: 'get',
@@ -486,7 +490,11 @@ export const teamsListRoute = createRoute({
   tags: ['teams'],
   summary: "List the workspace's teams (every member; cursor-paginated)",
   request: { query: teamsListQuerySchema },
-  responses: { 200: jsonBody(teamsListSchema, 'Teams, newest first'), 401: errorResponses[401], 403: teamErrors[403] }
+  responses: {
+    200: jsonBody(teamsListSchema, 'Teams, newest first'),
+    401: errorResponses[401],
+    403: teamErrors[403]
+  }
 });
 
 export const teamGetRoute = createRoute({
