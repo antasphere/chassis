@@ -463,7 +463,9 @@ export function registerWorkspaceRoutes(api: OpenAPIHono, deps: WorkspaceRouteDe
   // workspace, which reaches that workspace alone and must not change where
   // the person's other credentials land. It writes NO audit row: a
   // workspace never learns what its members do elsewhere, and the row would
-  // land in the trail of the workspace the request happened to be in.
+  // land in the trail of the workspace the request happened to be in. The
+  // path is exempt from the generic audit middleware (audit/service.ts),
+  // and the change is on the server log.
   api.use('/me/default-workspace', requireAuth());
   api.openapi(defaultWorkspaceSetRoute, async (c) => {
     const principal = c.get('principal')!;
@@ -543,6 +545,10 @@ export function registerWorkspaceRoutes(api: OpenAPIHono, deps: WorkspaceRouteDe
     if (workspaceId !== null && chosen === null) {
       return c.json(err('not_found', 'Workspace not found'), 404);
     }
+    logger.info(
+      { userId: principal.userId, via: principal.via, defaultWorkspaceId: chosen },
+      'default workspace changed by the person'
+    );
     return c.json({ defaultWorkspaceId: chosen }, 200);
   });
 

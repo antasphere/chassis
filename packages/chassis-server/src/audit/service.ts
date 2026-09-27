@@ -91,6 +91,12 @@ function isAuditExempt(path: string, extraExempt: (path: string) => boolean): bo
     // person happened to be in — and a workspace never learns what its
     // members do elsewhere.
     path === '/api/v1/workspaces' ||
+    // The person's default workspace (api/workspaces.ts, PRDCT-2815) is a
+    // setting of the PERSON: the generic row would land in the trail of
+    // whichever workspace the request resolved to, for its admins to read.
+    // The one machine-reachable exemption: the handler logs the change (the
+    // person, the credential kind) on the server log instead.
+    path === '/api/v1/me/default-workspace' ||
     // The tool's own exemptions (AuditMiddlewareOptions.exempt), evaluated
     // at the place they have always had in this chain.
     extraExempt(path) ||
