@@ -292,7 +292,7 @@ describe(`${bin} projects members, a team as a member`, () => {
       path: '/api/v1/projects/p-1/members',
       body: { teamId: TEAM_ID, role: 'editor' }
     });
-    expect(h.out()).toContain('Added team Design (design) is a editor of this project for its 2 members');
+    expect(h.out()).toContain('Added team Design (design) is an editor of this project for its 2 members');
   });
 
   it('add refuses both a person and --team, or neither, before any request', async () => {

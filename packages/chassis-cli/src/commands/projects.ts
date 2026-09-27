@@ -156,12 +156,15 @@ function projectLines(p: Project): string {
   );
 }
 
+/** `a manager`, `an editor`: the article a role takes. */
+const article = (role: string) => (/^[aeiou]/i.test(role) ? 'an' : 'a');
+
 /** One member, a person or a team, as the human sees it. */
 function memberLine(m: ProjectMember): string {
   if (m.kind === 'team') {
-    return `team ${teamName(m)} (${m.slug}) is a ${m.role} of this project for its ${m.membersCount} member${m.membersCount === 1 ? '' : 's'} (team ${m.teamId}).\n`;
+    return `team ${teamName(m)} (${m.slug}) is ${article(m.role)} ${m.role} of this project for its ${m.membersCount} member${m.membersCount === 1 ? '' : 's'} (team ${m.teamId}).\n`;
   }
-  return `${m.name} <${m.email}> is a ${m.role} of this project (user ${m.userId}).\n`;
+  return `${m.name} <${m.email}> is ${article(m.role)} ${m.role} of this project (user ${m.userId}).\n`;
 }
 
 export function registerProjectCommands<TClient extends ChassisClient<string>>(

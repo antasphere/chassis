@@ -343,7 +343,7 @@ describe(`${bin} projects`, () => {
         body: { email: 'ada@x.co', role: 'editor' }
       }
     ]);
-    expect(h.out()).toContain('Added Ada <ada@x.co> is a editor');
+    expect(h.out()).toContain('Added Ada <ada@x.co> is an editor');
   });
 
   it('members add sends { userId } when the argument carries no @', async () => {
