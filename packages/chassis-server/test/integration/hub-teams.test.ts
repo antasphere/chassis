@@ -327,7 +327,10 @@ describe('re-admission of a single-organization person', () => {
     expect(await seatsOf(rita.email, ORG_C)).toEqual([]);
 
     // The polling page within the TTL: the zero-state read rides the cache,
-    // never a hub call per request.
+    // never a hub call per request. One read first, so the window starts
+    // here (the reads above and the seats query may have outlived the test
+    // dial's 120 ms TTL), then two reads inside it.
+    await me(cookie);
     const before = hub.orgsRequests.length;
     await me(cookie);
     await me(cookie);
