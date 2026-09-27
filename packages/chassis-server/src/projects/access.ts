@@ -22,6 +22,10 @@ import { projects, type DbConn } from '@antasphere/chassis-db';
  *  - **One workspace.** The project belongs to the request's workspace and to
  *    the membership's. A request never spans workspaces (ADR 014).
  *  - **The role ladder.** `manager` contains `editor` contains `viewer`.
+ *  - **A team's grant (PRDCT-2794).** A person seated in a team that holds a
+ *    place on the project holds the team's role, on the same live membership
+ *    row; their effective role is the highest of their own grant and their
+ *    teams'. A seat or a grant removed is felt on the next request.
  *  - **The operator view.** A workspace owner or admin acts as a manager on
  *    every project of the workspace (ADR 006), which is why a project with no
  *    manager stays manageable and there is no last-manager guard.
@@ -77,19 +81,40 @@ export function projectGrantPredicate(
     LADDER[opts.atLeast].map((role) => sql`${role}`),
     sql`, `
   );
+  // Two ways to hold a grant, judged on the SAME live membership row: the
+  // person's own entry (`project_members`), or the entry of a team the person
+  // is seated in (`project_teams` through `workspace_team_members`, PRDCT-2794).
+  // The team's workspace is checked against the membership's like the
+  // project's, so a seat can never reach across workspaces; the effective
+  // role is the highest of the two, which the ladder's IN list yields.
   return sql`EXISTS (
     SELECT 1
-    FROM project_members prj_pm
-    JOIN workspace_members prj_wm ON prj_wm.id = prj_pm.member_id
-    JOIN projects prj_pr ON prj_pr.id = prj_pm.project_id
-    WHERE prj_pm.project_id = ${projectId}
+    FROM workspace_members prj_wm
+    JOIN projects prj_pr ON prj_pr.workspace_id = prj_wm.workspace_id
+    WHERE prj_pr.id = ${projectId}
       AND prj_wm.user_id = ${principal.userId}
       AND prj_wm.workspace_id = ${principal.workspaceId}
       AND prj_wm.is_active
       AND prj_wm.origin <> 'guest'
-      AND prj_pr.workspace_id = prj_wm.workspace_id
-      AND prj_pm.role IN (${roles})
       ${live}
+      AND (
+        EXISTS (
+          SELECT 1 FROM project_members prj_pm
+          WHERE prj_pm.project_id = prj_pr.id
+            AND prj_pm.member_id = prj_wm.id
+            AND prj_pm.role IN (${roles})
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM project_teams prj_pt
+          JOIN workspace_team_members prj_tm ON prj_tm.team_id = prj_pt.team_id
+          JOIN workspace_teams prj_t ON prj_t.id = prj_pt.team_id
+          WHERE prj_pt.project_id = prj_pr.id
+            AND prj_tm.member_id = prj_wm.id
+            AND prj_t.workspace_id = prj_wm.workspace_id
+            AND prj_pt.role IN (${roles})
+        )
+      )
   )`;
 }
 

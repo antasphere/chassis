@@ -548,20 +548,27 @@ export const projectMembers = pgTable(
 );
 
 /**
- * The hub's teams, projected (cloud edition). A hub organization groups its
- * people into teams and may open a tool to some teams only; the hub's
- * caller-scoped `GET /orgs` carries each person's OWN teams in each
- * organization, and the reconcile (`identity/hub-reconcile.ts`) writes what
- * it read here. One row per hub team (`hub_team_id` is unique: a team
- * belongs to one hub organization, so it projects into one workspace);
- * its slug and name follow the hub on drift.
+ * Teams: named groups of the workspace's people, a concept of the chassis on
+ * BOTH editions with the same tables, routes and screens; only the SOURCE
+ * differs (Romain's rule of 27 September 2026, PRDCT-2813).
  *
- * This is never the team's whole roster: the tool reads the hub AS THE
- * PERSON, so a row exists because at least one person here was seated in
- * it at their last reconcile. Written and swept by the reconciler only; a
- * tool never edits it, and the hub stays the truth (a team deleted at the
- * hub keeps its row here until nobody asserts it, harmlessly: no seat
- * points at it). Empty on the self-hosted edition.
+ *  - On the self-hosted edition, and in a cloud-LOCAL workspace, a team is
+ *    the tool's own: `hub_team_id` is NULL, owners and admins create, rename
+ *    and delete it and seat members through `api/teams.ts`. Its slug is
+ *    unique within the workspace (the partial index below).
+ *  - In a hub-origin workspace (cloud) a team is the hub's, projected:
+ *    `hub_team_id` carries the hub's team id (unique: a team belongs to one
+ *    hub organization, so it projects into one workspace), and its slug and
+ *    name follow the hub on drift. The reconciler (`identity/hub-reconcile.ts`)
+ *    writes the organization's whole team list as the signed-in person reads
+ *    it, and the person's own seats from `GET /orgs`; the routes refuse every
+ *    local write there (`hub_managed`, the members' pattern). Its slug is
+ *    unique at the hub, never re-checked here: two projections read at
+ *    different moments may hold the same slug for an instant.
+ *
+ * A team is never a principal: it holds no credential and no role of its
+ * own. What it does hold is a place on a project (`project_teams`, ADR 026),
+ * which its members inherit through the one access rule.
  */
 export const workspaceTeams = pgTable(
   'workspace_teams',
@@ -570,28 +577,39 @@ export const workspaceTeams = pgTable(
     workspaceId: uuid('workspace_id')
       .notNull()
       .references(() => workspaces.id, { onDelete: 'cascade' }),
-    hubTeamId: text('hub_team_id').notNull(),
+    /** The hub's team id for a projected team; NULL for the tool's own. */
+    hubTeamId: text('hub_team_id'),
     slug: text('slug').notNull(),
     name: text('name').notNull(),
+    createdBy: text('created_by').references(() => user.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
   },
   (t) => [
     uniqueIndex('workspace_teams_hub_team_uniq').on(t.hubTeamId),
+    // A local team's slug is unique in its workspace; a projected one is the hub's.
+    uniqueIndex('workspace_teams_workspace_slug_local_uniq')
+      .on(t.workspaceId, t.slug)
+      .where(sql`${t.hubTeamId} IS NULL`),
     index('workspace_teams_workspace_idx').on(t.workspaceId)
   ]
 );
 
 /**
- * One row per (team, person): the PERSON's own seats as the hub asserted
- * them at their last reconcile. **The seat rides on the workspace
+ * One row per (team, person): a seat. **The seat rides on the workspace
  * membership**, like a project grant: `member_id` references the
- * `workspace_members` row with ON DELETE CASCADE, and since the hub sweep
- * only deactivates a membership, the sweep deletes the seats itself in its
- * own transaction (a removal is a removal). Each reconcile pass deletes the
- * person's seats in an organization whose team the hub no longer lists for
- * them. Written and swept by the reconciler only; a tool never edits a
- * seat. Empty on the self-hosted edition.
+ * `workspace_members` row with ON DELETE CASCADE, so a team can only hold
+ * its own workspace's people and a membership that goes takes every seat
+ * with it. A deactivated membership keeps its seats (a pause; the access
+ * predicates refuse it anyway); only an active one can be seated.
+ *
+ * On a local team the routes write the seats (an owner or admin, `added_by`
+ * set). On a projected team the reconciler writes the PERSON's own seats as
+ * the hub asserted them at their last pass, and deletes the seats of a team
+ * the hub no longer lists for them; the hub sweep deletes the seats with the
+ * membership it deactivates (a removal is a removal). A projected roster is
+ * therefore the seats of the people who have signed in here, never the
+ * hub's whole one.
  */
 export const workspaceTeamMembers = pgTable(
   'workspace_team_members',
@@ -603,12 +621,48 @@ export const workspaceTeamMembers = pgTable(
     memberId: uuid('member_id')
       .notNull()
       .references(() => workspaceMembers.id, { onDelete: 'cascade' }),
+    addedBy: text('added_by').references(() => user.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
   },
   (t) => [
     uniqueIndex('workspace_team_members_team_member_uniq').on(t.teamId, t.memberId),
     // "Every seat of this membership" (the sweep's and the pass's walk).
     index('workspace_team_members_member_idx').on(t.memberId)
+  ]
+);
+
+/**
+ * One row per (project, team): a team's place on a project, with a role, like
+ * a person's (PRDCT-2794, ADR 026). Every active non-guest member of the
+ * team holds the role through it, resolved live by the one access rule
+ * (`projects/access.ts`), so a person seated after the grant reads the
+ * project at once and a person unseated loses it at once; the effective role
+ * is the highest of the person's direct grant and their teams' grants. Both
+ * ends cascade: a deleted team, or an archived-then-deleted project, takes
+ * the row. The same on both editions: on cloud the team is the hub's
+ * projection, on self-hosted the tool's own.
+ */
+export const projectTeams = pgTable(
+  'project_teams',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    teamId: uuid('team_id')
+      .notNull()
+      .references(() => workspaceTeams.id, { onDelete: 'cascade' }),
+    role: text('role', { enum: projectRoles }).notNull(),
+    addedBy: text('added_by').references(() => user.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => [
+    uniqueIndex('project_teams_project_team_uniq').on(t.projectId, t.teamId),
+    // The reverse direction: "every project of this team" (the predicate's walk).
+    index('project_teams_team_idx').on(t.teamId),
+    // Serves the members list's keyset pagination (people and teams in one order).
+    index('project_teams_project_created_id_idx').on(t.projectId, t.createdAt, t.id),
+    check('project_teams_role_check', sql`${t.role} IN ('manager', 'editor', 'viewer')`)
   ]
 );
 
@@ -625,3 +679,4 @@ export type ProjectRow = typeof projects.$inferSelect;
 export type ProjectMemberRow = typeof projectMembers.$inferSelect;
 export type WorkspaceTeamRow = typeof workspaceTeams.$inferSelect;
 export type WorkspaceTeamMemberRow = typeof workspaceTeamMembers.$inferSelect;
+export type ProjectTeamRow = typeof projectTeams.$inferSelect;
