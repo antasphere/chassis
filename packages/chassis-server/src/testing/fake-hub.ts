@@ -194,6 +194,15 @@ export class FakeHub {
   teamsMode: 'ok' | 'http500' | 'network' | 'http404' = 'ok';
   /** Hold every /orgs answer this long (single-flight/race tests). */
   orgsDelayMs = 0;
+  /** Hold every GET /api/v1/teams answer this long (the stale-delete race). */
+  teamsDelayMs = 0;
+  /**
+   * The real hub's answer when the cursor's team was deleted between two page
+   * reads: an unknown keyset cursor answers an EMPTY page with no cursor. When
+   * true, every GET /api/v1/teams carrying a `cursor` answers exactly that;
+   * the first page is unaffected.
+   */
+  teamsCursorLost = false;
   /**
    * POST /api/v1/orgs behavior (the as-the-user org creation, PRDCT-2443).
    * `limit` = the hub's per-user cap (403 org_limit_reached, the real hub's
@@ -903,6 +912,7 @@ export class FakeHub {
     const header = req.headers['x-workspace-id'];
     const orgId = (Array.isArray(header) ? header[0] : header) ?? null;
     this.teamsRequests.push({ auth: req.headers.authorization ?? null, orgId });
+    if (this.teamsDelayMs > 0) await new Promise((r) => setTimeout(r, this.teamsDelayMs));
     if (this.teamsMode === 'network') {
       req.destroy();
       return;
@@ -924,6 +934,9 @@ export class FakeHub {
         for (const team of orgs.get(orgId)?.teams ?? []) if (!union.has(team.id)) union.set(team.id, team);
       }
       all = [...union.values()];
+    }
+    if (this.teamsCursorLost && url.searchParams.has('cursor')) {
+      return sendJson(res, 200, { teams: [], nextCursor: null });
     }
     const rawLimit = Number(url.searchParams.get('limit') ?? 50);
     const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 100) : 50;

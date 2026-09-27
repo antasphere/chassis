@@ -1,5 +1,5 @@
 import { Counter } from 'prom-client';
-import { and, eq, inArray, isNotNull, ne, notInArray } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, ne, notInArray, sql } from 'drizzle-orm';
 import {
   projectMembers,
   workspaceMembers,
@@ -484,10 +484,14 @@ export class HubOrgReconciler {
     }
     let outcome: OrgTeamsRefreshOutcome;
     try {
-      // Stamped BEFORE the read, on the wall clock the rows' `created_at`
-      // shares (never the test seam): a team projected here while the hub
-      // answered is newer than the list and is not deleted by it.
-      const readAt = new Date();
+      // Stamped BEFORE the read, on the DATABASE's clock (the one the rows'
+      // `created_at` is written from, whatever the app host's says; never the
+      // test seam): a team projected here while the hub answered is newer
+      // than the list and is not deleted by it.
+      const [clock] = (await this.deps.db.execute(sql`SELECT now() AS now`)).rows as Array<{
+        now: Date | string;
+      }>;
+      const readAt = new Date(clock!.now);
       const result = await this.deps.client.orgTeams(localUserId, hubOrgId);
       if (result.kind === 'ok') {
         await this.deps.db.transaction(async (tx) => {

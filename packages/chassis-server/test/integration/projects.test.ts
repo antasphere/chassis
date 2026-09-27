@@ -1216,6 +1216,50 @@ describe('a team is a project member like a person (PRDCT-2794)', () => {
     );
     expect((await send('DELETE', `/projects/${id}/teams/${team.id}`, { key: writeKey })).status).toBe(200);
   });
+
+  it('a seat and a project entry forced across workspaces grant nothing (verifier round 1, mutation #1)', async () => {
+    // Rows only a direct write can make: the member's membership of THIS
+    // workspace seated in a team of ANOTHER, and that team put on a project of
+    // this workspace. The predicate's `prj_t.workspace_id = prj_wm.workspace_id`
+    // is what refuses it.
+    const crossed = await addActor('crossed');
+    const id = await createProject(actors.manager!, 'Teams: crossed');
+    const foreign = await makeTeam(otherWorkspaceId);
+    await seat(foreign.id, crossed);
+    await app.db.db.insert(projectTeams).values({ projectId: id, teamId: foreign.id, role: 'manager' });
+    await expectError(await send('GET', `/projects/${id}`, crossed), 404, 'not_found');
+    expect(await projectRole(app.db.db, principalOf(crossed), id)).toBeNull();
+    const listed = (await readJson(await send('GET', '/projects?limit=100', crossed))).projects as Array<{
+      id: string;
+    }>;
+    expect(listed.map((p) => p.id)).not.toContain(id);
+  });
+
+  it('a team deleted between the read and the insert answers 404 team_not_found, never 500 (verifier round 1, F2)', async () => {
+    const id = await createProject(actors.manager!, 'Teams: vanishing');
+    const team = await makeTeam();
+    // The race, made certain: the team goes the moment its project entry is inserted.
+    await app.db.pool.query(`
+      CREATE FUNCTION test_vanish_team() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        DELETE FROM workspace_teams WHERE id = NEW.team_id;
+        RETURN NEW;
+      END $$`);
+    try {
+      await app.db.pool.query(`
+        CREATE TRIGGER test_vanish_team BEFORE INSERT ON project_teams
+        FOR EACH ROW EXECUTE FUNCTION test_vanish_team()`);
+      await expectError(await addTeam(actors.manager!, id, team.id, 'viewer'), 404, 'team_not_found');
+    } finally {
+      await app.db.pool.query(`DROP TRIGGER IF EXISTS test_vanish_team ON project_teams`);
+      await app.db.pool.query(`DROP FUNCTION IF EXISTS test_vanish_team()`);
+    }
+    expect(await app.db.db.select().from(projectTeams).where(eq(projectTeams.projectId, id))).toEqual([]);
+    // The refused insert rolled its transaction back, the trigger's delete with it.
+    expect(await app.db.db.select().from(workspaceTeams).where(eq(workspaceTeams.id, team.id))).toHaveLength(
+      1
+    );
+  });
 });
 
 describe('the record: one audit action per change, and the export', () => {

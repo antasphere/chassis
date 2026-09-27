@@ -448,6 +448,41 @@ describe('the cascades', () => {
   });
 });
 
+describe('the team list’s cursor', () => {
+  it('survives the deletion of the team it names: none skipped, none repeated (verifier round 1, F3)', async () => {
+    // A workspace of its own, so the count is exactly the four made here
+    // (and the audit read below stays on the first workspace's own rows).
+    const pagingId = (await app.registry.workspaces.create('Paging', actors.owner!.userId)).workspaceId;
+    const there = { 'x-workspace-id': pagingId };
+    const o = actors.owner!;
+    const made: string[] = [];
+    for (const name of ['Page one', 'Page two', 'Page three', 'Page four']) {
+      const res = await send('POST', '/teams', o, { name }, there);
+      expect(res.status).toBe(201);
+      made.push((await readJson(res)).id as string);
+    }
+
+    const first = await readJson(await send('GET', '/teams?limit=1', o, undefined, there));
+    expect(first.teams).toHaveLength(1);
+    expect(first.nextCursor).toMatch(/^[A-Za-z0-9_-]+$/);
+    const cursorTeam = first.teams[0].id as string;
+    // Newest first: the page names the last one made.
+    expect(cursorTeam).toBe(made[3]);
+    expect((await send('DELETE', `/teams/${cursorTeam}`, o, undefined, there)).status).toBe(200);
+
+    const seen: string[] = [];
+    let cursor: string | null = first.nextCursor;
+    for (let i = 0; cursor !== null && i < 10; i++) {
+      const page = await readJson(await send('GET', `/teams?limit=1&cursor=${cursor}`, o, undefined, there));
+      if (i === 0) expect(page.teams.map((t: { id: string }) => t.id)).toEqual([made[2]]);
+      seen.push(...page.teams.map((t: { id: string }) => t.id));
+      cursor = page.nextCursor;
+    }
+    expect(cursor).toBeNull();
+    expect(seen).toEqual([made[2], made[1], made[0]]);
+  });
+});
+
 describe('machine principals', () => {
   it('the read scope reads the list and cannot create', async () => {
     const readKey = await mintKey(actors.owner!.cookie, [host.scopes.read]);

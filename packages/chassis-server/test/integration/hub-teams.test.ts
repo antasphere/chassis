@@ -9,8 +9,10 @@ import {
   type TestApp,
   host
 } from './helpers.js';
+import { eq } from 'drizzle-orm';
 import { projects, projectTeams, workspaceTeams } from '@antasphere/chassis-db';
 import { FakeHub, type HubUserFixture } from '@antasphere/chassis-server/testing';
+import { projectOrgTeams } from '../../src/identity/hub-projection.js';
 import * as sso from './sso-helpers.js';
 
 /**
@@ -48,6 +50,7 @@ const ORG_T = '27270000-aaaa-4bbb-8ccc-000000000005';
 const TEAM_A = '27270000-dddd-4eee-8fff-00000000000a';
 const TEAM_B = '27270000-dddd-4eee-8fff-00000000000b';
 const TEAM_C = '27270000-dddd-4eee-8fff-00000000000c';
+const ORG_P = '27270000-aaaa-4bbb-8ccc-000000000006';
 
 const DIALS = {
   reconcileTtlMs: 120,
@@ -577,4 +580,161 @@ describe('the organization’s whole team list (PRDCT-2813)', () => {
     expect(text).toMatch(/hub_org_teams_refresh_total\{outcome="ok"\} [1-9]/);
     expect(text).toMatch(/hub_org_teams_refresh_total\{outcome="inconclusive"\} [1-9]/);
   });
+
+  it('an empty page behind a lost cursor is a cut list: nothing is deleted until an honest read (verifier round 1, F1)', async () => {
+    // An org of more than one page (the client asks limit=100): 102 teams.
+    const pagy: HubUserFixture = {
+      sub: 'hub-pagy',
+      email: 'pagy@hub-teams.test',
+      name: 'Pagy Paged',
+      workspaceId: ORG_P,
+      role: 'member',
+      workspaceName: 'Org P'
+    };
+    const many = Array.from({ length: 102 }, (_, i) => {
+      const n = String(i + 1).padStart(3, '0');
+      return { id: `27270000-eeee-4eee-8fff-000000000${n}`, slug: `t-${n}`, name: `Team ${n}` };
+    });
+    const idOf = (n: number) => many[n - 1]!.id;
+    const pagedIds = async () => (await teamsOf(ORG_P)).map((t) => t.hub_team_id);
+    hub.setOrgTeams(ORG_P, many);
+    hub.setUserOrg(pagy.sub, ORG_P, { name: 'Org P', role: 'member', teams: [many[0]!] });
+    const firstRead = hub.teamsRequests.length;
+    const pagyCookie = await sso.ssoLogin(app, hub, pagy);
+    expect(hub.teamsRequests.length).toBe(firstRead + 2);
+    expect(await pagedIds()).toHaveLength(102);
+    expect(await seatsOf(pagy.email, ORG_P)).toEqual([idOf(1)]);
+
+    // Project entries on a team of the first page and on one of the second
+    // (the one an unread page carries: the damage F1 describes).
+    const workspaceId = await workspaceIdOf(ORG_P);
+    const [project] = await app.db.db
+      .insert(projects)
+      .values({ workspaceId, name: 'Paged project' })
+      .returning({ id: projects.id });
+    const local = new Map((await teamsOf(ORG_P)).map((t) => [t.hub_team_id, t.id]));
+    for (const n of [50, 101]) {
+      await app.db.db
+        .insert(projectTeams)
+        .values({ projectId: project!.id, teamId: local.get(idOf(n))!, role: 'viewer' });
+    }
+
+    // t-102 goes at the hub, and the cursor of page 1 is lost: page 2 answers empty.
+    hub.setOrgTeams(ORG_P, many.slice(0, 101));
+    hub.teamsCursorLost = true;
+    try {
+      const okBefore = await refreshOkCount();
+      const before = hub.teamsRequests.length;
+      await expireOrgTeams();
+      expect((await me(pagyCookie)).status).toBe(200);
+      // Both pages were read, the read counted ok, and nothing was deleted.
+      expect(hub.teamsRequests.length).toBe(before + 2);
+      expect(await refreshOkCount()).toBe(okBefore + 1);
+      expect(await pagedIds()).toHaveLength(102);
+      const { rows: entries } = await app.db.pool.query(
+        `SELECT team_id FROM project_teams WHERE project_id = $1`,
+        [project!.id]
+      );
+      expect(entries).toHaveLength(2);
+    } finally {
+      hub.teamsCursorLost = false;
+    }
+
+    // The next honest read deletes what the hub dropped, and only that.
+    await expireOrgTeams();
+    expect((await me(pagyCookie)).status).toBe(200);
+    const after = await pagedIds();
+    expect(after).toHaveLength(101);
+    expect(after).not.toContain(idOf(102));
+    const { rows: kept } = await app.db.pool.query(
+      `SELECT team_id FROM project_teams WHERE project_id = $1 ORDER BY team_id`,
+      [project!.id]
+    );
+    expect(kept.map((r) => r.team_id).sort()).toEqual([local.get(idOf(50)), local.get(idOf(101))].sort());
+  });
+
+  it('a team projected while the list was being read survives that read’s delete; an older one does not (verifier round 1, F5)', async () => {
+    const workspaceId = await workspaceIdOf(ORG_T);
+    const OLD = '27270000-dddd-4eee-8fff-0000000000f1';
+    const LATE = '27270000-dddd-4eee-8fff-0000000000f2';
+    // Projected BEFORE the read, gone from the hub's list: the pass deletes it.
+    await app.db.db.insert(workspaceTeams).values({
+      workspaceId,
+      hubTeamId: OLD,
+      slug: 'old-gone',
+      name: 'Old gone',
+      createdAt: new Date(Date.now() - 60_000)
+    });
+    // Held under the client's own timeout (the dial's orgsTimeoutMs, 400 ms),
+    // long enough for a write to land while the read is out.
+    hub.teamsDelayMs = 250;
+    try {
+      await expireOrgTeams();
+      const before = hub.teamsRequests.length;
+      const pending = me(cookie);
+      // The read has begun (the hub holds it): another replica projects a team
+      // the list it is reading cannot carry yet.
+      for (let i = 0; hub.teamsRequests.length === before && i < 200; i++) await sleep(10);
+      expect(hub.teamsRequests.length).toBe(before + 1);
+      await sleep(20);
+      await app.db.db
+        .insert(workspaceTeams)
+        .values({ workspaceId, hubTeamId: LATE, slug: 'late-comer', name: 'Late comer' });
+      expect((await pending).status).toBe(200);
+    } finally {
+      hub.teamsDelayMs = 0;
+    }
+    const ids = await hubIdsOf();
+    expect(ids).toContain(LATE);
+    expect(ids).not.toContain(OLD);
+    // Tidy: the late team is not the hub's; the next honest pass would take it.
+    await app.db.db.delete(workspaceTeams).where(eq(workspaceTeams.hubTeamId, LATE));
+  });
+
+  it('projectOrgTeams deletes nothing from an incomplete list, and the rest from a complete one (verifier round 1, mutation #11)', async () => {
+    const workspaceId = await workspaceIdOf(ORG_T);
+    expect(await hubIdsOf()).toEqual(expect.arrayContaining([TEAM_A, TEAM_B]));
+    await app.db.db.transaction((tx) => projectOrgTeams(tx, { workspaceId, teams: [A], complete: false }));
+    expect(await hubIdsOf()).toEqual(expect.arrayContaining([TEAM_A, TEAM_B]));
+    await app.db.db.transaction((tx) => projectOrgTeams(tx, { workspaceId, teams: [A], complete: true }));
+    const ids = await hubIdsOf();
+    expect(ids).toContain(TEAM_A);
+    expect(ids).not.toContain(TEAM_B);
+    // The local team is never the projection's.
+    expect(ids).toContain(null);
+  });
+
+  it('an EMPTY org list deletes every projected team and never a local one (verifier round 1, mutation #10)', async () => {
+    const workspaceId = await workspaceIdOf(ORG_T);
+    // B back as a projected team she is NOT seated in (the call above took it).
+    await app.db.db.transaction((tx) => projectOrgTeams(tx, { workspaceId, teams: [A, B], complete: false }));
+    const [local] = await app.db.db
+      .insert(workspaceTeams)
+      .values({ workspaceId, hubTeamId: null, slug: 'local-survivor', name: 'Local survivor' })
+      .returning({ id: workspaceTeams.id });
+    expect(await hubIdsOf()).toEqual(expect.arrayContaining([TEAM_A, TEAM_B]));
+
+    hub.setOrgTeams(ORG_T, []);
+    await expireOrgTeams();
+    expect((await me(cookie)).status).toBe(200);
+
+    const { rows } = await app.db.pool.query(
+      `SELECT id, hub_team_id FROM workspace_teams WHERE workspace_id = $1`,
+      [workspaceId]
+    );
+    const hubIds = rows.map((r) => r.hub_team_id as string | null);
+    expect(hubIds).not.toContain(TEAM_B);
+    // Her own seat's team may come back through `projectTeamSeats`; nothing else projected stays.
+    expect(hubIds.filter((h) => h !== null && h !== TEAM_A)).toEqual([]);
+    expect(rows.map((r) => r.id)).toContain(local!.id);
+  });
 });
+
+async function refreshOkCount(): Promise<number> {
+  const res = await app.app.request('/metrics', {
+    headers: { authorization: 'Bearer hub-teams-metrics-token' }
+  });
+  expect(res.status).toBe(200);
+  const match = /hub_org_teams_refresh_total\{outcome="ok"\} (\d+)/.exec(await res.text());
+  return match ? Number(match[1]) : 0;
+}
