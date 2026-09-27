@@ -848,7 +848,10 @@ export async function bootPlatform<
             hasHubLink: (userId) => hubGrant.hasStoredGrant(userId),
             manageUrl: hub.issuerUrl
           }
-        : undefined
+        : undefined,
+    // Cloud only: the refusal page's hint (/me.hubDenied), read from the
+    // reconciler's memory of the last definitive hub list. undefined on oss.
+    hubDeniedOrgs: hubReconciler ? (userId) => hubReconciler.deniedOrgs(userId) : undefined
   });
 
   // The tool's public routes (e.g. a share-link viewer, Phase 4,

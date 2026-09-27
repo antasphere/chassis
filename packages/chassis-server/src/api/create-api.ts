@@ -262,6 +262,14 @@ export interface ApiDeps<
    */
   workspaceCloud?: WorkspaceCloudDeps | undefined;
   /**
+   * Cloud edition only: the organizations the hub's last definitive list
+   * named as not opening this tool to the person (the reconciler's
+   * `deniedOrgs`, a transient per-replica hint). `/me` carries it as
+   * `hubDenied` so the refusal page can name the organization to ask.
+   * Absent on oss: `/me` never carries the key.
+   */
+  hubDeniedOrgs?: ((userId: string) => Array<{ id: string; name: string }>) | undefined;
+  /**
    * The tool's billing-rail declarations (its `entitlements` slot, asserted
    * at boot): the lists `GET /instance` shows and the routes the one
    * entitlement gate enforces (entitlements/gate.ts).
@@ -846,6 +854,11 @@ export function createApiApp<
    *    1.6.15; re-verify on bump). A break-glass-capable operator always
    *    has a credential row (setup mints it), so they are NEVER ssoOnly
    *    and the dashboard's hint-watch can never sign them out.
+   *  - `hubDenied`: the organizations the person's last definitive hub
+   *    list named as not opening this tool to them (a hint for the
+   *    refusal page; the hub is the truth), and `hubNoAccessUrl`, the
+   *    hub's page that lists whom to ask, ready-made with this tool's
+   *    client id.
    */
   // `/me.canCreateWorkspace` and POST /workspaces judge through the SAME
   // rule (api/workspaces.ts), so the flag never promises what the route
@@ -872,9 +885,17 @@ export function createApiApp<
   };
 
   const CREDENTIAL_PROVIDER_ID = 'credential';
+  const hubNoAccessUrl = hub
+    ? `${hub.issuerUrl.replace(/\/+$/, '')}/no-access?client_id=${encodeURIComponent(hub.clientId)}`
+    : null;
   const cloudSessionExtras = async (
     userId: string
-  ): Promise<{ firstRunPending: boolean; ssoOnly: boolean }> => {
+  ): Promise<{
+    firstRunPending: boolean;
+    ssoOnly: boolean;
+    hubDenied: Array<{ id: string; name: string }>;
+    hubNoAccessUrl: string;
+  }> => {
     const [onboardingRows, accountRows] = await Promise.all([
       db
         .select({ dismissedAt: userOnboarding.dismissedAt })
@@ -886,7 +907,9 @@ export function createApiApp<
     const providers = new Set(accountRows.map((r) => r.providerId));
     return {
       firstRunPending: onboardingRows[0]?.dismissedAt == null,
-      ssoOnly: providers.has(HUB_SSO_PROVIDER_ID) && !providers.has(CREDENTIAL_PROVIDER_ID)
+      ssoOnly: providers.has(HUB_SSO_PROVIDER_ID) && !providers.has(CREDENTIAL_PROVIDER_ID),
+      hubDenied: deps.hubDeniedOrgs?.(userId) ?? [],
+      hubNoAccessUrl: hubNoAccessUrl ?? ''
     };
   };
 
