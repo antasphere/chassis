@@ -55,7 +55,7 @@ describe('mcpInputs, the shared MCP inputs', () => {
   it('are the inputs every chassis tool is listed with, projects included', async () => {
     const tools = await listedTools();
     // The order `tools/list` keeps: the two examples, whoami, then the eleven
-    // project tools the chassis registers before a tool's own set.
+    // project tools and the two team reads the chassis registers before a tool's own set.
     expect(tools.map((t) => t.name)).toEqual([
       'get_me',
       'list_files',
