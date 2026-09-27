@@ -1,6 +1,7 @@
 import { workspaceRoles, type WorkspaceRole } from '@antasphere/chassis-db';
 import type { Logger } from '../logger.js';
 import type { GrantAccess, HubGrantService } from './hub-grant.js';
+import { placeholderWorkspaceName } from './hub-projection.js';
 
 /**
  * The as-the-user hub reader (internal/federation.md, live user-scoped
@@ -39,10 +40,39 @@ export interface HubOrg {
   status: 'active' | 'suspended';
   /** The caller's hub-level default org (at most one entry carries it). */
   isDefault: boolean;
+  /**
+   * The CALLER's own teams in this org (never the org's whole roster: the
+   * hub answers as the person). An absent or malformed field reads as none
+   * (a hub that predates teams); an entry without a uuid id is dropped.
+   */
+  teams: HubTeam[];
+}
+
+/** One of the caller's teams in an org, as `GET /orgs` carries it. */
+export interface HubTeam {
+  /** The hub's team id — what `workspace_teams.hub_team_id` projects. */
+  id: string;
+  slug: string;
+  name: string;
+}
+
+/**
+ * One of the caller's organizations that does NOT open this tool to them
+ * (the org restricts the tool to teams the caller is not in). The hub leaves
+ * such an org out of `orgs`; `denied` names it so the refusal page can say
+ * which organization to ask. A hint for the person, never an access input.
+ */
+export interface HubDeniedOrg {
+  id: string;
+  /** Org display name; the projection's placeholder when absent/blank. */
+  name: string;
 }
 
 export type HubOrgsResult =
-  { kind: 'ok'; orgs: HubOrg[] } | { kind: 'no_link' } | { kind: 'grant_dead' } | { kind: 'inconclusive' };
+  | { kind: 'ok'; orgs: HubOrg[]; denied: HubDeniedOrg[] }
+  | { kind: 'no_link' }
+  | { kind: 'grant_dead' }
+  | { kind: 'inconclusive' };
 
 /**
  * The answer of one as-the-user org creation (PRDCT-2443):
@@ -120,8 +150,64 @@ export function classifyHubOrgCreateAnswer(status: number, body: unknown): HubCr
   return { kind: 'inconclusive' };
 }
 
-/** Strict UUID shape — a malformed hub entry must never reach Postgres' uuid cast. */
+/**
+ * Strict UUID shape, the one id rule of every list this file parses (orgs,
+ * teams, denied orgs). The hub's org and team ids are uuids, and they are
+ * written to Postgres (`workspaces.central_account_id`,
+ * `workspace_teams.hub_team_id`) or shown to the person: an entry of any
+ * other shape is not a hub id, so it is dropped with a log line and never
+ * stored.
+ */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * An org entry's `teams` (forward-compatible: absent or not an array reads
+ * as none). An entry without a uuid id is dropped (UUID_RE); a missing slug
+ * or name reads as the empty string rather than dropping a seat the hub
+ * asserted.
+ */
+export function parseTeams(raw: unknown, logger: Logger): HubTeam[] {
+  if (!Array.isArray(raw)) return [];
+  const teams: HubTeam[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const team = (item ?? {}) as { id?: unknown; slug?: unknown; name?: unknown };
+    if (typeof team.id !== 'string' || !UUID_RE.test(team.id)) {
+      logger.warn('hub /orgs carried a team without a valid id — entry dropped');
+      continue;
+    }
+    if (seen.has(team.id)) continue;
+    seen.add(team.id);
+    teams.push({
+      id: team.id,
+      slug: typeof team.slug === 'string' ? team.slug : '',
+      name: typeof team.name === 'string' ? team.name : ''
+    });
+  }
+  return teams;
+}
+
+/**
+ * The body's top-level `denied` (absent or malformed reads as none; an entry
+ * without a uuid id is dropped, UUID_RE). A missing or blank name reads as
+ * the projection's placeholder, so every reader gets a name to show.
+ */
+export function parseDenied(raw: unknown, logger: Logger): HubDeniedOrg[] {
+  if (!Array.isArray(raw)) return [];
+  const denied: HubDeniedOrg[] = [];
+  for (const item of raw) {
+    const org = (item ?? {}) as { id?: unknown; name?: unknown };
+    if (typeof org.id !== 'string' || !UUID_RE.test(org.id)) {
+      logger.warn('hub /orgs carried a denied org without a valid id — entry dropped');
+      continue;
+    }
+    denied.push({
+      id: org.id,
+      name: typeof org.name === 'string' && org.name.trim() ? org.name : placeholderWorkspaceName(org.id)
+    });
+  }
+  return denied;
+}
 
 /** The SSO callback's access token, handed through by the login path. */
 export interface LoginAccessToken {
@@ -217,6 +303,7 @@ export class HubUserClient {
         role?: unknown;
         status?: unknown;
         isDefault?: unknown;
+        teams?: unknown;
       };
       if (typeof entry.id !== 'string' || !UUID_RE.test(entry.id)) {
         // One bad entry never poisons the list — but its org can neither be
@@ -241,10 +328,11 @@ export class HubUserClient {
         // Unknown/absent status reads as 'active' (forward-compat: status
         // only ever narrows access; enforcement reads the synced column).
         status: entry.status === 'suspended' ? 'suspended' : 'active',
-        isDefault: entry.isDefault === true
+        isDefault: entry.isDefault === true,
+        teams: parseTeams(entry.teams, this.opts.logger)
       });
     }
-    return { kind: 'ok', orgs };
+    return { kind: 'ok', orgs, denied: parseDenied((body as { denied?: unknown }).denied, this.opts.logger) };
   }
 
   /**

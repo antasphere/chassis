@@ -113,6 +113,8 @@ export interface HubOrgEntry {
   role: string;
   status?: 'active' | 'suspended' | undefined;
   isDefault?: boolean | undefined;
+  /** The caller's own teams in this org (served as the entry's `teams`; none when absent). */
+  teams?: Array<{ id: string; slug: string; name: string }> | undefined;
 }
 
 interface HubKey {
@@ -164,6 +166,8 @@ export class FakeHub {
 
   /** sub → orgId → entry: the caller-scoped truth GET /orgs serves. */
   private readonly userOrgs = new Map<string, Map<string, HubOrgEntry>>();
+  /** sub → the orgs that do NOT open the tool to them (GET /orgs' top-level `denied`). */
+  private readonly userDenied = new Map<string, Array<{ id: string; name: string }>>();
   /** Every JWT access token this fake minted (bearer lookup for /api/v1). */
   private readonly accessTokens = new Map<string, AccessTokenRecord>();
   /** Live + rotated-out refresh tokens (rotation families). */
@@ -358,6 +362,11 @@ export class FakeHub {
     this.userOrgs.delete(sub);
   }
 
+  /** The orgs GET /orgs names in `denied` for this sub (default none). */
+  setUserDenied(sub: string, denied: Array<{ id: string; name: string }>): void {
+    this.userDenied.set(sub, denied);
+  }
+
   /**
    * The hub-side "revoke this tool's access" action: tears down the user's
    * refresh families AND forgets their live access tokens (emulating expiry
@@ -458,7 +467,8 @@ export class FakeHub {
       name: fixture.workspaceName === null ? null : (fixture.workspaceName ?? 'Fake Org'),
       role: fixture.role,
       ...(previous?.status !== undefined ? { status: previous.status } : {}),
-      ...(previous?.isDefault !== undefined ? { isDefault: previous.isDefault } : {})
+      ...(previous?.isDefault !== undefined ? { isDefault: previous.isDefault } : {}),
+      ...(previous?.teams !== undefined ? { teams: previous.teams } : {})
     });
     // A fresh H3 exchange is a FRESH grant, like a fresh consent: a past
     // reuse-detection teardown must not shadow a new connect.
@@ -850,10 +860,11 @@ export class FakeHub {
         personal: false,
         status: entry.status ?? 'active',
         isDefault: entry.isDefault ?? false,
-        createdAt: new Date(0).toISOString()
+        createdAt: new Date(0).toISOString(),
+        teams: entry.teams ?? []
       })
     );
-    return sendJson(res, 200, { orgs });
+    return sendJson(res, 200, { orgs, denied: this.userDenied.get(record.sub) ?? [] });
   }
 
   // ── POST /api/v1/orgs: create an org AS THE BEARER ────────────────────
@@ -953,14 +964,15 @@ export class FakeHub {
     this.codeScopes.delete(body.get('code')!);
     // The code's fixture seeds the sub's org registry (the hub knows the
     // orgs its own users SSO from) — name/role from the fixture, while the
-    // registry-level extras (`status`, `isDefault` — managed via
+    // registry-level extras (`status`, `isDefault`, `teams` — managed via
     // `setUserOrg`) survive a re-login's re-seed.
     const previous = this.userOrgs.get(fixture.sub)?.get(fixture.workspaceId);
     this.setUserOrg(fixture.sub, fixture.workspaceId, {
       name: fixture.workspaceName === null ? null : (fixture.workspaceName ?? 'Fake Org'),
       role: fixture.role,
       ...(previous?.status !== undefined ? { status: previous.status } : {}),
-      ...(previous?.isDefault !== undefined ? { isDefault: previous.isDefault } : {})
+      ...(previous?.isDefault !== undefined ? { isDefault: previous.isDefault } : {}),
+      ...(previous?.teams !== undefined ? { teams: previous.teams } : {})
     });
     const clientId = body.get('client_id') ?? this.clientId;
     // A fresh code exchange is a FRESH grant: the real hub's new consent

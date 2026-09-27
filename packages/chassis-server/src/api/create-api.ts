@@ -6,7 +6,7 @@ import { jwtVerify } from 'jose';
 import { registerOpenApiDoc } from './index.js';
 import { ulid } from 'ulid';
 import { and, asc, desc, eq } from 'drizzle-orm';
-import { ACTIVE_WORKSPACE_HEADER } from '@antasphere/chassis-contract';
+import { ACTIVE_WORKSPACE_HEADER, type Principal } from '@antasphere/chassis-contract';
 import { instanceRoute, setupRoute } from '@antasphere/chassis-contract/routes';
 import {
   account,
@@ -42,7 +42,12 @@ import {
 import { constantTimeEquals } from '../util/index.js';
 import { isSecureSetupOrigin } from '../util/index.js';
 import { authBodyGuard } from '../middleware/index.js';
-import { authContext, type PrincipalGate } from '../middleware/index.js';
+import {
+  admitPrincipal,
+  authContext,
+  resolveSessionPrincipal,
+  type PrincipalGate
+} from '../middleware/index.js';
 import { idempotency } from '../middleware/index.js';
 import { crossSiteGuard } from '../middleware/index.js';
 import { jsonDepthLimit } from '../middleware/index.js';
@@ -261,6 +266,24 @@ export interface ApiDeps<
    * Absent on oss: the route creates locally and carries zero hub surface.
    */
   workspaceCloud?: WorkspaceCloudDeps | undefined;
+  /**
+   * Cloud edition only: the organizations the hub's last definitive list
+   * named as not opening this tool to the person (the reconciler's
+   * `deniedOrgs`, a transient per-replica hint). `/me` carries it as
+   * `hubDenied` so the refusal page can name the organization to ask.
+   * Absent on oss: `/me` never carries the key.
+   */
+  hubDeniedOrgs?: ((userId: string) => Array<{ id: string; name: string }>) | undefined;
+  /**
+   * Cloud edition only: the reconciler's cached, single-flight, throttled
+   * pass (`reconcile(userId)`, the live gate's own call), run by the
+   * zero-membership `/me`. A session with no active membership resolves to
+   * no principal, so the live gate never reaches it; without this pass a
+   * person re-seated at the hub after their last organization was swept
+   * would stay on the zero state for ever. Its verdict is not an error
+   * there. Absent on oss: the zero state runs no pass.
+   */
+  reconcileForZeroState?: ((userId: string) => Promise<void>) | undefined;
   /**
    * The tool's billing-rail declarations (its `entitlements` slot, asserted
    * at boot): the lists `GET /instance` shows and the routes the one
@@ -846,6 +869,11 @@ export function createApiApp<
    *    1.6.15; re-verify on bump). A break-glass-capable operator always
    *    has a credential row (setup mints it), so they are NEVER ssoOnly
    *    and the dashboard's hint-watch can never sign them out.
+   *  - `hubDenied`: the organizations the person's last definitive hub
+   *    list named as not opening this tool to them (a hint for the
+   *    refusal page; the hub is the truth), and `hubNoAccessUrl`, the
+   *    hub's page that lists whom to ask, ready-made with this tool's
+   *    client id.
    */
   // `/me.canCreateWorkspace` and POST /workspaces judge through the SAME
   // rule (api/workspaces.ts), so the flag never promises what the route
@@ -872,9 +900,20 @@ export function createApiApp<
   };
 
   const CREDENTIAL_PROVIDER_ID = 'credential';
+  // Cloud only (null on oss): the hub's no-access url, built once here where
+  // the hub is known and handed to the session extras by both callers.
+  const hubNoAccessUrl = hub
+    ? `${hub.issuerUrl.replace(/\/+$/, '')}/no-access?client_id=${encodeURIComponent(hub.clientId)}`
+    : null;
   const cloudSessionExtras = async (
-    userId: string
-  ): Promise<{ firstRunPending: boolean; ssoOnly: boolean }> => {
+    userId: string,
+    noAccessUrl: string
+  ): Promise<{
+    firstRunPending: boolean;
+    ssoOnly: boolean;
+    hubDenied: Array<{ id: string; name: string }>;
+    hubNoAccessUrl: string;
+  }> => {
     const [onboardingRows, accountRows] = await Promise.all([
       db
         .select({ dismissedAt: userOnboarding.dismissedAt })
@@ -886,8 +925,27 @@ export function createApiApp<
     const providers = new Set(accountRows.map((r) => r.providerId));
     return {
       firstRunPending: onboardingRows[0]?.dismissedAt == null,
-      ssoOnly: providers.has(HUB_SSO_PROVIDER_ID) && !providers.has(CREDENTIAL_PROVIDER_ID)
+      ssoOnly: providers.has(HUB_SSO_PROVIDER_ID) && !providers.has(CREDENTIAL_PROVIDER_ID),
+      hubDenied: deps.hubDeniedOrgs?.(userId) ?? [],
+      hubNoAccessUrl: noAccessUrl
     };
+  };
+
+  // The zero-state re-admission: one cached reconcile pass, then the
+  // session is resolved again (the selection rule picks the workspace) and
+  // passed through the live gate exactly as authContext would. Any verdict
+  // other than a resolved, admitted principal keeps the zero state.
+  const readmitAfterReconcile = async (c: Context, userId: string): Promise<Principal | null> => {
+    try {
+      await deps.reconcileForZeroState?.(userId);
+      const resolved = await resolveSessionPrincipal(c, chassisRegistry);
+      if (!resolved || resolved.userId !== userId) return null;
+      const admitted = await admitPrincipal(c, resolved, deps.principalGate);
+      return admitted.ok ? admitted.principal : null;
+    } catch (cause) {
+      logger.warn({ err: cause, userId }, '/me: zero-state re-admission failed — answering the zero state');
+      return null;
+    }
   };
 
   // ── GET /me — whoami across all credential paths ─────────────────────────
@@ -903,7 +961,8 @@ export function createApiApp<
   // session lookup below can only ever fire for cookie-authenticated
   // requests.
   api.openapi(meRoute, async (c) => {
-    const principal = c.get('principal');
+    let principal = c.get('principal');
+    let zeroStateUser: { id: string; email: string; name: string } | null = null;
     if (!principal) {
       // The zero state exists ONLY for the selector-less default request: a
       // session that NAMED a workspace and failed its membership check must
@@ -919,9 +978,23 @@ export function createApiApp<
       if (!session?.user) {
         return c.json(err('unauthenticated', 'Authentication required'), 401);
       }
+      // Re-admission (cloud): the live gate never runs for a principal-less
+      // session, so the zero-state read runs the reconciler's pass itself
+      // (cached ~10 s, single-flight, retry-throttled — a polling refusal
+      // page is not a hub call per request). When the pass re-projected a
+      // membership, the session resolves again through the SAME resolver
+      // and gate authContext uses, and the answer is the normal shape.
+      if (deps.reconcileForZeroState) {
+        principal = await readmitAfterReconcile(c, session.user.id);
+      }
+      if (!principal) zeroStateUser = session.user;
+    }
+    if (!principal) {
+      const user = zeroStateUser;
+      if (!user) return c.json(err('unauthenticated', 'Authentication required'), 401);
       return c.json(
         {
-          user: { id: session.user.id, email: session.user.email, name: session.user.name },
+          user: { id: user.id, email: user.email, name: user.name },
           workspace: null,
           role: null,
           origin: null,
@@ -936,10 +1009,10 @@ export function createApiApp<
           // oss: always false here — a zero-membership user is not an active
           // member of this instance. cloud: true with a live hub link (their
           // next organization is created from this very state).
-          canCreateWorkspace: hub ? await canCreateWorkspace(session.user.id, 'session', clientIp(c)) : false,
+          canCreateWorkspace: hub ? await canCreateWorkspace(user.id, 'session', clientIp(c)) : false,
           // Cloud + session extras (SL-6): the zero state is session-only
           // by construction, so only the edition gate applies here.
-          ...(hub ? await cloudSessionExtras(session.user.id) : {})
+          ...(hubNoAccessUrl !== null ? await cloudSessionExtras(user.id, hubNoAccessUrl) : {})
         },
         200
       );
@@ -1005,7 +1078,9 @@ export function createApiApp<
         // Cloud + SESSION only (SL-6): machine credentials never carry the
         // onboarding/hint-watch keys — the banner and the auto-sign-out are
         // browser concerns.
-        ...(hub && principal.via === 'session' ? await cloudSessionExtras(principal.userId) : {})
+        ...(hubNoAccessUrl !== null && principal.via === 'session'
+          ? await cloudSessionExtras(principal.userId, hubNoAccessUrl)
+          : {})
       },
       200
     );

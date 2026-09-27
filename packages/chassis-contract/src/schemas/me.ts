@@ -152,7 +152,23 @@ export function defineMeSchemas<TScope extends string>(scopeSchema: ScopeSchema<
      * hint-watch may auto-sign-out ssoOnly users when the hub hint cookie
      * disappears, and must never sign out an operator.
      */
-    ssoOnly: z.boolean().optional()
+    ssoOnly: z.boolean().optional(),
+    /**
+     * The organizations the person belongs to at Antasphere that do NOT open
+     * this tool to them (the organization lets only some of its teams use
+     * it). CLOUD + SESSION callers only; absent on the self-hosted edition
+     * and for machine credentials, and a reader treats an absent field as
+     * none (an older server never sends it). A hint for the refusal page,
+     * read from the hub's last answer as the person: the hub is the truth,
+     * never this list.
+     */
+    hubDenied: z.array(z.object({ id: z.string(), name: z.string() })).optional(),
+    /**
+     * The Antasphere page that lists whom to ask for this tool (the owners
+     * and admins of the refusing organization), ready-made with the tool's
+     * client id. CLOUD + SESSION callers only; absent otherwise.
+     */
+    hubNoAccessUrl: z.string().optional()
   });
 
   return { meResponseSchema };

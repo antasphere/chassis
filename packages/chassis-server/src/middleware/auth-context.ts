@@ -1,4 +1,4 @@
-import type { MiddlewareHandler } from 'hono';
+import type { Context, MiddlewareHandler } from 'hono';
 import type { RateLimiterAbstract } from 'rate-limiter-flexible';
 import { ACTIVE_WORKSPACE_HEADER, type Principal } from '@antasphere/chassis-contract';
 import type { PlatformRegistry } from '../platform/registry.js';
@@ -58,6 +58,49 @@ export type PrincipalGate = (
   principal: Principal,
   request: { path: string; method: string }
 ) => Promise<PrincipalGateResult>;
+
+/** The gate's verdict applied: the principal to run the request as, or the exact wire refusal. */
+export type AdmitResult =
+  { ok: true; principal: Principal } | { ok: false; status: 401 | 403; code: string; message: string };
+
+/**
+ * The session half of the credential resolver: the identity provider's live
+ * resolve of the request's cookie (membership re-checked, the selection rule
+ * applied). One home for the call, shared by `authContext` and the
+ * zero-state re-admission of `GET /me`.
+ */
+export function resolveSessionPrincipal(c: Context, registry: PlatformRegistry): Promise<Principal | null> {
+  return registry.identity.resolve({
+    headers: c.req.raw.headers,
+    path: c.req.path,
+    method: c.req.method,
+    requestId: c.get('requestId')
+  });
+}
+
+/**
+ * The edition gate on a resolved principal, with a freshly synced hub role
+ * applied to THIS request (D11): a demoted admin loses admin surfaces now, a
+ * promoted member gains them now. No gate (oss) admits the principal as it
+ * is. One home for the step, shared by `authContext` and the zero-state
+ * re-admission of `GET /me`.
+ */
+export async function admitPrincipal(
+  c: Context,
+  principal: Principal,
+  principalGate: PrincipalGate | undefined
+): Promise<AdmitResult> {
+  if (!principalGate) return { ok: true, principal };
+  const verdict = await principalGate(principal, { path: c.req.path, method: c.req.method });
+  if (!verdict.ok) return verdict;
+  return {
+    ok: true,
+    principal:
+      verdict.role !== undefined && verdict.role !== principal.role
+        ? { ...principal, role: verdict.role }
+        : principal
+  };
+}
 
 export interface AuthContextDeps {
   registry: PlatformRegistry;
@@ -184,12 +227,7 @@ export function authContext({
     } else if (bearer) {
       return apiError(c, 401, 'unsupported_credential', 'Unrecognized bearer credential format');
     } else {
-      principal = await registry.identity.resolve({
-        headers: c.req.raw.headers,
-        path: c.req.path,
-        method: c.req.method,
-        requestId: c.get('requestId')
-      });
+      principal = await resolveSessionPrincipal(c, registry);
     }
 
     // General per-principal request quota (I3), consumed BEFORE the scope
@@ -214,15 +252,11 @@ export function authContext({
     // definitive hub refusal wins over any per-endpoint outcome. Cache-first
     // inside; the hub is never a hard round-trip in the hot path.
     if (principal && principalGate) {
-      const verdict = await principalGate(principal, { path: c.req.path, method: c.req.method });
-      if (!verdict.ok) {
-        return apiError(c, verdict.status, verdict.code, verdict.message);
+      const admitted = await admitPrincipal(c, principal, principalGate);
+      if (!admitted.ok) {
+        return apiError(c, admitted.status, admitted.code, admitted.message);
       }
-      // A freshly synced hub role applies to THIS request (D11): a demoted
-      // admin loses admin surfaces now, a promoted member gains them now.
-      if (verdict.role !== undefined && verdict.role !== principal.role) {
-        principal = { ...principal, role: verdict.role };
-      }
+      principal = admitted.principal;
     }
 
     // Fail-closed scope gate for machine principals only.

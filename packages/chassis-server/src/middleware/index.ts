@@ -1,9 +1,12 @@
 export {
+  type AdmitResult,
   type PrincipalGate,
+  admitPrincipal,
   authContext,
   requireAuth,
   requireNonGuest,
-  requireRole
+  requireRole,
+  resolveSessionPrincipal
 } from './auth-context.js';
 export {
   type BucketDeclaration,

@@ -28,7 +28,6 @@ import { hubApiResource, HubUserClient } from './identity/index.js';
 import { DEFAULT_FEDERATION_DIALS, HubOrgReconciler, type HubFederationDials } from './identity/index.js';
 import { OauthJwtVerifier } from './identity/index.js';
 import { preflightSigningKey } from './identity/index.js';
-import type { OnWorkspaceMiss } from './identity/index.js';
 import { mcpRoutes } from './mcp/index.js';
 import { wellKnownRoutes } from './routes/index.js';
 import { instanceSettings, user as userTable, workspaceMembers, workspaces } from '@antasphere/chassis-db';
@@ -609,11 +608,13 @@ export async function bootPlatform<
       : undefined;
   // The SSO login's fail-closed step 3 (assertLogin) runs THIS reconciler.
   if (hubSso && hubReconciler) hubSso.bindReconciler(hubReconciler);
-  // Unknown-workspace retry, ALL THREE credential kinds: one cached
-  // reconcile + one re-lookup. Rides the reconciler's TTL + throttle, so a
-  // garbage selector can never hammer the hub. undefined on oss.
-  const onWorkspaceMiss: OnWorkspaceMiss | undefined = hubReconciler
-    ? async (userId) => {
+  // The reconciler's CACHED pass (its TTL + retry throttle, so no caller can
+  // hammer the hub), run by two callers: the unknown-workspace retry of all
+  // three credential kinds (one pass + one re-lookup; the requested id is
+  // ignored), and the zero-membership /me (the live gate never reaches a
+  // principal-less session). undefined on oss.
+  const cachedReconcile = hubReconciler
+    ? async (userId: string) => {
         await hubReconciler.reconcile(userId);
       }
     : undefined;
@@ -724,7 +725,7 @@ export async function bootPlatform<
         email.delivers,
         email.delivers, // self-serve password reset needs a delivering email driver
         email.delivers, // self-serve email change needs one too
-        onWorkspaceMiss
+        cachedReconcile
       ),
       entitlements: new AllowAllEntitlements({
         maxFileSizeMb: env.MAX_FILE_SIZE_MB,
@@ -754,7 +755,7 @@ export async function bootPlatform<
         '(internal/security-runbooks.md).'
     );
   }
-  const apiKeys = new ApiKeyService(db.db, pepperRegistry, tool.identity.apiKeyPrefix, onWorkspaceMiss);
+  const apiKeys = new ApiKeyService(db.db, pepperRegistry, tool.identity.apiKeyPrefix, cachedReconcile);
   // Storage: probed at boot — /readyz stays red on an unwritable volume.
   state.reason = 'probing storage';
   const storage = createStorageDriver(env);
@@ -804,7 +805,7 @@ export async function bootPlatform<
 
   // OAuth-bearer verification: local JWKS (we minted the token) + live
   // membership re-check. One instance, shared by the API and /mcp gates.
-  const oauthJwt = new OauthJwtVerifier(auth, db.db, env.PUBLIC_BASE_URL, onWorkspaceMiss);
+  const oauthJwt = new OauthJwtVerifier(auth, db.db, env.PUBLIC_BASE_URL, cachedReconcile);
 
   const api = createApiApp({
     db: db.db,
@@ -848,7 +849,13 @@ export async function bootPlatform<
             hasHubLink: (userId) => hubGrant.hasStoredGrant(userId),
             manageUrl: hub.issuerUrl
           }
-        : undefined
+        : undefined,
+    // Cloud only: the refusal page's hint (/me.hubDenied), read from the
+    // reconciler's memory of the last definitive hub list. undefined on oss.
+    hubDeniedOrgs: hubReconciler ? (userId) => hubReconciler.deniedOrgs(userId) : undefined,
+    // Cloud only: a person re-seated at the hub is re-admitted on a bare
+    // zero-state read. undefined on oss.
+    reconcileForZeroState: cachedReconcile
   });
 
   // The tool's public routes (e.g. a share-link viewer, Phase 4,

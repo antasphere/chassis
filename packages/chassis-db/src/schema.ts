@@ -547,6 +547,71 @@ export const projectMembers = pgTable(
   ]
 );
 
+/**
+ * The hub's teams, projected (cloud edition). A hub organization groups its
+ * people into teams and may open a tool to some teams only; the hub's
+ * caller-scoped `GET /orgs` carries each person's OWN teams in each
+ * organization, and the reconcile (`identity/hub-reconcile.ts`) writes what
+ * it read here. One row per hub team (`hub_team_id` is unique: a team
+ * belongs to one hub organization, so it projects into one workspace);
+ * its slug and name follow the hub on drift.
+ *
+ * This is never the team's whole roster: the tool reads the hub AS THE
+ * PERSON, so a row exists because at least one person here was seated in
+ * it at their last reconcile. Written and swept by the reconciler only; a
+ * tool never edits it, and the hub stays the truth (a team deleted at the
+ * hub keeps its row here until nobody asserts it, harmlessly: no seat
+ * points at it). Empty on the self-hosted edition.
+ */
+export const workspaceTeams = pgTable(
+  'workspace_teams',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    hubTeamId: text('hub_team_id').notNull(),
+    slug: text('slug').notNull(),
+    name: text('name').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => [
+    uniqueIndex('workspace_teams_hub_team_uniq').on(t.hubTeamId),
+    index('workspace_teams_workspace_idx').on(t.workspaceId)
+  ]
+);
+
+/**
+ * One row per (team, person): the PERSON's own seats as the hub asserted
+ * them at their last reconcile. **The seat rides on the workspace
+ * membership**, like a project grant: `member_id` references the
+ * `workspace_members` row with ON DELETE CASCADE, and since the hub sweep
+ * only deactivates a membership, the sweep deletes the seats itself in its
+ * own transaction (a removal is a removal). Each reconcile pass deletes the
+ * person's seats in an organization whose team the hub no longer lists for
+ * them. Written and swept by the reconciler only; a tool never edits a
+ * seat. Empty on the self-hosted edition.
+ */
+export const workspaceTeamMembers = pgTable(
+  'workspace_team_members',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    teamId: uuid('team_id')
+      .notNull()
+      .references(() => workspaceTeams.id, { onDelete: 'cascade' }),
+    memberId: uuid('member_id')
+      .notNull()
+      .references(() => workspaceMembers.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => [
+    uniqueIndex('workspace_team_members_team_member_uniq').on(t.teamId, t.memberId),
+    // "Every seat of this membership" (the sweep's and the pass's walk).
+    index('workspace_team_members_member_idx').on(t.memberId)
+  ]
+);
+
 export type InstanceSettings = typeof instanceSettings.$inferSelect;
 export type Workspace = typeof workspaces.$inferSelect;
 export type WorkspaceMember = typeof workspaceMembers.$inferSelect;
@@ -558,3 +623,5 @@ export type FileRow = typeof files.$inferSelect;
 export type FileUploaderRow = typeof fileUploaders.$inferSelect;
 export type ProjectRow = typeof projects.$inferSelect;
 export type ProjectMemberRow = typeof projectMembers.$inferSelect;
+export type WorkspaceTeamRow = typeof workspaceTeams.$inferSelect;
+export type WorkspaceTeamMemberRow = typeof workspaceTeamMembers.$inferSelect;

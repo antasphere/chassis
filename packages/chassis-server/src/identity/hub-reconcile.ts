@@ -1,10 +1,16 @@
 import { Counter } from 'prom-client';
 import { and, eq, inArray, isNotNull, ne, notInArray } from 'drizzle-orm';
-import { projectMembers, workspaceMembers, workspaces, type Db } from '@antasphere/chassis-db';
+import {
+  projectMembers,
+  workspaceMembers,
+  workspaceTeamMembers,
+  workspaces,
+  type Db
+} from '@antasphere/chassis-db';
 import type { AuditService } from '../audit/service.js';
 import type { Logger } from '../logger.js';
-import { projectOrgMembership } from './hub-projection.js';
-import type { HubUserClient, LoginAccessToken } from './hub-user-client.js';
+import { projectOrgMembership, projectTeamSeats } from './hub-projection.js';
+import type { HubDeniedOrg, HubUserClient, LoginAccessToken } from './hub-user-client.js';
 
 /**
  * Live org reconciliation (internal/federation.md, user-scoped federation): org
@@ -91,6 +97,14 @@ interface CacheEntry {
   lastAttemptAt: number;
   /** The last DEFINITIVE outcome ('ok' | 'no_link' | 'grant_dead'). */
   lastDefinitive: Extract<ReconcilePassOutcome, 'ok' | 'no_link' | 'grant_dead'> | null;
+  /**
+   * The organizations the hub's last definitive list named as NOT opening
+   * this tool to the person (`denied`). A transient hint for the refusal
+   * page, never an access input: the hub is the truth, and nothing here is
+   * stored. An inconclusive pass keeps the previous list; `no_link` and
+   * `grant_dead` clear it.
+   */
+  denied: HubDeniedOrg[];
 }
 
 /** Bound the cache — a user-id flood must never balloon memory. */
@@ -291,12 +305,11 @@ export class HubOrgReconciler {
           )
           .returning({ id: workspaceMembers.id, workspaceId: workspaceMembers.workspaceId });
         if (rows.length > 0) {
-          await tx.delete(projectMembers).where(
-            inArray(
-              projectMembers.memberId,
-              rows.map((row) => row.id)
-            )
-          );
+          const sweptIds = rows.map((row) => row.id);
+          await tx.delete(projectMembers).where(inArray(projectMembers.memberId, sweptIds));
+          // The team seats go with the membership for the same reason: a
+          // re-add at the hub starts from what the hub asserts then.
+          await tx.delete(workspaceTeamMembers).where(inArray(workspaceTeamMembers.memberId, sweptIds));
         }
         return rows;
       });
@@ -316,17 +329,27 @@ export class HubOrgReconciler {
       }
 
       // Then project/upsert every well-formed entry (role upserts are
-      // deliberately NOT audited — the login-projection precedent), and
-      // sync the org-level hub_status. One failing entry logs and moves on:
-      // a single bad org must never starve the others.
+      // deliberately NOT audited — the login-projection precedent), the
+      // person's team seats in it, and sync the org-level hub_status. One
+      // failing entry logs and moves on: a single bad org must never starve
+      // the others.
       for (const org of result.orgs) {
         try {
           if (org.role !== null) {
-            await projectOrgMembership(this.deps.db, {
+            const projected = await projectOrgMembership(this.deps.db, {
               localUserId,
               hubWorkspaceId: org.id,
               hubWorkspaceName: org.name,
               role: org.role
+            });
+            // The person's own seats in this org's teams: one transaction
+            // per org, so a seat set is never half-applied.
+            await this.deps.db.transaction(async (tx) => {
+              await projectTeamSeats(tx, {
+                workspaceId: projected.workspaceId,
+                memberId: projected.memberId,
+                teams: org.teams
+              });
             });
           }
           // Org-level suspension is LOCALLY MATERIALIZED truth: the gate
@@ -394,7 +417,7 @@ export class HubOrgReconciler {
         );
       }
 
-      this.remember(localUserId, 'ok');
+      this.remember(localUserId, 'ok', result.denied);
       this.passes.inc({ outcome: 'ok' });
       return 'ok';
     } catch (err) {
@@ -410,9 +433,20 @@ export class HubOrgReconciler {
     }
   }
 
+  /**
+   * The organizations the person's last definitive hub list named as not
+   * opening this tool to them (`GET /me`'s `hubDenied`, the refusal page's
+   * words). Empty when unknown: never read, evicted, or cleared by a
+   * `no_link` / `grant_dead` pass. Per replica, like the rest of the cache.
+   */
+  deniedOrgs(localUserId: string): HubDeniedOrg[] {
+    return this.cache.get(localUserId)?.denied ?? [];
+  }
+
   private remember(
     localUserId: string,
-    definitive: Extract<ReconcilePassOutcome, 'ok' | 'no_link' | 'grant_dead'> | null
+    definitive: Extract<ReconcilePassOutcome, 'ok' | 'no_link' | 'grant_dead'> | null,
+    denied: HubDeniedOrg[] = []
   ): void {
     const now = this.now();
     pruneOversized(this.cache, (entry) => now - entry.fetchedAt >= this.dials.reconcileTtlMs);
@@ -420,7 +454,10 @@ export class HubOrgReconciler {
     this.cache.set(localUserId, {
       fetchedAt: definitive ? now : (prev?.fetchedAt ?? 0),
       lastAttemptAt: now,
-      lastDefinitive: definitive ?? prev?.lastDefinitive ?? null
+      lastDefinitive: definitive ?? prev?.lastDefinitive ?? null,
+      // 'ok' carries the fresh list; a failed pass keeps the last one; a
+      // definitive no_link / grant_dead has no list to show.
+      denied: definitive === 'ok' ? denied : definitive === null ? (prev?.denied ?? []) : []
     });
   }
 }
