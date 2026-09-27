@@ -485,8 +485,11 @@ export class HubOrgReconciler {
   ): Promise<void> {
     const now = this.now();
     const entry = this.orgTeams.get(hubOrgId);
-    if (entry && !force) {
-      if (entry.refreshedAt > 0 && now - entry.refreshedAt < this.dials.orgTeamsTtlMs) return;
+    if (entry) {
+      // A login skips the window, never the failure throttle: a hub whose
+      // team list hangs must not cost every sign-in one timeout per org
+      // (verifier round 2).
+      if (!force && entry.refreshedAt > 0 && now - entry.refreshedAt < this.dials.orgTeamsTtlMs) return;
       if (entry.lastAttemptAt > entry.refreshedAt && now - entry.lastAttemptAt < this.dials.retryMs) return;
     }
     let outcome: OrgTeamsRefreshOutcome;

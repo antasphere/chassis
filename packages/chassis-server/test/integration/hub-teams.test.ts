@@ -570,9 +570,13 @@ describe('the organization’s whole team list (PRDCT-2813)', () => {
       expect(hub.teamsRequests.length).toBe(teamsBefore + 1);
       expect(await hubIdsOf()).toEqual([TEAM_A, TEAM_B, null]);
 
-      // Another pass inside retryMs: no read.
+      // Another pass inside retryMs: no read. A LOGIN inside retryMs: no
+      // read either (a login skips the window, never the failure throttle,
+      // verifier round 2).
       await sleep(DIALS.reconcileTtlMs + 40);
       expect((await me(cookie)).status).toBe(200);
+      expect(hub.teamsRequests.length).toBe(teamsBefore + 1);
+      cookie = await sso.ssoLogin(app, hub, tom);
       expect(hub.teamsRequests.length).toBe(teamsBefore + 1);
 
       // Past retryMs: read again, an older hub this time.

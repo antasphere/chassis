@@ -66,13 +66,17 @@ export interface ProjectRouteDeps {
 const err = (code: string, message: string) => ({ error: { code, message } });
 const notFound = () => err('not_found', 'Project not found');
 
-/** A Postgres foreign-key violation (SQLSTATE 23503) down drizzle's `cause` chain. */
-function isForeignKeyViolation(e: unknown): boolean {
+/** A Postgres foreign-key violation (SQLSTATE 23503) on the named constraint, down drizzle's `cause` chain. */
+function isForeignKeyViolation(e: unknown, constraint: string): boolean {
   for (let cur: unknown = e, depth = 0; cur instanceof Error && depth < 10; cur = cur.cause, depth++) {
-    if ((cur as { code?: unknown }).code === '23503') return true;
+    const link = cur as { code?: unknown; constraint?: unknown };
+    if (link.code === '23503') return link.constraint === constraint;
   }
   return false;
 }
+
+/** The foreign key a team's place on a project rides on: the one violation that means "the team went". */
+const PROJECT_TEAM_FK = 'project_teams_team_id_workspace_teams_id_fk';
 
 type ProjectWireRow = {
   id: string;
@@ -578,7 +582,7 @@ export function registerProjectRoutes(api: OpenAPIHono, deps: ProjectRouteDeps):
       // The team went between the read above and the insert (a delete at the
       // hub's next pass, an admin's): the foreign key says so, and the answer
       // is the same 404 as a team that never was (verifier round 1, F2).
-      if (isForeignKeyViolation(cause)) {
+      if (isForeignKeyViolation(cause, PROJECT_TEAM_FK)) {
         return c.json(err('team_not_found', 'No team of this workspace matches'), 404);
       }
       throw cause;
