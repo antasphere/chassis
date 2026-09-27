@@ -437,6 +437,37 @@ describe('cloud edition closes the local password-reset surface (P8, ADR 017)', 
     expect(body.verifyUrl).toBeUndefined();
   });
 
+  it('refuses the self-serve email change (403 email_change_disabled, naming the account site), the address unchanged and nothing mailed', async () => {
+    // PRDCT-2818: the dashboard hides the form on cloud, the route was open.
+    // A signed-in caller with a DELIVERING mailer is the strongest case: on
+    // oss this very call mails the verification link.
+    const signIn = await app.app.request(
+      '/api/v1/auth/sign-in/email',
+      jsonIp({ email: OWNER.email, password: OWNER.password })
+    );
+    expect(signIn.status).toBe(200);
+    const cookie = signIn.headers.get('set-cookie')!.split(';')[0]!;
+    const mailsBefore = email.sent.length;
+    const attempts: Array<[string, Record<string, unknown>]> = [
+      ['/api/v1/auth/change-email', { newEmail: 'moved@edreset.test', callbackURL: '/account' }],
+      ['/api/v1/auth/email-otp/request-email-change', { newEmail: 'moved@edreset.test' }],
+      ['/api/v1/auth/email-otp/change-email', { newEmail: 'moved@edreset.test', otp: '000000' }]
+    ];
+    for (const [path, body] of attempts) {
+      const res = await app.app.request(path, jsonIp(body, { cookie }));
+      expect(res.status, path).toBe(403);
+      const answer = await readJson(res);
+      expect(JSON.stringify(answer), path).toContain('email_change_disabled');
+      expect(JSON.stringify(answer), path).toContain(HUB_ENV.HUB_ISSUER_URL.replace(/\/+$/, ''));
+    }
+    expect(email.sent.length).toBe(mailsBefore);
+    const { rows } = await app.db.pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM "user" WHERE email = $1`,
+      [OWNER.email]
+    );
+    expect(rows[0]!.n).toBe(1);
+  });
+
   it('the operator door survives the closure: /sign-in/email + break-glass need no reset route', async () => {
     // The full recovery chain, reset-free: sign in with the SETUP password
     // (D9 minted the operator emailVerified=true), then claim-ownership and

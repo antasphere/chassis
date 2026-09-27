@@ -257,6 +257,11 @@ export class HubSsoService {
     return assertion;
   }
 
+  /** The account site's address (the hub issuer, no trailing slash): where a refusal sends the person. */
+  accountUrl(): string {
+    return this.opts.issuerUrl.replace(/\/+$/, '');
+  }
+
   /** Where a failed SSO login lands — the login page with a stable error code. */
   loginErrorUrl(code: string): string {
     return `${this.opts.publicBaseUrl.replace(/\/+$/, '')}/login?error=${encodeURIComponent(code)}`;
