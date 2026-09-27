@@ -439,12 +439,8 @@ export class HubOrgReconciler {
    * words). Empty when unknown: never read, evicted, or cleared by a
    * `no_link` / `grant_dead` pass. Per replica, like the rest of the cache.
    */
-  deniedOrgs(localUserId: string): Array<{ id: string; name: string }> {
-    return (this.cache.get(localUserId)?.denied ?? []).map((org) => ({
-      id: org.id,
-      // The projection's placeholder for a hub that sends no name.
-      name: org.name ?? `Antasphere workspace ${org.id.slice(0, 8)}`
-    }));
+  deniedOrgs(localUserId: string): HubDeniedOrg[] {
+    return this.cache.get(localUserId)?.denied ?? [];
   }
 
   private remember(

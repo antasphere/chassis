@@ -246,7 +246,6 @@ describe('the denied hint on /me', () => {
     expect(body.workspace).not.toBeNull();
     expect(body.hubDenied).toEqual([{ id: ORG_DENY, name: 'Restricted Org' }]);
     expect(body.hubNoAccessUrl).toBe(noAccessUrl());
-    expect(body.hubNoAccessUrl.endsWith(`/no-access?client_id=${host.hubClientId}`)).toBe(true);
   });
 
   it('an inconclusive pass keeps the last list', async () => {
@@ -365,72 +364,66 @@ describe('re-admission of a single-organization person', () => {
 });
 
 describe('self-hosted edition: no teams, no hint', () => {
-  it('the zero-membership /me runs no hub pass (no reconciler)', async () => {
-    const oss = await createTestApp(await createDatabase(container, 'hub_teams_oss_zero'));
-    try {
-      const setup = await oss.app.request(
-        '/api/v1/setup',
-        sso.json({ setupToken: 'integration-test-setup-token', instanceName: 'TeamsOssZero', owner: OWNER })
-      );
-      expect(setup.status).toBe(201);
-      const signIn = await oss.app.request(
-        '/api/v1/auth/sign-in/email',
-        sso.json({ email: OWNER.email, password: OWNER.password })
-      );
-      expect(signIn.status).toBe(200);
-      // A second owner keeps the workspace owned (the last-owner guard), so
-      // the signed-in owner's own membership can go inactive.
-      const { rows: ws } = await oss.db.pool.query(`SELECT id FROM workspaces LIMIT 1`);
-      const siblingId = 'hub-teams-oss-sibling-owner';
-      await oss.db.pool.query(
-        `INSERT INTO "user" (id, name, email, email_verified) VALUES ($1, 'Sibling Owner', 'sibling@teams-oss.test', true)`,
-        [siblingId]
-      );
-      await oss.db.pool.query(
-        `INSERT INTO workspace_members (workspace_id, user_id, role, is_active) VALUES ($1, $2, 'owner', true)`,
-        [ws[0].id, siblingId]
-      );
-      await oss.db.pool.query(`UPDATE workspace_members SET is_active = false WHERE user_id <> $1`, [
-        siblingId
-      ]);
-      const before = hub.orgsRequests.length;
-      const res = await oss.app.request('/api/v1/me', { headers: { cookie: extractCookie(signIn) } });
-      expect(res.status).toBe(200);
-      const body = await readJson(res);
-      expect(body.workspace).toBeNull();
-      expect(body.workspaces).toEqual([]);
-      expect('hubDenied' in body).toBe(false);
-      expect(hub.orgsRequests.length).toBe(before);
-    } finally {
-      await oss.stop();
-    }
+  // One oss app for both cases: the first reads /me with the owner's
+  // membership live, the second after it went inactive.
+  let oss: TestApp;
+  let cookie: string;
+
+  beforeAll(async () => {
+    oss = await createTestApp(await createDatabase(container, 'hub_teams_oss'));
+    const setup = await oss.app.request(
+      '/api/v1/setup',
+      sso.json({ setupToken: 'integration-test-setup-token', instanceName: 'TeamsOss', owner: OWNER })
+    );
+    expect(setup.status).toBe(201);
+    const signIn = await oss.app.request(
+      '/api/v1/auth/sign-in/email',
+      sso.json({ email: OWNER.email, password: OWNER.password })
+    );
+    expect(signIn.status).toBe(200);
+    cookie = extractCookie(signIn);
+  }, 240_000);
+
+  afterAll(async () => {
+    await oss?.stop();
   });
 
   it('/me carries no hubDenied and the two tables stay empty across a login', async () => {
-    const oss = await createTestApp(await createDatabase(container, 'hub_teams_oss'));
-    try {
-      const setup = await oss.app.request(
-        '/api/v1/setup',
-        sso.json({ setupToken: 'integration-test-setup-token', instanceName: 'TeamsOss', owner: OWNER })
-      );
-      expect(setup.status).toBe(201);
-      const signIn = await oss.app.request(
-        '/api/v1/auth/sign-in/email',
-        sso.json({ email: OWNER.email, password: OWNER.password })
-      );
-      expect(signIn.status).toBe(200);
-      const res = await oss.app.request('/api/v1/me', { headers: { cookie: extractCookie(signIn) } });
-      expect(res.status).toBe(200);
-      const body = await readJson(res);
-      expect('hubDenied' in body).toBe(false);
-      expect('hubNoAccessUrl' in body).toBe(false);
-      const { rows } = await oss.db.pool.query(
-        `SELECT (SELECT count(*) FROM workspace_teams)::int AS teams,
-                (SELECT count(*) FROM workspace_team_members)::int AS seats`
-      );
-      expect(rows).toEqual([{ teams: 0, seats: 0 }]);
-    } finally {
-      await oss.stop();
-    }
+    const res = await oss.app.request('/api/v1/me', { headers: { cookie } });
+    expect(res.status).toBe(200);
+    const body = await readJson(res);
+    expect('hubDenied' in body).toBe(false);
+    expect('hubNoAccessUrl' in body).toBe(false);
+    const { rows } = await oss.db.pool.query(
+      `SELECT (SELECT count(*) FROM workspace_teams)::int AS teams,
+              (SELECT count(*) FROM workspace_team_members)::int AS seats`
+    );
+    expect(rows).toEqual([{ teams: 0, seats: 0 }]);
+  });
+
+  it('the zero-membership /me runs no hub pass (no reconciler)', async () => {
+    // A second owner keeps the workspace owned (the last-owner guard), so
+    // the signed-in owner's own membership can go inactive.
+    const { rows: ws } = await oss.db.pool.query(`SELECT id FROM workspaces LIMIT 1`);
+    const siblingId = 'hub-teams-oss-sibling-owner';
+    await oss.db.pool.query(
+      `INSERT INTO "user" (id, name, email, email_verified) VALUES ($1, 'Sibling Owner', 'sibling@teams-oss.test', true)`,
+      [siblingId]
+    );
+    await oss.db.pool.query(
+      `INSERT INTO workspace_members (workspace_id, user_id, role, is_active) VALUES ($1, $2, 'owner', true)`,
+      [ws[0].id, siblingId]
+    );
+    await oss.db.pool.query(`UPDATE workspace_members SET is_active = false WHERE user_id <> $1`, [
+      siblingId
+    ]);
+    const before = hub.orgsRequests.length;
+    const res = await oss.app.request('/api/v1/me', { headers: { cookie } });
+    expect(res.status).toBe(200);
+    const body = await readJson(res);
+    expect(body.workspace).toBeNull();
+    expect(body.workspaces).toEqual([]);
+    expect('hubDenied' in body).toBe(false);
+    expect(hub.orgsRequests.length).toBe(before);
   });
 });

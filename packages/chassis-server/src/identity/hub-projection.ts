@@ -36,6 +36,15 @@ export interface OrgMembershipProjection {
   role: WorkspaceRole;
 }
 
+/**
+ * The name a hub org goes by when the hub sends none (an older hub, a blank
+ * name): recognizable, and self-healing wherever the next hub read carries
+ * the real one. The projection's H1 fallback and the refusal page's hint.
+ */
+export function placeholderWorkspaceName(hubOrgId: string): string {
+  return `Antasphere workspace ${hubOrgId.slice(0, 8)}`;
+}
+
 export async function projectOrgMembership(
   db: Db,
   projection: OrgMembershipProjection
@@ -50,7 +59,7 @@ export async function projectOrgMembership(
     // H1 fallback: without workspace_name (older hub), project under a
     // recognizable placeholder — self-healing, the re-sync below renames
     // it at the first call whose hub data carries the name.
-    const name = hubWorkspaceName ?? `Antasphere workspace ${hubWorkspaceId.slice(0, 8)}`;
+    const name = hubWorkspaceName ?? placeholderWorkspaceName(hubWorkspaceId);
     const inserted = await db
       .insert(workspaces)
       .values({ name, centralAccountId: hubWorkspaceId })

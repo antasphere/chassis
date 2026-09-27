@@ -1,6 +1,7 @@
 import { workspaceRoles, type WorkspaceRole } from '@antasphere/chassis-db';
 import type { Logger } from '../logger.js';
 import type { GrantAccess, HubGrantService } from './hub-grant.js';
+import { placeholderWorkspaceName } from './hub-projection.js';
 
 /**
  * The as-the-user hub reader (internal/federation.md, live user-scoped
@@ -42,7 +43,7 @@ export interface HubOrg {
   /**
    * The CALLER's own teams in this org (never the org's whole roster: the
    * hub answers as the person). An absent or malformed field reads as none
-   * (a hub that predates teams); an entry without a string id is dropped.
+   * (a hub that predates teams); an entry without a uuid id is dropped.
    */
   teams: HubTeam[];
 }
@@ -63,8 +64,8 @@ export interface HubTeam {
  */
 export interface HubDeniedOrg {
   id: string;
-  /** Org display name; null when absent/blank. */
-  name: string | null;
+  /** Org display name; the projection's placeholder when absent/blank. */
+  name: string;
 }
 
 export type HubOrgsResult =
@@ -149,21 +150,33 @@ export function classifyHubOrgCreateAnswer(status: number, body: unknown): HubCr
   return { kind: 'inconclusive' };
 }
 
-/** Strict UUID shape — a malformed hub entry must never reach Postgres' uuid cast. */
+/**
+ * Strict UUID shape, the one id rule of every list this file parses (orgs,
+ * teams, denied orgs). The hub's org and team ids are uuids, and they are
+ * written to Postgres (`workspaces.central_account_id`,
+ * `workspace_teams.hub_team_id`) or shown to the person: an entry of any
+ * other shape is not a hub id, so it is dropped with a log line and never
+ * stored.
+ */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * An org entry's `teams` (forward-compatible: absent or not an array reads
- * as none). An entry without a string id is dropped; a missing slug or name
- * reads as the empty string rather than dropping a seat the hub asserted.
+ * as none). An entry without a uuid id is dropped (UUID_RE); a missing slug
+ * or name reads as the empty string rather than dropping a seat the hub
+ * asserted.
  */
-export function parseTeams(raw: unknown): HubTeam[] {
+export function parseTeams(raw: unknown, logger: Logger): HubTeam[] {
   if (!Array.isArray(raw)) return [];
   const teams: HubTeam[] = [];
   const seen = new Set<string>();
   for (const item of raw) {
     const team = (item ?? {}) as { id?: unknown; slug?: unknown; name?: unknown };
-    if (typeof team.id !== 'string' || team.id === '' || seen.has(team.id)) continue;
+    if (typeof team.id !== 'string' || !UUID_RE.test(team.id)) {
+      logger.warn('hub /orgs carried a team without a valid id — entry dropped');
+      continue;
+    }
+    if (seen.has(team.id)) continue;
     seen.add(team.id);
     teams.push({
       id: team.id,
@@ -174,14 +187,24 @@ export function parseTeams(raw: unknown): HubTeam[] {
   return teams;
 }
 
-/** The body's top-level `denied` (absent or malformed reads as none; entries without a uuid id dropped). */
-export function parseDenied(raw: unknown): HubDeniedOrg[] {
+/**
+ * The body's top-level `denied` (absent or malformed reads as none; an entry
+ * without a uuid id is dropped, UUID_RE). A missing or blank name reads as
+ * the projection's placeholder, so every reader gets a name to show.
+ */
+export function parseDenied(raw: unknown, logger: Logger): HubDeniedOrg[] {
   if (!Array.isArray(raw)) return [];
   const denied: HubDeniedOrg[] = [];
   for (const item of raw) {
     const org = (item ?? {}) as { id?: unknown; name?: unknown };
-    if (typeof org.id !== 'string' || !UUID_RE.test(org.id)) continue;
-    denied.push({ id: org.id, name: typeof org.name === 'string' && org.name.trim() ? org.name : null });
+    if (typeof org.id !== 'string' || !UUID_RE.test(org.id)) {
+      logger.warn('hub /orgs carried a denied org without a valid id — entry dropped');
+      continue;
+    }
+    denied.push({
+      id: org.id,
+      name: typeof org.name === 'string' && org.name.trim() ? org.name : placeholderWorkspaceName(org.id)
+    });
   }
   return denied;
 }
@@ -306,10 +329,10 @@ export class HubUserClient {
         // only ever narrows access; enforcement reads the synced column).
         status: entry.status === 'suspended' ? 'suspended' : 'active',
         isDefault: entry.isDefault === true,
-        teams: parseTeams(entry.teams)
+        teams: parseTeams(entry.teams, this.opts.logger)
       });
     }
-    return { kind: 'ok', orgs, denied: parseDenied((body as { denied?: unknown }).denied) };
+    return { kind: 'ok', orgs, denied: parseDenied((body as { denied?: unknown }).denied, this.opts.logger) };
   }
 
   /**

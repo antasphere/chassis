@@ -42,7 +42,12 @@ import {
 import { constantTimeEquals } from '../util/index.js';
 import { isSecureSetupOrigin } from '../util/index.js';
 import { authBodyGuard } from '../middleware/index.js';
-import { authContext, type PrincipalGate } from '../middleware/index.js';
+import {
+  admitPrincipal,
+  authContext,
+  resolveSessionPrincipal,
+  type PrincipalGate
+} from '../middleware/index.js';
 import { idempotency } from '../middleware/index.js';
 import { crossSiteGuard } from '../middleware/index.js';
 import { jsonDepthLimit } from '../middleware/index.js';
@@ -895,11 +900,14 @@ export function createApiApp<
   };
 
   const CREDENTIAL_PROVIDER_ID = 'credential';
+  // Cloud only (null on oss): the hub's no-access url, built once here where
+  // the hub is known and handed to the session extras by both callers.
   const hubNoAccessUrl = hub
     ? `${hub.issuerUrl.replace(/\/+$/, '')}/no-access?client_id=${encodeURIComponent(hub.clientId)}`
     : null;
   const cloudSessionExtras = async (
-    userId: string
+    userId: string,
+    noAccessUrl: string
   ): Promise<{
     firstRunPending: boolean;
     ssoOnly: boolean;
@@ -919,7 +927,7 @@ export function createApiApp<
       firstRunPending: onboardingRows[0]?.dismissedAt == null,
       ssoOnly: providers.has(HUB_SSO_PROVIDER_ID) && !providers.has(CREDENTIAL_PROVIDER_ID),
       hubDenied: deps.hubDeniedOrgs?.(userId) ?? [],
-      hubNoAccessUrl: hubNoAccessUrl ?? ''
+      hubNoAccessUrl: noAccessUrl
     };
   };
 
@@ -930,19 +938,10 @@ export function createApiApp<
   const readmitAfterReconcile = async (c: Context, userId: string): Promise<Principal | null> => {
     try {
       await deps.reconcileForZeroState?.(userId);
-      const resolved = await chassisRegistry.identity.resolve({
-        headers: c.req.raw.headers,
-        path: c.req.path,
-        method: c.req.method,
-        requestId: c.get('requestId')
-      });
+      const resolved = await resolveSessionPrincipal(c, chassisRegistry);
       if (!resolved || resolved.userId !== userId) return null;
-      if (!deps.principalGate) return resolved;
-      const verdict = await deps.principalGate(resolved, { path: c.req.path, method: c.req.method });
-      if (!verdict.ok) return null;
-      return verdict.role !== undefined && verdict.role !== resolved.role
-        ? { ...resolved, role: verdict.role }
-        : resolved;
+      const admitted = await admitPrincipal(c, resolved, deps.principalGate);
+      return admitted.ok ? admitted.principal : null;
     } catch (cause) {
       logger.warn({ err: cause, userId }, '/me: zero-state re-admission failed — answering the zero state');
       return null;
@@ -1013,7 +1012,7 @@ export function createApiApp<
           canCreateWorkspace: hub ? await canCreateWorkspace(user.id, 'session', clientIp(c)) : false,
           // Cloud + session extras (SL-6): the zero state is session-only
           // by construction, so only the edition gate applies here.
-          ...(hub ? await cloudSessionExtras(user.id) : {})
+          ...(hubNoAccessUrl !== null ? await cloudSessionExtras(user.id, hubNoAccessUrl) : {})
         },
         200
       );
@@ -1079,7 +1078,9 @@ export function createApiApp<
         // Cloud + SESSION only (SL-6): machine credentials never carry the
         // onboarding/hint-watch keys — the banner and the auto-sign-out are
         // browser concerns.
-        ...(hub && principal.via === 'session' ? await cloudSessionExtras(principal.userId) : {})
+        ...(hubNoAccessUrl !== null && principal.via === 'session'
+          ? await cloudSessionExtras(principal.userId, hubNoAccessUrl)
+          : {})
       },
       200
     );
