@@ -1,6 +1,5 @@
 import { inArray } from 'drizzle-orm';
-import { projectMembers, workspaceTeamMembers } from '@antasphere/chassis-db';
-import type { DbConn } from '../identity/hub-projection.js';
+import { projectMembers, workspaceTeamMembers, type DbConn } from '@antasphere/chassis-db';
 
 /**
  * What a REMOVAL takes away beside the membership itself, stated once for
