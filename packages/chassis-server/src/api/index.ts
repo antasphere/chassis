@@ -18,6 +18,7 @@ export { registerOpenApiDoc } from './openapi-doc.js';
 export { registerProjectRoutes } from './projects.js';
 export { registerSsoConnectRoutes } from './sso-connect.js';
 export { registerSsoLogoutRoutes } from './sso-logout.js';
+export { registerTeamRoutes } from './teams.js';
 export {
   type WorkspaceCloudDeps,
   registerWorkspaceRoutes,

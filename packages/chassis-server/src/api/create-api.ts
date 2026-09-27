@@ -73,6 +73,7 @@ import { registerSsoConnectRoutes } from './index.js';
 import { registerSsoLogoutRoutes } from './index.js';
 import { registerMemberRoutes } from './index.js';
 import { registerProjectRoutes } from './index.js';
+import { registerTeamRoutes } from './index.js';
 import { registerApiKeyRoutes } from './index.js';
 import { registerInvitationRoutes } from './index.js';
 import { registerAuditRoutes } from './index.js';
@@ -1180,6 +1181,9 @@ export function createApiApp<
     hubManaged,
     guestTargetMessage: tool.copy.guestTarget
   });
+  // Teams: the tool's own on self-hosted (and in a cloud-local workspace), the
+  // hub's projection in a hub-origin workspace, where the members' gate refuses the writes.
+  registerTeamRoutes(api, { db, hubManaged });
   registerApiKeyRoutes(api, db, apiKeyService, { apiKeysListRoute, apiKeyCreateRoute, apiKeyRevokeRoute });
   registerInvitationRoutes(api, {
     db,
