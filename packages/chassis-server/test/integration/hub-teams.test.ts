@@ -23,7 +23,9 @@ import * as sso from './sso-helpers.js';
  * Pinned here: seats follow the hub on every pass (added, removed, a team
  * renamed in place); a swept org takes the person's seats with the
  * membership (and the project grants, as before); the denied hint follows
- * the last definitive pass and survives an inconclusive one; the
+ * the last definitive pass and survives an inconclusive one; a person
+ * whose only org was swept is re-admitted by a bare zero-state /me once the
+ * hub lists it again (that read runs the cached pass itself); the
  * self-hosted edition carries none of it.
  */
 
@@ -32,8 +34,10 @@ const OWNER = { email: 'owner@hub-teams.test', name: 'Op Owner', password: 'op-o
 const ORG_A = '27270000-aaaa-4bbb-8ccc-000000000001';
 const ORG_B = '27270000-aaaa-4bbb-8ccc-000000000002';
 const ORG_DENY = '27270000-aaaa-4bbb-8ccc-000000000003';
+const ORG_C = '27270000-aaaa-4bbb-8ccc-000000000004';
 const TEAM_1 = '27270000-dddd-4eee-8fff-000000000001';
 const TEAM_2 = '27270000-dddd-4eee-8fff-000000000002';
+const TEAM_3 = '27270000-dddd-4eee-8fff-000000000003';
 
 const DIALS = {
   reconcileTtlMs: 120,
@@ -286,7 +290,119 @@ describe('the denied hint on /me', () => {
   });
 });
 
+describe('re-admission of a single-organization person', () => {
+  // Her ONLY org: once it is swept, her session resolves to no workspace and
+  // the live gate never runs for it — the zero-state /me runs the pass.
+  const rita: HubUserFixture = {
+    sub: 'hub-rita',
+    email: 'rita@hub-teams.test',
+    name: 'Rita Readmitted',
+    workspaceId: ORG_C,
+    role: 'member',
+    workspaceName: 'Org C'
+  };
+  let cookie = '';
+
+  it('a bare /me re-admits her once the hub lists her only organization again', async () => {
+    hub.setUserOrg(rita.sub, ORG_C, {
+      name: 'Org C',
+      role: 'member',
+      teams: [{ id: TEAM_3, slug: 'ops', name: 'Ops' }]
+    });
+    cookie = await sso.ssoLogin(app, hub, rita);
+    const workspaceId = await workspaceIdOf(ORG_C);
+    expect(await seatsOf(rita.email, ORG_C)).toEqual([TEAM_3]);
+
+    // The owner takes her off the team the tool is open to: the hub leaves
+    // the org out of her list and names it as denied.
+    hub.removeUserOrg(rita.sub, ORG_C);
+    hub.setUserDenied(rita.sub, [{ id: ORG_C, name: 'Org C' }]);
+    await expireTtl();
+    const revoked = await me(cookie);
+    expect(revoked.status).toBe(401);
+    expect((await readJson(revoked)).error.code).toBe('membership_revoked');
+    const zero = await readJson(await me(cookie));
+    expect(zero.workspace).toBeNull();
+    expect(zero.hubDenied).toEqual([{ id: ORG_C, name: 'Org C' }]);
+    expect(await seatsOf(rita.email, ORG_C)).toEqual([]);
+
+    // The polling page within the TTL: the zero-state read rides the cache,
+    // never a hub call per request.
+    const before = hub.orgsRequests.length;
+    await me(cookie);
+    await me(cookie);
+    expect(hub.orgsRequests.length).toBe(before);
+
+    // Re-seated at the hub: a BARE /me (no X-Workspace-Id) past the TTL
+    // answers the normal shape with her workspace.
+    hub.setUserOrg(rita.sub, ORG_C, {
+      name: 'Org C',
+      role: 'member',
+      teams: [{ id: TEAM_3, slug: 'ops', name: 'Ops' }]
+    });
+    hub.setUserDenied(rita.sub, []);
+    await expireTtl();
+    const back = await me(cookie);
+    expect(back.status).toBe(200);
+    const body = await readJson(back);
+    expect(hub.orgsRequests.length).toBe(before + 1);
+    expect(body.workspace).toMatchObject({ id: workspaceId, name: 'Org C', hubOrigin: true });
+    expect(body.activeWorkspaceId).toBe(workspaceId);
+    expect(body.role).toBe('member');
+    expect(body.workspaces.map((w: { id: string }) => w.id)).toEqual([workspaceId]);
+    expect(body.hubDenied).toEqual([]);
+    const { rows } = await app.db.pool.query(
+      `SELECT m.is_active FROM workspace_members m JOIN "user" u ON u.id = m.user_id
+        WHERE u.email = $1 AND m.workspace_id = $2`,
+      [rita.email, workspaceId]
+    );
+    expect(rows).toEqual([{ is_active: true }]);
+    expect(await seatsOf(rita.email, ORG_C)).toEqual([TEAM_3]);
+  });
+});
+
 describe('self-hosted edition: no teams, no hint', () => {
+  it('the zero-membership /me runs no hub pass (no reconciler)', async () => {
+    const oss = await createTestApp(await createDatabase(container, 'hub_teams_oss_zero'));
+    try {
+      const setup = await oss.app.request(
+        '/api/v1/setup',
+        sso.json({ setupToken: 'integration-test-setup-token', instanceName: 'TeamsOssZero', owner: OWNER })
+      );
+      expect(setup.status).toBe(201);
+      const signIn = await oss.app.request(
+        '/api/v1/auth/sign-in/email',
+        sso.json({ email: OWNER.email, password: OWNER.password })
+      );
+      expect(signIn.status).toBe(200);
+      // A second owner keeps the workspace owned (the last-owner guard), so
+      // the signed-in owner's own membership can go inactive.
+      const { rows: ws } = await oss.db.pool.query(`SELECT id FROM workspaces LIMIT 1`);
+      const siblingId = 'hub-teams-oss-sibling-owner';
+      await oss.db.pool.query(
+        `INSERT INTO "user" (id, name, email, email_verified) VALUES ($1, 'Sibling Owner', 'sibling@teams-oss.test', true)`,
+        [siblingId]
+      );
+      await oss.db.pool.query(
+        `INSERT INTO workspace_members (workspace_id, user_id, role, is_active) VALUES ($1, $2, 'owner', true)`,
+        [ws[0].id, siblingId]
+      );
+      await oss.db.pool.query(`UPDATE workspace_members SET is_active = false WHERE user_id <> $1`, [
+        siblingId
+      ]);
+      const before = hub.orgsRequests.length;
+      const res = await oss.app.request('/api/v1/me', { headers: { cookie: extractCookie(signIn) } });
+      expect(res.status).toBe(200);
+      const body = await readJson(res);
+      expect(body.workspace).toBeNull();
+      expect(body.workspaces).toEqual([]);
+      expect('hubDenied' in body).toBe(false);
+      expect(hub.orgsRequests.length).toBe(before);
+    } finally {
+      await oss.stop();
+    }
+  });
+
   it('/me carries no hubDenied and the two tables stay empty across a login', async () => {
     const oss = await createTestApp(await createDatabase(container, 'hub_teams_oss'));
     try {

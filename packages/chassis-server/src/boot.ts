@@ -851,7 +851,15 @@ export async function bootPlatform<
         : undefined,
     // Cloud only: the refusal page's hint (/me.hubDenied), read from the
     // reconciler's memory of the last definitive hub list. undefined on oss.
-    hubDeniedOrgs: hubReconciler ? (userId) => hubReconciler.deniedOrgs(userId) : undefined
+    hubDeniedOrgs: hubReconciler ? (userId) => hubReconciler.deniedOrgs(userId) : undefined,
+    // Cloud only: the zero-membership /me runs the cached pass itself (the
+    // live gate never reaches a principal-less session), so a person
+    // re-seated at the hub is re-admitted on a bare read. undefined on oss.
+    reconcileForZeroState: hubReconciler
+      ? async (userId) => {
+          await hubReconciler.reconcile(userId);
+        }
+      : undefined
   });
 
   // The tool's public routes (e.g. a share-link viewer, Phase 4,

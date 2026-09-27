@@ -6,7 +6,7 @@ import { jwtVerify } from 'jose';
 import { registerOpenApiDoc } from './index.js';
 import { ulid } from 'ulid';
 import { and, asc, desc, eq } from 'drizzle-orm';
-import { ACTIVE_WORKSPACE_HEADER } from '@antasphere/chassis-contract';
+import { ACTIVE_WORKSPACE_HEADER, type Principal } from '@antasphere/chassis-contract';
 import { instanceRoute, setupRoute } from '@antasphere/chassis-contract/routes';
 import {
   account,
@@ -269,6 +269,16 @@ export interface ApiDeps<
    * Absent on oss: `/me` never carries the key.
    */
   hubDeniedOrgs?: ((userId: string) => Array<{ id: string; name: string }>) | undefined;
+  /**
+   * Cloud edition only: the reconciler's cached, single-flight, throttled
+   * pass (`reconcile(userId)`, the live gate's own call), run by the
+   * zero-membership `/me`. A session with no active membership resolves to
+   * no principal, so the live gate never reaches it; without this pass a
+   * person re-seated at the hub after their last organization was swept
+   * would stay on the zero state for ever. Its verdict is not an error
+   * there. Absent on oss: the zero state runs no pass.
+   */
+  reconcileForZeroState?: ((userId: string) => Promise<void>) | undefined;
   /**
    * The tool's billing-rail declarations (its `entitlements` slot, asserted
    * at boot): the lists `GET /instance` shows and the routes the one
@@ -913,6 +923,32 @@ export function createApiApp<
     };
   };
 
+  // The zero-state re-admission: one cached reconcile pass, then the
+  // session is resolved again (the selection rule picks the workspace) and
+  // passed through the live gate exactly as authContext would. Any verdict
+  // other than a resolved, admitted principal keeps the zero state.
+  const readmitAfterReconcile = async (c: Context, userId: string): Promise<Principal | null> => {
+    try {
+      await deps.reconcileForZeroState?.(userId);
+      const resolved = await chassisRegistry.identity.resolve({
+        headers: c.req.raw.headers,
+        path: c.req.path,
+        method: c.req.method,
+        requestId: c.get('requestId')
+      });
+      if (!resolved || resolved.userId !== userId) return null;
+      if (!deps.principalGate) return resolved;
+      const verdict = await deps.principalGate(resolved, { path: c.req.path, method: c.req.method });
+      if (!verdict.ok) return null;
+      return verdict.role !== undefined && verdict.role !== resolved.role
+        ? { ...resolved, role: verdict.role }
+        : resolved;
+    } catch (cause) {
+      logger.warn({ err: cause, userId }, '/me: zero-state re-admission failed — answering the zero state');
+      return null;
+    }
+  };
+
   // ── GET /me — whoami across all credential paths ─────────────────────────
   // No blanket requireAuth: the ZERO-MEMBERSHIP session state is route-local
   // (user-scoped federation). A LIVE session whose user holds no active
@@ -926,7 +962,8 @@ export function createApiApp<
   // session lookup below can only ever fire for cookie-authenticated
   // requests.
   api.openapi(meRoute, async (c) => {
-    const principal = c.get('principal');
+    let principal = c.get('principal');
+    let zeroStateUser: { id: string; email: string; name: string } | null = null;
     if (!principal) {
       // The zero state exists ONLY for the selector-less default request: a
       // session that NAMED a workspace and failed its membership check must
@@ -942,9 +979,23 @@ export function createApiApp<
       if (!session?.user) {
         return c.json(err('unauthenticated', 'Authentication required'), 401);
       }
+      // Re-admission (cloud): the live gate never runs for a principal-less
+      // session, so the zero-state read runs the reconciler's pass itself
+      // (cached ~10 s, single-flight, retry-throttled — a polling refusal
+      // page is not a hub call per request). When the pass re-projected a
+      // membership, the session resolves again through the SAME resolver
+      // and gate authContext uses, and the answer is the normal shape.
+      if (deps.reconcileForZeroState) {
+        principal = await readmitAfterReconcile(c, session.user.id);
+      }
+      if (!principal) zeroStateUser = session.user;
+    }
+    if (!principal) {
+      const user = zeroStateUser;
+      if (!user) return c.json(err('unauthenticated', 'Authentication required'), 401);
       return c.json(
         {
-          user: { id: session.user.id, email: session.user.email, name: session.user.name },
+          user: { id: user.id, email: user.email, name: user.name },
           workspace: null,
           role: null,
           origin: null,
@@ -959,10 +1010,10 @@ export function createApiApp<
           // oss: always false here — a zero-membership user is not an active
           // member of this instance. cloud: true with a live hub link (their
           // next organization is created from this very state).
-          canCreateWorkspace: hub ? await canCreateWorkspace(session.user.id, 'session', clientIp(c)) : false,
+          canCreateWorkspace: hub ? await canCreateWorkspace(user.id, 'session', clientIp(c)) : false,
           // Cloud + session extras (SL-6): the zero state is session-only
           // by construction, so only the edition gate applies here.
-          ...(hub ? await cloudSessionExtras(session.user.id) : {})
+          ...(hub ? await cloudSessionExtras(user.id) : {})
         },
         200
       );
