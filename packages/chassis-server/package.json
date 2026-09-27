@@ -135,7 +135,7 @@
   "devDependencies": {
     "@better-auth/core": "1.6.22",
     "@better-fetch/fetch": "1.1.21",
-    "@testcontainers/postgresql": "^11.0.0",
+    "@testcontainers/postgresql": "^12.1.0",
     "@types/adm-zip": "^0.5.8",
     "@types/node": "^22.15.0",
     "@types/nodemailer": "^8.0.1",
