@@ -9,6 +9,7 @@ import {
   type TestApp,
   host
 } from './helpers.js';
+import { projects, projectTeams, workspaceTeams } from '@antasphere/chassis-db';
 import { FakeHub, type HubUserFixture } from '@antasphere/chassis-server/testing';
 import * as sso from './sso-helpers.js';
 
@@ -26,7 +27,12 @@ import * as sso from './sso-helpers.js';
  * the last definitive pass and survives an inconclusive one; a person
  * whose only org was swept is re-admitted by a bare zero-state /me once the
  * hub lists it again (that read runs the cached pass itself); the
- * self-hosted edition carries none of it.
+ * self-hosted edition carries none of it. And (PRDCT-2813) the reconcile
+ * also reads the organization's WHOLE team list (`GET /teams`, as the person,
+ * the org in `X-Workspace-Id`) at login and then at most once per
+ * `orgTeamsTtlMs` per org: every team of the org lands, a team deleted at
+ * the hub goes with its seats and its project entries, a local team is
+ * never touched, and a failed read keeps the list and waits `retryMs`.
  */
 
 const OWNER = { email: 'owner@hub-teams.test', name: 'Op Owner', password: 'op-owner-password-teams-1' };
@@ -38,17 +44,26 @@ const ORG_C = '27270000-aaaa-4bbb-8ccc-000000000004';
 const TEAM_1 = '27270000-dddd-4eee-8fff-000000000001';
 const TEAM_2 = '27270000-dddd-4eee-8fff-000000000002';
 const TEAM_3 = '27270000-dddd-4eee-8fff-000000000003';
+const ORG_T = '27270000-aaaa-4bbb-8ccc-000000000005';
+const TEAM_A = '27270000-dddd-4eee-8fff-00000000000a';
+const TEAM_B = '27270000-dddd-4eee-8fff-00000000000b';
+const TEAM_C = '27270000-dddd-4eee-8fff-00000000000c';
 
 const DIALS = {
   reconcileTtlMs: 120,
   reconcileStaleMaxMs: 60_000,
   retryMs: 250,
   orgsTimeoutMs: 400,
-  tokenTimeoutMs: 2_000
+  tokenTimeoutMs: 2_000,
+  // Long enough that a pass right after a login sits inside it under suite
+  // load, short enough to cross with a sleep.
+  orgTeamsTtlMs: 1_000
 };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** Let the per-user reconcile cache (and the failure throttle) expire so the next request runs a fresh pass. */
 const expireTtl = () => sleep(Math.max(DIALS.reconcileTtlMs, DIALS.retryMs) + 40);
+/** Let an org's team list go stale so the next pass reads it again. */
+const expireOrgTeams = () => sleep(DIALS.orgTeamsTtlMs + 60);
 
 let container: StartedPostgreSqlContainer;
 let hub: FakeHub;
@@ -62,7 +77,8 @@ beforeAll(async () => {
       EDITION: 'cloud',
       HUB_ISSUER_URL: hub.issuer,
       HUB_CLIENT_ID: host.hubClientId,
-      HUB_CLIENT_SECRET: 'integration-test-hub-secret-teams'
+      HUB_CLIENT_SECRET: 'integration-test-hub-secret-teams',
+      METRICS_TOKEN: 'hub-teams-metrics-token'
     },
     { hubDials: DIALS }
   );
@@ -125,6 +141,10 @@ describe('the teams projection', () => {
   let cookie = '';
 
   it('a login projects the person’s two teams in an org and seats them in both', async () => {
+    hub.setOrgTeams(ORG_A, [
+      { id: TEAM_1, slug: 'design', name: 'Design' },
+      { id: TEAM_2, slug: 'sales', name: 'Sales' }
+    ]);
     hub.setUserOrg(tess.sub, ORG_A, {
       name: 'Org A',
       role: 'member',
@@ -149,6 +169,11 @@ describe('the teams projection', () => {
 
   it('a later pass removes the seat the hub dropped, keeps the other, and renames a team in place', async () => {
     const before = await teamsOf(ORG_A);
+    // The org still holds both teams; she left Sales, and Design was renamed.
+    hub.setOrgTeams(ORG_A, [
+      { id: TEAM_1, slug: 'design-studio', name: 'Design Studio' },
+      { id: TEAM_2, slug: 'sales', name: 'Sales' }
+    ]);
     hub.setUserOrg(tess.sub, ORG_A, {
       name: 'Org A',
       role: 'member',
@@ -425,5 +450,131 @@ describe('self-hosted edition: no teams, no hint', () => {
     expect(body.workspaces).toEqual([]);
     expect('hubDenied' in body).toBe(false);
     expect(hub.orgsRequests.length).toBe(before);
+  });
+});
+
+describe('the organization’s whole team list (PRDCT-2813)', () => {
+  const tom: HubUserFixture = {
+    sub: 'hub-tom',
+    email: 'tom@hub-teams.test',
+    name: 'Tom Teamlist',
+    workspaceId: ORG_T,
+    role: 'member',
+    workspaceName: 'Org T'
+  };
+  const A = { id: TEAM_A, slug: 'alpha', name: 'Alpha' };
+  const B = { id: TEAM_B, slug: 'beta', name: 'Beta' };
+  const C = { id: TEAM_C, slug: 'gamma', name: 'Gamma' };
+  let cookie = '';
+  const hubIdsOf = async () => (await teamsOf(ORG_T)).map((t) => t.hub_team_id);
+
+  it('at login every team of the org lands, while the person is seated only in her own', async () => {
+    hub.setOrgTeams(ORG_T, [A, B, C]);
+    hub.setUserOrg(tom.sub, ORG_T, { name: 'Org T', role: 'member', teams: [A] });
+    const teamsBefore = hub.teamsRequests.length;
+    cookie = await sso.ssoLogin(app, hub, tom);
+
+    expect((await teamsOf(ORG_T)).map((t) => [t.hub_team_id, t.slug, t.name])).toEqual([
+      [TEAM_A, 'alpha', 'Alpha'],
+      [TEAM_B, 'beta', 'Beta'],
+      [TEAM_C, 'gamma', 'Gamma']
+    ]);
+    expect(await seatsOf(tom.email, ORG_T)).toEqual([TEAM_A]);
+
+    // Read as the person: her own grant token, the hub org in X-Workspace-Id.
+    expect(hub.teamsRequests.length).toBe(teamsBefore + 1);
+    const read = hub.teamsRequests.at(-1)!;
+    expect(read.orgId).toBe(ORG_T);
+    expect(read.auth).toMatch(/^Bearer .+/);
+    expect(read.auth).toBe(hub.orgsRequests.at(-1)!.auth);
+  });
+
+  it('a pass inside orgTeamsTtlMs does not read the list again; one past it does', async () => {
+    const orgsBefore = hub.orgsRequests.length;
+    const teamsBefore = hub.teamsRequests.length;
+    await sleep(DIALS.reconcileTtlMs + 40);
+    expect((await me(cookie)).status).toBe(200);
+    expect(hub.orgsRequests.length).toBeGreaterThan(orgsBefore);
+    expect(hub.teamsRequests.length).toBe(teamsBefore);
+
+    await expireOrgTeams();
+    expect((await me(cookie)).status).toBe(200);
+    expect(hub.teamsRequests.length).toBe(teamsBefore + 1);
+  });
+
+  it('a team deleted at the hub goes with its project entries; a local team stays', async () => {
+    const workspaceId = await workspaceIdOf(ORG_T);
+    const teamC = (await teamsOf(ORG_T)).find((t) => t.hub_team_id === TEAM_C)!;
+    const [project] = await app.db.db
+      .insert(projects)
+      .values({ workspaceId, name: 'Team list project' })
+      .returning({ id: projects.id });
+    await app.db.db.insert(projectTeams).values({ projectId: project!.id, teamId: teamC.id, role: 'viewer' });
+    const [local] = await app.db.db
+      .insert(workspaceTeams)
+      .values({ workspaceId, hubTeamId: null, slug: 'local-crew', name: 'Local crew' })
+      .returning({ id: workspaceTeams.id });
+
+    hub.setOrgTeams(ORG_T, [A, B]);
+    await expireOrgTeams();
+    expect((await me(cookie)).status).toBe(200);
+
+    expect(await hubIdsOf()).toEqual([TEAM_A, TEAM_B, null]);
+    const { rows: grants } = await app.db.pool.query(`SELECT id FROM project_teams WHERE team_id = $1`, [
+      teamC.id
+    ]);
+    expect(grants).toEqual([]);
+    const { rows: localRows } = await app.db.pool.query(`SELECT slug FROM workspace_teams WHERE id = $1`, [
+      local!.id
+    ]);
+    expect(localRows).toEqual([{ slug: 'local-crew' }]);
+    expect(await seatsOf(tom.email, ORG_T)).toEqual([TEAM_A]);
+  });
+
+  it('a team renamed at the hub follows, on the same row', async () => {
+    const before = (await teamsOf(ORG_T)).find((t) => t.hub_team_id === TEAM_B)!;
+    hub.setOrgTeams(ORG_T, [A, { id: TEAM_B, slug: 'beta-squad', name: 'Beta Squad' }]);
+    await expireOrgTeams();
+    expect((await me(cookie)).status).toBe(200);
+    const after = (await teamsOf(ORG_T)).find((t) => t.hub_team_id === TEAM_B)!;
+    expect(after).toMatchObject({ id: before.id, slug: 'beta-squad', name: 'Beta Squad' });
+  });
+
+  it('a failed read (500, then an older hub’s 404) keeps the list and waits retryMs before the next', async () => {
+    // A list that WOULD delete B if it were read.
+    hub.setOrgTeams(ORG_T, [A]);
+    hub.teamsMode = 'http500';
+    try {
+      await expireOrgTeams();
+      const teamsBefore = hub.teamsRequests.length;
+      expect((await me(cookie)).status).toBe(200);
+      expect(hub.teamsRequests.length).toBe(teamsBefore + 1);
+      expect(await hubIdsOf()).toEqual([TEAM_A, TEAM_B, null]);
+
+      // Another pass inside retryMs: no read.
+      await sleep(DIALS.reconcileTtlMs + 40);
+      expect((await me(cookie)).status).toBe(200);
+      expect(hub.teamsRequests.length).toBe(teamsBefore + 1);
+
+      // Past retryMs: read again, an older hub this time.
+      hub.teamsMode = 'http404';
+      await sleep(DIALS.retryMs + 40);
+      expect((await me(cookie)).status).toBe(200);
+      expect(hub.teamsRequests.length).toBe(teamsBefore + 2);
+      expect(await hubIdsOf()).toEqual([TEAM_A, TEAM_B, null]);
+    } finally {
+      hub.teamsMode = 'ok';
+      hub.setOrgTeams(ORG_T, [A, { id: TEAM_B, slug: 'beta-squad', name: 'Beta Squad' }]);
+    }
+  });
+
+  it('hub_org_teams_refresh_total is on /metrics and counts the successful reads', async () => {
+    const res = await app.app.request('/metrics', {
+      headers: { authorization: 'Bearer hub-teams-metrics-token' }
+    });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toMatch(/hub_org_teams_refresh_total\{outcome="ok"\} [1-9]/);
+    expect(text).toMatch(/hub_org_teams_refresh_total\{outcome="inconclusive"\} [1-9]/);
   });
 });
