@@ -415,7 +415,21 @@ export class HubUserClient {
         this.opts.logger.warn({ hubOrgId }, 'hub /teams body malformed — failing open');
         return { kind: 'inconclusive' };
       }
-      for (const team of parseTeams(raw.teams, this.opts.logger)) {
+      const pageTeams = parseTeams(raw.teams, this.opts.logger);
+      // The hub pages on the id of the last row alone, and its teams are
+      // hard-deleted: a cursor whose team went between two page reads answers
+      // an EMPTY page with no cursor, which reads exactly like the end of the
+      // list. It is not: what was never read must not be deleted here
+      // (verifier round 1, F1). A page reached THROUGH a cursor that carries
+      // nothing is a cut list, upserted and deleted from nothing.
+      if (page > 0 && pageTeams.length === 0) {
+        this.opts.logger.warn(
+          { hubOrgId, teams: teams.length },
+          'hub /teams answered an empty page behind a cursor (the cursor’s team went) — upserting what was read, deleting nothing'
+        );
+        return { kind: 'ok', teams, complete: false };
+      }
+      for (const team of pageTeams) {
         if (seen.has(team.id)) continue;
         seen.add(team.id);
         teams.push(team);

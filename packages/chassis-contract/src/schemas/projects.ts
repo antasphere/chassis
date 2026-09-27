@@ -118,7 +118,11 @@ export const projectTeamMemberSchema = z.object({
   teamId: z.string(),
   slug: z.string(),
   name: z.string(),
-  /** How many people the team seats here (the people who hold the role through it). */
+  /**
+   * How many seats the team holds here, the account site's count. A
+   * deactivated member keeps their seat (a pause) and holds nothing through
+   * it until reactivated; the team's page shows each seat's state.
+   */
   membersCount: z.number().int(),
   /** The hub's team id when the team is the account site's projection; null for the tool's own. */
   hubTeamId: z.string().nullable(),

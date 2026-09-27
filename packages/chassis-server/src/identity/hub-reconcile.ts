@@ -484,10 +484,14 @@ export class HubOrgReconciler {
     }
     let outcome: OrgTeamsRefreshOutcome;
     try {
+      // Stamped BEFORE the read, on the wall clock the rows' `created_at`
+      // shares (never the test seam): a team projected here while the hub
+      // answered is newer than the list and is not deleted by it.
+      const readAt = new Date();
       const result = await this.deps.client.orgTeams(localUserId, hubOrgId);
       if (result.kind === 'ok') {
         await this.deps.db.transaction(async (tx) => {
-          await projectOrgTeams(tx, { workspaceId, teams: result.teams, complete: result.complete });
+          await projectOrgTeams(tx, { workspaceId, teams: result.teams, complete: result.complete, readAt });
         });
         outcome = 'ok';
       } else {

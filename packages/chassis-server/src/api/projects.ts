@@ -66,6 +66,14 @@ export interface ProjectRouteDeps {
 const err = (code: string, message: string) => ({ error: { code, message } });
 const notFound = () => err('not_found', 'Project not found');
 
+/** A Postgres foreign-key violation (SQLSTATE 23503) down drizzle's `cause` chain. */
+function isForeignKeyViolation(e: unknown): boolean {
+  for (let cur: unknown = e, depth = 0; cur instanceof Error && depth < 10; cur = cur.cause, depth++) {
+    if ((cur as { code?: unknown }).code === '23503') return true;
+  }
+  return false;
+}
+
 type ProjectWireRow = {
   id: string;
   name: string;
@@ -557,13 +565,24 @@ export function registerProjectRoutes(api: OpenAPIHono, deps: ProjectRouteDeps):
       .where(and(eq(workspaceTeams.id, teamId), eq(workspaceTeams.workspaceId, principal.workspaceId)))
       .limit(1);
     if (!team) return c.json(err('team_not_found', 'No team of this workspace matches'), 404);
-    const inserted = await whileLive(principal, id, (tx) =>
-      tx
-        .insert(projectTeams)
-        .values({ projectId: id, teamId: team.teamId, role, addedBy: principal.userId })
-        .onConflictDoNothing({ target: [projectTeams.projectId, projectTeams.teamId] })
-        .returning({ createdAt: projectTeams.createdAt })
-    );
+    let inserted: { createdAt: Date }[] | null;
+    try {
+      inserted = await whileLive(principal, id, (tx) =>
+        tx
+          .insert(projectTeams)
+          .values({ projectId: id, teamId: team.teamId, role, addedBy: principal.userId })
+          .onConflictDoNothing({ target: [projectTeams.projectId, projectTeams.teamId] })
+          .returning({ createdAt: projectTeams.createdAt })
+      );
+    } catch (cause) {
+      // The team went between the read above and the insert (a delete at the
+      // hub's next pass, an admin's): the foreign key says so, and the answer
+      // is the same 404 as a team that never was (verifier round 1, F2).
+      if (isForeignKeyViolation(cause)) {
+        return c.json(err('team_not_found', 'No team of this workspace matches'), 404);
+      }
+      throw cause;
+    }
     if (inserted === null) return c.json(archived(), 409);
     const [row] = inserted;
     if (!row) return c.json(err('already_member', 'This team is already a member of the project'), 409);

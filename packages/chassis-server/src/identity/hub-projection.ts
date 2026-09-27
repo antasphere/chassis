@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNotNull, notInArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, lt, notInArray, sql } from 'drizzle-orm';
 import {
   workspaceMembers,
   workspaceTeamMembers,
@@ -203,6 +203,14 @@ export interface OrgTeamsProjection {
   teams: ReadonlyArray<{ id: string; slug: string; name: string }>;
   /** False when the list is a prefix: nothing is deleted then. Default true. */
   complete?: boolean | undefined;
+  /**
+   * When the read of the list BEGAN. A projected team created here after that
+   * moment (another replica's pass, another person's seat) is not in this
+   * list because it is newer than the read, not because the hub dropped it:
+   * the delete leaves it alone (verifier round 1, F5). Default: now, which
+   * deletes nothing newer than the call.
+   */
+  readAt?: Date | undefined;
 }
 
 export async function projectOrgTeams(db: DbConn, projection: OrgTeamsProjection): Promise<void> {
@@ -224,10 +232,12 @@ export async function projectOrgTeams(db: DbConn, projection: OrgTeamsProjection
       });
   }
   if (projection.complete === false) return;
+  const readAt = projection.readAt ?? new Date();
   await db.delete(workspaceTeams).where(
     and(
       eq(workspaceTeams.workspaceId, workspaceId),
       isNotNull(workspaceTeams.hubTeamId),
+      lt(workspaceTeams.createdAt, readAt),
       ...(teams.length > 0
         ? [
             notInArray(

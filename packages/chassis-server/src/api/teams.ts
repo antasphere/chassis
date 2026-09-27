@@ -20,15 +20,7 @@ import {
 } from '@antasphere/chassis-db';
 import { requireAuth, requireNonGuest } from '../middleware/auth-context.js';
 import { HUB_MANAGED_TEAMS_MESSAGE, hubManagedMembershipGate } from '../middleware/hub-managed.js';
-import {
-  createdAtText,
-  cursorRowId,
-  decodeKeysetCursor,
-  encodeKeysetCursor,
-  keysetBefore,
-  keysetBeforeValue,
-  pageOf
-} from '../pagination.js';
+import { createdAtText, decodeKeysetCursor, encodeKeysetCursor, keysetBeforeValue } from '../pagination.js';
 
 /**
  * The team routes (PRDCT-2813): the same routes on both editions, only the
@@ -225,25 +217,26 @@ export function registerTeamRoutes(api: OpenAPIHono, deps: TeamRouteDeps): void 
   };
 
   // ── List ─────────────────────────────────────────────────────────────────
+  // The list pages with the value-carrying cursor, like the seats and the
+  // project members: workspace_teams HARD-deletes rows, so an id-only cursor
+  // naming a team deleted between two pages would end the list early
+  // (verifier round 1, F3).
   api.openapi(teamsListRoute, async (c) => {
     const principal = c.get('principal')!;
     const { cursor, limit } = c.req.valid('query');
-    const cursorId = cursorRowId(cursor);
+    const after = decodeKeysetCursor(cursor);
     const rows = await db
-      .select(teamColumns(principal))
+      .select({ ...teamColumns(principal), createdAtText: createdAtText(workspaceTeams.createdAt) })
       .from(workspaceTeams)
       .where(
         and(
           eq(workspaceTeams.workspaceId, principal.workspaceId),
-          ...(cursorId
+          ...(after
             ? [
-                keysetBefore({
-                  table: workspaceTeams,
+                keysetBeforeValue({
                   id: workspaceTeams.id,
                   createdAt: workspaceTeams.createdAt,
-                  workspaceId: workspaceTeams.workspaceId,
-                  cursorId,
-                  workspace: principal.workspaceId
+                  cursor: after
                 })
               ]
             : [])
@@ -251,8 +244,9 @@ export function registerTeamRoutes(api: OpenAPIHono, deps: TeamRouteDeps): void 
       )
       .orderBy(desc(workspaceTeams.createdAt), desc(workspaceTeams.id))
       .limit(limit + 1);
-    const { page, nextCursor } = pageOf(rows, limit);
-    return c.json({ teams: page.map(teamToWire), nextCursor }, 200);
+    const page = rows.slice(0, limit);
+    const last = rows.length > limit ? page[page.length - 1] : undefined;
+    return c.json({ teams: page.map(teamToWire), nextCursor: last ? encodeKeysetCursor(last) : null }, 200);
   });
 
   // ── Get ──────────────────────────────────────────────────────────────────
