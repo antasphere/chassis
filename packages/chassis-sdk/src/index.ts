@@ -404,6 +404,16 @@ export class ChassisClient<TScope extends string> {
   }
 
   /**
+   * Remove a member from the workspace (admin+, sessions only): the
+   * membership is switched off and their project grants and team seats are
+   * deleted; the account stays. Invited back, the person starts with none.
+   * Refused `hub_managed` on a hub-origin workspace (removal is the hub's).
+   */
+  removeMember(id: string): Promise<Member> {
+    return this.request('POST', `/members/${encodeURIComponent(id)}/remove`);
+  }
+
+  /**
    * Owner: mint a one-time password reset link for a member (SMTP-free
    * recovery). Refused for a per-resource guest and for anyone who also belongs
    * to another workspace — the minted credential is global (PRDCT-1354).

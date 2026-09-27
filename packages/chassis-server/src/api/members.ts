@@ -5,6 +5,7 @@ import { createEmailVerificationToken } from 'better-auth/api';
 import {
   memberChangeEmailLinkRoute,
   memberDeleteRoute,
+  memberRemoveRoute,
   memberResetLinkRoute,
   memberUpdateRoute,
   membersListRoute
@@ -15,6 +16,7 @@ import { isLastOwnerDbError, LastOwnerError, type AccountDeletionService } from 
 import { cursorRowId, keysetBefore, pageOf } from '../pagination.js';
 import { requireAuth, requireNonGuest, requireRole } from '../middleware/auth-context.js';
 import { hubManagedMembershipGate } from '../middleware/hub-managed.js';
+import { deleteMembershipGrants } from '../members/removal.js';
 
 export interface MemberRouteDeps {
   db: Db;
@@ -318,6 +320,92 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
       metadata: { targetUserId: target.userId, email: snapshot!.email }
     });
     return c.json(toWire(snapshot!), 200);
+  });
+
+  // Removal (PRDCT-2816): the act between the pause and the account erasure,
+  // and the same one the hub's removal is on cloud. The membership row is
+  // switched off, never deleted (a new invitation reactivates the very same
+  // row), and the person's project grants and team seats are deleted with
+  // it, in ONE transaction: a person invited back starts with none. The
+  // account, and the person's memberships of other workspaces, are untouched.
+  // An already paused member can be removed: that turns the pause into a
+  // removal. The 2-segment gate above does NOT cover this 3-segment path, so
+  // it is gated explicitly. Machines never reach it: the path is deliberately
+  // UNLISTED in the fail-closed scope allowlist, like the account deletion.
+  // A hub-origin workspace died at the subtree gate with `hub_managed`.
+  api.use('/members/:id/remove', requireRole('admin'));
+  api.openapi(memberRemoveRoute, async (c) => {
+    const principal = c.get('principal')!;
+    const { id } = c.req.valid('param');
+
+    const [target] = await db
+      .select({
+        id: workspaceMembers.id,
+        userId: workspaceMembers.userId,
+        role: workspaceMembers.role,
+        isActive: workspaceMembers.isActive
+      })
+      .from(workspaceMembers)
+      .where(and(eq(workspaceMembers.id, id), eq(workspaceMembers.workspaceId, principal.workspaceId)))
+      .limit(1);
+    if (!target) return c.json(err('not_found', 'Member not found'), 404);
+    if (target.userId === principal.userId) {
+      return c.json(err('cannot_remove_self', 'You cannot remove yourself'), 400);
+    }
+    if (target.role === 'owner' && principal.role !== 'owner') {
+      return c.json(err('forbidden', 'Only an owner can remove an owner'), 403);
+    }
+
+    // The WHERE names the workspace again: the row is the one read above,
+    // and the statement could not reach another workspace's even if it were not.
+    const remove = () =>
+      db.transaction(async (tx) => {
+        await tx
+          .update(workspaceMembers)
+          .set({ isActive: false, isDefault: false })
+          .where(
+            and(eq(workspaceMembers.id, target.id), eq(workspaceMembers.workspaceId, principal.workspaceId))
+          );
+        return deleteMembershipGrants(tx, [target.id]);
+      });
+    let removed: { projectGrants: number; teamSeats: number };
+    try {
+      // Removing an ACTIVE owner runs under the race-free last-owner guard,
+      // as the pause and the account deletion do.
+      removed =
+        target.role === 'owner' && target.isActive
+          ? await accountDeletion.withLastOwnerGuard(principal.workspaceId, target.userId, remove)
+          : await remove();
+    } catch (cause) {
+      if (cause instanceof LastOwnerError || isLastOwnerDbError(cause)) {
+        return c.json(err('last_owner', 'The workspace must keep at least one active owner'), 400);
+      }
+      throw cause;
+    }
+
+    const [after] = await db
+      .select({
+        id: workspaceMembers.id,
+        userId: workspaceMembers.userId,
+        email: userTable.email,
+        name: userTable.name,
+        role: workspaceMembers.role,
+        isActive: workspaceMembers.isActive,
+        createdAt: workspaceMembers.createdAt,
+        lastSeenAt: workspaceMembers.lastSeenAt
+      })
+      .from(workspaceMembers)
+      .innerJoin(userTable, eq(workspaceMembers.userId, userTable.id))
+      .where(eq(workspaceMembers.id, target.id))
+      .limit(1);
+
+    c.set('audit', {
+      action: 'member.remove',
+      resourceType: 'member',
+      resourceId: target.id,
+      metadata: { targetUserId: target.userId, ...removed }
+    });
+    return c.json(toWire(after!), 200);
   });
 
   /**

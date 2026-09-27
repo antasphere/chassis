@@ -252,6 +252,25 @@ export const memberDeleteRoute = createRoute({
   }
 });
 
+export const memberRemoveRoute = createRoute({
+  method: 'post',
+  path: '/members/{id}/remove',
+  tags: ['members'],
+  summary:
+    'Remove a member from the workspace: the membership off, their project grants and team seats deleted, the account kept (admin+; sessions only)',
+  request: { params: uuidParams },
+  responses: {
+    200: jsonBody(memberSchema, 'The removed member (inactive)'),
+    400: jsonBody(apiErrorSchema, 'cannot_remove_self, last_owner'),
+    401: errorResponses[401],
+    403: jsonBody(
+      apiErrorSchema,
+      'insufficient_role, forbidden (an owner is removed by an owner), hub_managed'
+    ),
+    404: errorResponses[404]
+  }
+});
+
 export const memberResetLinkRoute = createRoute({
   method: 'post',
   path: '/members/{id}/reset-link',
