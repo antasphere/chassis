@@ -28,9 +28,10 @@ export function isSecureSetupOrigin(publicBaseUrl: string): boolean {
 /**
  * `URL.hostname` KEEPS the brackets around an IPv6 literal (`[::1]`), so they
  * are stripped here. IPv4 loopback is the whole 127.0.0.0/8 block, not just
- * 127.0.0.1.
+ * 127.0.0.1. Exported for the demo sign-in's host rule
+ * (identity/demo-pass-rules.ts): one loopback test for the whole server.
  */
-function isLoopbackHost(hostname: string): boolean {
+export function isLoopbackHost(hostname: string): boolean {
   let host = hostname.toLowerCase();
   if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
   if (host === 'localhost' || host.endsWith('.localhost')) return true;

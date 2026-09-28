@@ -60,6 +60,12 @@ export interface CliIo extends CoreCliIo {
    * the platform command (open.ts); tests inject a recorder.
    */
   openUrl?: (url: string) => void;
+  /**
+   * The wait seam. The bin leaves it unset and the default is a timer; tests
+   * inject a recorder, so a command that waits out a rate wall is tested
+   * without the wait.
+   */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 // ── Terminal-control sanitation ──────────────────────────────────────────────

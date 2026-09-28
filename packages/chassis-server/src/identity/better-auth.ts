@@ -25,6 +25,7 @@ import {
 import type { Env } from '../env.js';
 import { HUB_SSO_PROVIDER_ID, HubSsoLoginError, type HubSsoService } from './hub-sso.js';
 import { parseSuperadminEmails } from '../accounts/superadmin.js';
+import { demoPassPlugin, type DemoPassPluginDeps } from './demo-pass-plugin.js';
 // Types only, erased at emit: this package EMITS DECLARATIONS (the app bundled
 // the file and never did), and `Auth = ReturnType<typeof createAuth>` is an
 // inferred type that names these two modules. TypeScript can only spell a
@@ -139,6 +140,12 @@ export interface CreateAuthOptions {
    * oss boot passes nothing and carries zero SSO surface at runtime.
    */
   hubSso?: HubSsoService | undefined;
+  /**
+   * Demo sign-in (identity/demo-pass-plugin.ts): handed in by boot only while
+   * DEMO_SIGN_IN is on. The redeem endpoint is registered only then, and
+   * only on the self-hosted edition.
+   */
+  demoPass?: DemoPassPluginDeps | undefined;
 }
 
 export const AUTH_BASE_PATH = '/api/v1/auth';
@@ -394,7 +401,8 @@ export function createAuth({
   onUserCreated,
   beforeUserDelete,
   afterUserDelete,
-  hubSso
+  hubSso,
+  demoPass
 }: CreateAuthOptions) {
   const isHttps = env.PUBLIC_BASE_URL.startsWith('https://');
   const resource = mcpResourceUrl(env.PUBLIC_BASE_URL);
@@ -462,6 +470,10 @@ export function createAuth({
       // exchange (with RFC 8707 `resource`), and token verification all
       // live in the provider config hub-sso.ts builds.
       ...(hubSso ? [genericOAuth({ config: [hubSso.providerConfig()] })] : []),
+      // Demo sign-in, self-hosted only: POST /demo/redeem signs a demo pass's
+      // person in (identity/demo-pass-plugin.ts). Never on cloud, where every
+      // session entrance goes through the hub.
+      ...(demoPass && !hubSso ? [demoPassPlugin(demoPass)] : []),
       ...(sendOtp
         ? [
             emailOTP({

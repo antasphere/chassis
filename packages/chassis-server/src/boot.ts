@@ -373,6 +373,10 @@ export async function bootPlatform<
     oauthScopes: tool.scopes.oauth,
     untrustedOrigins,
     hubSso,
+    // Demo sign-in (the demo pass spec): the redeem endpoint's deps, only while the switch is on.
+    ...(env.DEMO_SIGN_IN
+      ? { demoPass: { db: db.db, emailDomains: env.DEMO_SIGN_IN_EMAIL_DOMAINS, audit } }
+      : {}),
     onAccountEvent: auditAccountEvent,
     onUserCreated: (user) =>
       events.chassisView().emit('user.created', { userId: user.id, email: user.email }),

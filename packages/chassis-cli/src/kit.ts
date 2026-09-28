@@ -37,7 +37,7 @@ export interface CliKit<TClient extends ChassisClient<string>>
 export interface Cli<TClient extends ChassisClient<string>> extends CliKit<TClient> {
   /**
    * The command tree, built once per run: the global options, the auth,
-   * workspace and project groups, THE TOOL'S GROUPS, then
+   * workspace, project and demo groups, THE TOOL'S GROUPS, then
    * instance/export/files, and the completion command last (it prints the
    * tree, so it must see all of it).
    */

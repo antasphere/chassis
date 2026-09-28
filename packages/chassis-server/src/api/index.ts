@@ -2,6 +2,7 @@ export { registerApiKeyRoutes } from './apikeys.js';
 export { registerAuditRoutes } from './audit.js';
 export { registerBreakGlassRoutes } from './break-glass.js';
 export { registerCliAuthRoutes } from './cli-auth.js';
+export { demoSessionJudge, demoSignInOn, registerDemoPassRoutes } from './demo-passes.js';
 export {
   registerExportRoutes,
   resolveExportEntries,

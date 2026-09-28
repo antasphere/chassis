@@ -239,6 +239,17 @@ export function registerWorkspaceRoutes(api: OpenAPIHono, deps: WorkspaceRouteDe
     if (principal && principal.via !== 'session') {
       return c.json(err('session_required', REFUSAL_MESSAGES.session_required), 403);
     }
+    // A session a demo link opened is a visit: a workspace it made would be
+    // the person's to own long after the pass.
+    if (c.get('demoPassId')) {
+      return c.json(
+        err(
+          'demo_session',
+          'A session opened by a demo link cannot create a workspace: sign in with your password'
+        ),
+        403
+      );
+    }
 
     // The caller. A resolved principal is a session by now. WITHOUT one, the
     // cloud edition still serves the ZERO-MEMBERSHIP session (the /me zero

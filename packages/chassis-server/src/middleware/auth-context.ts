@@ -17,6 +17,8 @@ declare module 'hono' {
     principal: Principal | null;
     /** The tool's `guest_forbidden` sentence, set by `authContext` for `requireNonGuest()` to answer with. */
     guestForbiddenMessage: string;
+    /** Demo sign-in: the pass that opened this request's session, when one did (the audit mark). */
+    demoPassId?: string;
   }
 }
 
@@ -129,6 +131,15 @@ export interface AuthContextDeps {
    */
   principalGate?: PrincipalGate | undefined;
   /**
+   * Demo sign-in (present only while DEMO_SIGN_IN is on, self-hosted): judges
+   * a resolved SESSION against the demo pass that opened it, if one did.
+   * `ended` = the pass has expired or was revoked and the session is gone:
+   * the request goes on signed out. Here, in the single credential resolver,
+   * so no route can be reached with a session its pass no longer backs.
+   */
+  demoSession?:
+    ((headers: Headers) => Promise<{ passId: string; sessionId: string } | 'ended' | null>) | undefined;
+  /**
    * The composed fail-closed scope allowlist (`createScopeAllowlist` in
    * scopes.ts: the chassis rules, then the tool's). `null` = the endpoint is
    * not open to machine principals. Required: a tool must state its list.
@@ -165,6 +176,7 @@ export function authContext({
   clientIp,
   requestQuota,
   principalGate,
+  demoSession,
   requiredScopeFor,
   guestForbiddenMessage
 }: AuthContextDeps): MiddlewareHandler {
@@ -228,6 +240,13 @@ export function authContext({
       return apiError(c, 401, 'unsupported_credential', 'Unrecognized bearer credential format');
     } else {
       principal = await resolveSessionPrincipal(c, registry);
+      // Fail-closed: a judge that throws refuses the session for this
+      // request rather than letting a dead pass's session through.
+      if (principal && demoSession) {
+        const verdict = await demoSession(c.req.raw.headers);
+        if (verdict === 'ended') principal = null;
+        else if (verdict) c.set('demoPassId', verdict.passId);
+      }
     }
 
     // General per-principal request quota (I3), consumed BEFORE the scope

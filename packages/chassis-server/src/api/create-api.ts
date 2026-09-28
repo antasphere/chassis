@@ -21,6 +21,8 @@ import type { z } from 'zod';
 import { hubConfig, type ToolEnv } from '../env.js';
 import type { Logger } from '../logger.js';
 import type { Auth } from '../identity/index.js';
+import { demoSessionAuthRefusal } from '../identity/index.js';
+import { DemoPassService } from '../identity/demo-pass.js';
 import type { PlatformRegistry } from '../platform/index.js';
 import type {
   ApiContext,
@@ -72,6 +74,7 @@ import {
 import { registerSsoConnectRoutes } from './index.js';
 import { registerSsoLogoutRoutes } from './index.js';
 import { registerMemberRoutes } from './index.js';
+import { demoSessionJudge, demoSignInOn, registerDemoPassRoutes } from './index.js';
 import { registerProjectRoutes } from './index.js';
 import { registerTeamRoutes } from './index.js';
 import { registerApiKeyRoutes } from './index.js';
@@ -85,6 +88,8 @@ import type { StorageDriver } from '../storage/index.js';
 
 /** Inline error body matching the wire shape; keeps openapi handlers typed. */
 const err = (code: string, message: string) => ({ error: { code, message } });
+/** Where the sign-in library is mounted: the full path a middleware on `api` sees starts with it. */
+const AUTH_MOUNT = '/api/v1/auth';
 
 /**
  * PRDCT-1437 door 1: neutralize the change-email consume's account-existence
@@ -345,6 +350,9 @@ export function createApiApp<
   // hubManageUrl null.
   const hub = hubConfig(env);
   const hubManaged = hub ? { manageUrl: hub.issuerUrl } : undefined;
+  // Demo sign-in (the demo pass spec): DEMO_SIGN_IN on the self-hosted
+  // edition only. Off, no demo route, wall or discovery key exists.
+  const demoSignIn = demoSignInOn(env, hub, logger);
 
   const api = new OpenAPIHono({
     // Validation failures use the same wire shape as every other error.
@@ -526,6 +534,19 @@ export function createApiApp<
   // per IP + email) on top of better-auth's own 3-attempts-per-code limit.
   api.use('/cli/auth/request', rateLimit(limiters.otp, clientIp, emailKeyOf));
   api.use('/cli/auth/complete', rateLimit(limiters.login, clientIp, emailKeyOf, { consumeOn: 'failure' }));
+  // The demo pass redeem (identity/demo-pass-plugin.ts): a secret presented
+  // anonymously, so every arrival costs, per address only. In front of the
+  // sign-in handler, and only where the endpoint exists.
+  if (demoSignIn) {
+    // Only a REFUSED redeem costs: the wall is there against guessing, and a
+    // person playing a demonstration opens many valid links in a row from one
+    // address (found on the pair: the 21st valid click in fifteen minutes was
+    // refused). A drained wall still refuses everything until it refills.
+    api.use(
+      '/auth/demo/redeem',
+      rateLimit(limiters.demoRedeem, clientIp, undefined, { consumeOn: 'failure' })
+    );
+  }
   // The OpenAPI document is unauthenticated (PUBLIC_API_PATHS) so it never
   // reaches the per-principal quota; the buffer is generated once at boot
   // (openapi-doc.ts) and this wall is the defence in depth on top.
@@ -545,6 +566,69 @@ export function createApiApp<
   // Registered here, after the size and depth caps, so the guard's body read
   // is bounded.
   api.use('/auth/*', authBodyGuard());
+  // Demo sign-in, the second door of "a session a pass opened lives only
+  // while its pass does": the sign-in library's mount runs BEFORE the
+  // credential resolver, and it is where a session authorizes an OAuth client
+  // and answers get-session. A dead pass's session is deleted here first, so
+  // the library sees none. A live pass's session is a visit: the library
+  // paths that would leave a credential, a grant or an account change behind
+  // it are refused here (identity/demo-pass-rules.ts
+  // `DEMO_SESSION_REFUSED_AUTH_PATHS`). And the library's own session deletes
+  // (a pass session's sign-out, a person's own revoke of one) delete the
+  // session row only: those sessions are ended the pass's way first
+  // (`endSessions`), so their OAuth tokens and link rows go with them.
+  // The revoking caller is verified by the library: a forged or dead cookie
+  // ends nothing.
+  if (demoSignIn) {
+    const judge = demoSessionJudge(db);
+    const demoPassService = new DemoPassService(db);
+    api.use('/auth/*', async (c, next) => {
+      if (!c.req.header('cookie')) return next();
+      const verdict = await judge(c.req.raw.headers);
+      const authPath = c.req.path.startsWith(AUTH_MOUNT) ? c.req.path.slice(AUTH_MOUNT.length) : c.req.path;
+      if (verdict && verdict !== 'ended') {
+        if (demoSessionAuthRefusal(authPath)) {
+          return c.json(
+            err('demo_session', 'A session opened by a demo link cannot do this: sign in with your password'),
+            403
+          );
+        }
+        // A pass session that signs itself out ends the pass's way; the
+        // library then answers as usual.
+        if (authPath === '/sign-out') await demoPassService.endSessions([verdict.sessionId]);
+      } else if (
+        authPath === '/revoke-session' ||
+        authPath === '/revoke-sessions' ||
+        authPath === '/revoke-other-sessions'
+      ) {
+        // A person's OWN session revoking a pass session (a pass session is
+        // refused these paths above). The caller is verified by the library
+        // (`getSession`, the cookie's signature checked): a forged or dead
+        // cookie ends nothing. The body is read from a clone: the library
+        // gets the request untouched. The exact path compare loses nothing:
+        // the library's router answers 404 to any other spelling.
+        const verified = await auth.api.getSession({ headers: c.req.raw.headers }).catch(() => null);
+        if (verified?.session?.id && verified?.user?.id) {
+          let bodyToken: string | null = null;
+          try {
+            const body: unknown = await c.req.raw.clone().json();
+            if (body && typeof body === 'object' && typeof (body as { token?: unknown }).token === 'string') {
+              bodyToken = (body as { token: string }).token;
+            }
+          } catch {
+            // No JSON body: nothing names a session (the library answers as it does).
+          }
+          const passSessions = await demoPassService.passSessionsRevokedBy(
+            authPath,
+            { sessionId: verified.session.id, userId: verified.user.id },
+            bodyToken
+          );
+          if (passSessions.length > 0) await demoPassService.endSessions(passSessions);
+        }
+      }
+      return next();
+    });
+  }
 
   // Better Auth owns /api/v1/auth/* (mounted before the credential middleware
   // — it IS the credential machinery). On cloud the whole mount runs inside
@@ -636,6 +720,9 @@ export function createApiApp<
       // Cloud edition's post-resolution veto (internal/federation.md P4);
       // undefined on oss.
       principalGate: deps.principalGate,
+      // Demo sign-in: a session a demo pass opened lives only while its pass
+      // does, and its audit rows carry the pass's id. Absent while the switch is off.
+      ...(demoSignIn ? { demoSession: demoSessionJudge(db) } : {}),
       // The composed fail-closed allowlist: chassis rules, then the tool's rules.
       requiredScopeFor: tool.scopes.requiredScopeFor,
       guestForbiddenMessage: tool.copy.guestForbidden
@@ -707,6 +794,8 @@ export function createApiApp<
             : {})
         },
         features: { mcp: true, oauth: true, files: true },
+        // Present only while demo links sign people in here (the banner's cue).
+        ...(demoSignIn ? { demoSignIn: true } : {}),
         // What this version declares for the billing rail (§7): the hub seeds
         // from it, staff read it, a client reads the limit it is held to.
         entitlements: {
@@ -1075,7 +1164,11 @@ export function createApiApp<
         workspaces: wireWorkspaces,
         activeWorkspaceId: principal.workspaceId,
         hubManageUrl: hubManaged && principal.accountRef ? hubManaged.manageUrl : null,
-        canCreateWorkspace: await canCreateWorkspace(principal.userId, principal.via, clientIp(c)),
+        // A session a demo link opened creates no workspace (POST /workspaces
+        // refuses it before the rule), so it is not offered one.
+        canCreateWorkspace: c.get('demoPassId')
+          ? false
+          : await canCreateWorkspace(principal.userId, principal.via, clientIp(c)),
         // Cloud + SESSION only (SL-6): machine credentials never carry the
         // onboarding/hint-watch keys — the banner and the auto-sign-out are
         // browser concerns.
@@ -1184,6 +1277,14 @@ export function createApiApp<
   // Teams: the tool's own on self-hosted (and in a cloud-local workspace), the
   // hub's projection in a hub-origin workspace, where the members' gate refuses the writes.
   registerTeamRoutes(api, { db, hubManaged });
+  if (demoSignIn) {
+    registerDemoPassRoutes(api, {
+      db,
+      publicBaseUrl: env.PUBLIC_BASE_URL,
+      emailDomains: env.DEMO_SIGN_IN_EMAIL_DOMAINS,
+      guestTargetMessage: tool.copy.guestTarget
+    });
+  }
   registerApiKeyRoutes(api, db, apiKeyService, { apiKeysListRoute, apiKeyCreateRoute, apiKeyRevokeRoute });
   registerInvitationRoutes(api, {
     db,
@@ -1197,7 +1298,8 @@ export function createApiApp<
     inviteMail: { pitch: tool.copy.mail.invitePitch, preheader: tool.copy.mail.invitePreheader },
     hubManaged,
     // CLOUD-5: no local-password accounts minted through invitations on cloud.
-    ssoOnly: Boolean(deps.hubSso)
+    ssoOnly: Boolean(deps.hubSso),
+    ...(demoSignIn ? { demoSession: demoSessionJudge(db) } : {})
   });
   // Projects: a subgroup of the workspace with its own members. Deliberately
   // handed NO `hubManaged`: project membership is the tool's own on both

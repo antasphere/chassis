@@ -12,6 +12,7 @@ import {
 import { workspaceMembers, user as userTable, type Db } from '@antasphere/chassis-db';
 import type { Auth } from '../identity/better-auth.js';
 import { isLastOwnerDbError, LastOwnerError, type AccountDeletionService } from '../accounts/deletion.js';
+import { mintRefusal as sharedMintRefusal } from '../accounts/mint-refusal.js';
 import { cursorRowId, keysetBefore, pageOf } from '../pagination.js';
 import { requireAuth, requireNonGuest, requireRole } from '../middleware/auth-context.js';
 import { hubManagedMembershipGate } from '../middleware/hub-managed.js';
@@ -320,68 +321,12 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
     return c.json(toWire(snapshot!), 200);
   });
 
-  /**
-   * Shared refusal for the two SIGN-IN-EQUIVALENT mint routes (PRDCT-1354,
-   * findings AUTH-1/AUTH-2/AUTH-8). Both `/members/{id}/reset-link` and
-   * `/members/{id}/change-email-link` hand the caller a bearer credential
-   * for ANOTHER user's GLOBAL account: consuming either one signs the
-   * target in (LESSONS.md M6: "Consuming a change-email JWT while logged
-   * out CREATES a session for the target user"). A `user` row is
-   * instance-global, so the blast radius of a mint is every workspace that
-   * user belongs to — not just the minter's.
-   *
-   * Two target classes therefore make a mint a CROSS-TENANT takeover and
-   * are refused outright:
-   *
-   *  1. `origin='guest'` — the guest row exists for principal resolution
-   *     only (D2). It was created by the per-resource claim path for an
-   *     EXTERNAL party whose account is not this tenant's to administer;
-   *     the host tenant never owned that credential. Admins have no
-   *     recovery duty toward a guest, so there is nothing to trade away.
-   *  2. a target holding a membership in ANY OTHER workspace — the minted
-   *     credential would carry into that workspace too. "Admin of the
-   *     workspace" is not "owner of the person"; a user who works with two
-   *     tenants must never be recoverable by either one unilaterally.
-   *     Recovery for such a user is self-serve (`/request-password-reset`)
-   *     or the operator's break-glass surface.
-   *
-   * The role gate is OWNER, not admin (AUTH-8): the old guards only fired
-   * when `target.role === 'owner'`, so any admin could mint against any
-   * other admin and escalate laterally. Minting someone else's credential
-   * is an owner-level act on both routes.
-   *
-   * Fail-CLOSED shape: a new mint route added under `/members` must call
-   * this helper. Returning `null` means "no refusal found".
-   */
-  const mintRefusal = async (
-    principal: { workspaceId: string },
-    target: { userId: string; origin: string }
-  ): Promise<{ code: string; message: string } | null> => {
-    if (target.origin === 'guest') {
-      return {
-        code: 'guest_target',
-        message: deps.guestTargetMessage
-      };
-    }
-    const [foreign] = await db
-      .select({ id: workspaceMembers.id })
-      .from(workspaceMembers)
-      .where(
-        and(
-          eq(workspaceMembers.userId, target.userId),
-          ne(workspaceMembers.workspaceId, principal.workspaceId)
-        )
-      )
-      .limit(1);
-    if (foreign) {
-      return {
-        code: 'cross_workspace_target',
-        message:
-          'This member also belongs to another workspace — an admin-minted link would carry into it, so it is refused'
-      };
-    }
-    return null;
-  };
+  // The shared refusal of every route that mints a sign-in-equivalent
+  // credential for another user (PRDCT-1354): guest targets and targets
+  // belonging to another workspace. Its own module (accounts/mint-refusal.ts),
+  // shared with the demo pass mint; bound here to this router's db and copy.
+  const mintRefusal = (principal: { workspaceId: string }, target: { userId: string; origin: string }) =>
+    sharedMintRefusal(db, deps.guestTargetMessage, principal, target);
 
   // Owner-generated password reset link — the recovery path that works with
   // no email driver (invitations' copyable-link pattern). The 2-segment gate

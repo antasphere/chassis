@@ -44,6 +44,12 @@ import {
 } from '../schemas/break-glass.js';
 import { fileSchema, filesListSchema, fileUploadedSchema, fileUploadQuerySchema } from '../schemas/files.js';
 import {
+  demoPassesListSchema,
+  demoPassMintedSchema,
+  demoPassMintSchema,
+  demoPassSchema
+} from '../schemas/demo-passes.js';
+import {
   projectCreateSchema,
   projectMemberAddSchema,
   projectMemberParamsSchema,
@@ -578,6 +584,65 @@ export const teamMemberRemoveRoute = createRoute({
   summary: 'Unseat a member from a team (owner or admin; the membership stays)',
   request: { params: teamMemberParamsSchema },
   responses: { 200: jsonBody(teamMemberSchema, 'The removed team member'), ...teamErrors }
+});
+
+// ── Demo passes ──────────────────────────────────────────────────────────────
+// A link an owner mints so that one member is signed in without a password,
+// for a demonstration (the demo pass spec). The three routes are registered
+// ONLY while DEMO_SIGN_IN is on, on the self-hosted edition: otherwise each
+// path answers what any unknown path answers. OWNER and SESSION only: an
+// admin or a member gets 403, a machine credential never reaches them (the
+// paths are unlisted in the scope allowlist). The redeem,
+// `POST /auth/demo/redeem`, is an endpoint of the sign-in library and has no
+// route contract here (its shapes are `demoPassRedeemSchema` and
+// `demoPassRedeemedSchema`).
+
+const demoPassErrors = {
+  401: errorResponses[401],
+  403: jsonBody(apiErrorSchema, 'forbidden (owners only), or sessions_only for a machine credential')
+} as const;
+
+export const demoPassesListRoute = createRoute({
+  method: 'get',
+  path: '/demo/passes',
+  tags: ['demo'],
+  summary: "List the workspace's demo passes, newest first (owner; never carries a secret)",
+  responses: { 200: jsonBody(demoPassesListSchema, 'Demo passes, newest first'), ...demoPassErrors }
+});
+
+export const demoPassMintRoute = createRoute({
+  method: 'post',
+  path: '/demo/passes',
+  tags: ['demo'],
+  summary: 'Mint a demo pass for a member (owner); the secret is in this answer only',
+  request: { body: jsonRequestBody(demoPassMintSchema, 'The member, the page, the lifetime') },
+  responses: {
+    201: jsonBody(demoPassMintedSchema, 'The pass, its secret and its link, shown once'),
+    400: jsonBody(
+      apiErrorSchema,
+      'validation_error (a lifetime out of 1 to 10080 minutes), or invalid_demo_path: not a same-origin path'
+    ),
+    401: errorResponses[401],
+    403: jsonBody(
+      apiErrorSchema,
+      'In this order: owner_target (another owner), demo_address_required (not a demonstration address), two_factor_enrolled, guest_target, cross_workspace_target; or forbidden (owners only), sessions_only'
+    ),
+    404: jsonBody(apiErrorSchema, 'no_such_member: no member of this workspace holds that address')
+  }
+});
+
+export const demoPassRevokeRoute = createRoute({
+  method: 'delete',
+  path: '/demo/passes/{id}',
+  tags: ['demo'],
+  summary: 'Revoke a demo pass (owner; idempotent). The sessions it opened end with it',
+  request: { params: uuidParams },
+  responses: {
+    200: jsonBody(demoPassSchema, 'The pass, revoked'),
+    400: errorResponses[400],
+    ...demoPassErrors,
+    404: jsonBody(apiErrorSchema, 'not_found: no such pass in this workspace')
+  }
 });
 
 // ── Invitations ──────────────────────────────────────────────────────────────

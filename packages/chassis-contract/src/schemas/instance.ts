@@ -43,6 +43,14 @@ export const instanceInfoSchema = z.object({
     files: z.boolean()
   }),
   /**
+   * `true` while the operator's DEMO_SIGN_IN switch is on (self-hosted
+   * edition only): demo links sign people in here, and the dashboard shows
+   * every signed-in person a banner saying so. ABSENT otherwise, never false,
+   * so an instance without the switch serves the same discovery bytes as
+   * before it existed.
+   */
+  demoSignIn: z.boolean().optional(),
+  /**
    * What this version of the tool declares for the billing rail (its priced
    * actions with their default credits, its limits and features per tier):
    * the hub seeds its price book and its plan entitlements from it, staff

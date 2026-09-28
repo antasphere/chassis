@@ -130,6 +130,10 @@ export function auditMiddleware(
     if (!isMutation && !isMachine) return;
 
     const info = c.get('audit');
+    // Demo sign-in: set by the credential resolver when the session was
+    // opened by a demo pass, so the trail tells what was done through a demo
+    // link from what the person did themselves.
+    const demoPassId = c.get('demoPassId');
     await audit.write({
       workspaceId: principal.workspaceId,
       principal,
@@ -138,7 +142,7 @@ export function auditMiddleware(
       resourceId: info?.resourceId,
       requestId: c.get('requestId'),
       ip: clientIp(c),
-      metadata: info?.metadata
+      metadata: demoPassId ? { ...info?.metadata, demoPassId } : info?.metadata
     });
   };
 }

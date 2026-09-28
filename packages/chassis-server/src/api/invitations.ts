@@ -21,6 +21,7 @@ import { InvitationError, InvitationService } from '../invitations/service.js';
 import { cursorRowId, keysetBefore, pageOf } from '../pagination.js';
 import { requireRole } from '../middleware/auth-context.js';
 import { hubManagedMembershipGate } from '../middleware/hub-managed.js';
+import type { DemoSessionVerdict } from '../identity/demo-pass.js';
 
 const err = (code: string, message: string) => ({ error: { code, message } });
 
@@ -60,6 +61,13 @@ export interface InvitationRouteDeps {
    * Antasphere first (JIT), then accepts as an existing account.
    */
   ssoOnly?: boolean | undefined;
+  /**
+   * Demo sign-in, while its switch is on (identity/demo-pass.ts
+   * `judgeSession`): the accept is public, so the session it would accept as
+   * is judged here on the cookie. A session a demo link opened accepts no
+   * invitation: a membership it made would outlive the pass.
+   */
+  demoSession?: ((headers: Headers) => Promise<DemoSessionVerdict>) | undefined;
 }
 
 /** Method-exact public-shape check shared by the admin and P7 gates:
@@ -271,6 +279,21 @@ export function registerInvitationRoutes(api: OpenAPIHono, deps: InvitationRoute
               details: { manageUrl: hubManaged.manageUrl }
             }
           },
+          403
+        );
+      }
+    }
+
+    // A dead pass's session was ended by the judge, so the library below sees
+    // none; a live one is refused before it is read.
+    if (deps.demoSession) {
+      const verdict = await deps.demoSession(c.req.raw.headers);
+      if (verdict && verdict !== 'ended') {
+        return c.json(
+          err(
+            'demo_session',
+            'A session opened by a demo link cannot accept an invitation: sign in with your password'
+          ),
           403
         );
       }

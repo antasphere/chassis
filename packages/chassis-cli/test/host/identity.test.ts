@@ -145,9 +145,11 @@ const COMMANDS = [
   'config',
   'workspaces',
   'workspace',
-  // generic: the subgroups of the workspace, then its named groups of people
+  // generic: the subgroups of the workspace, its named groups of people, then
+  // the owner's demo links
   'projects',
   'teams',
+  'demo',
   // the tool's own group, at the seam
   'things',
   // generic: the platform substrate, then completion LAST

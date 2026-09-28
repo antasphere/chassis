@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { parseApiKeyPeppers } from './apikeys/peppers.js';
 import { parseSuperadminEmails } from './accounts/superadmin.js';
+import { isDemoSignInHost, parseDemoEmailDomains, parseDemoHosts } from './identity/demo-pass-rules.js';
 
 /**
  * The single entry point for configuration. Every env var the app reads is
@@ -158,6 +159,28 @@ const chassisEnvShape = (version: string) => ({
       }
     })
   ),
+  /** Demo sign-in (self-hosted edition only): an owner can mint a demo link that signs a chosen member in without a password, for a demonstration. Default false: no demo route exists and every demo path answers like any unknown path. The boot refuses the switch unless the host of PUBLIC_BASE_URL is loopback or listed in DEMO_SIGN_IN_HOSTS. A link only ever opens an address on a domain reserved for examples and tests (example.com/.net/.org, `.test`, `.example`, `.invalid`, `.localhost`) or listed in DEMO_SIGN_IN_EMAIL_DOMAINS, never an owner but the one minting, never an account with a second factor. On EDITION=cloud it has no effect (the hub owns identity). */
+  DEMO_SIGN_IN: booleanish.default(false),
+  /** The public hosts DEMO_SIGN_IN may be on, beside loopback: comma-separated bare hostnames, matched exactly against the host of PUBLIC_BASE_URL (e.g. `demo.example.io`). An entry with a scheme, a path, a port, a space, a wildcard or an empty label refuses the boot. Unset = loopback only. */
+  DEMO_SIGN_IN_HOSTS: optionalString(
+    z.string().superRefine((raw, ctx) => {
+      try {
+        parseDemoHosts(raw);
+      } catch (err) {
+        ctx.addIssue({ code: 'custom', message: err instanceof Error ? err.message : String(err) });
+      }
+    })
+  ),
+  /** Domains a demo link may open beside the reserved example and test ones: comma-separated, each one matching itself and its subdomains (e.g. `demo.acme.io`). Name only domains whose every mailbox is a demonstration account. Same entry rules as DEMO_SIGN_IN_HOSTS. Unset = the reserved domains only. */
+  DEMO_SIGN_IN_EMAIL_DOMAINS: optionalString(
+    z.string().superRefine((raw, ctx) => {
+      try {
+        parseDemoEmailDomains(raw);
+      } catch (err) {
+        ctx.addIssue({ code: 'custom', message: err instanceof Error ? err.message : String(err) });
+      }
+    })
+  ),
   /** Optional Google social login. */
   GOOGLE_CLIENT_ID: optionalString(z.string().min(1)),
   GOOGLE_CLIENT_SECRET: optionalString(z.string().min(1)),
@@ -245,6 +268,37 @@ export type ChassisEnvKey = keyof ChassisEnvShape;
 const HUB_REQUIRED_VARS = ['HUB_ISSUER_URL', 'HUB_CLIENT_ID', 'HUB_CLIENT_SECRET'] as const;
 
 /**
+ * The demo sign-in's boot refusal (the demo pass spec, section 1): a switch
+ * that signs people in without a password is refused on a public host
+ * nobody named. Loopback is always fine; any other host of PUBLIC_BASE_URL
+ * must be listed in DEMO_SIGN_IN_HOSTS. Judged on both editions: the rule is
+ * about where the instance answers, and a cloud boot that ignores the switch
+ * today still names no host it was not meant for. A malformed list already
+ * failed its own key; nothing more is said here then.
+ */
+function demoSignInRefusal(env: ChassisEnv, ctx: z.RefinementCtx): void {
+  if (!env.DEMO_SIGN_IN) return;
+  let hosts: ReadonlySet<string>;
+  try {
+    hosts = parseDemoHosts(env.DEMO_SIGN_IN_HOSTS);
+  } catch {
+    return;
+  }
+  if (isDemoSignInHost(env.PUBLIC_BASE_URL, hosts)) return;
+  let host = env.PUBLIC_BASE_URL;
+  try {
+    host = new URL(env.PUBLIC_BASE_URL).hostname;
+  } catch {
+    // unparseable never reaches here (httpUrl validated it); the raw value names it
+  }
+  ctx.addIssue({
+    code: 'custom',
+    path: ['DEMO_SIGN_IN'],
+    message: `DEMO_SIGN_IN is refused on ${host}: the host of PUBLIC_BASE_URL is not loopback and not listed in DEMO_SIGN_IN_HOSTS`
+  });
+}
+
+/**
  * What a tool adds to the environment: its own keys, where each one sits in
  * the merged schema, and its own cross-key checks. The env reference is
  * generated from the merged shape, so placement is part of the contract.
@@ -298,6 +352,7 @@ export function buildEnvSchema<TShape extends z.ZodRawShape = {}>(
   return z.object(merged as unknown as ChassisEnvShape & TShape).superRefine((value, ctx) => {
     const env = value as unknown as ToolEnv<TShape>;
     extension?.refine?.(env, ctx);
+    demoSignInRefusal(env, ctx);
     if (env.EDITION !== 'cloud') return;
     for (const key of HUB_REQUIRED_VARS) {
       if (env[key] === undefined) {

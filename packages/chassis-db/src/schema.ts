@@ -210,6 +210,57 @@ export const invitations = pgTable(
 );
 
 /**
+ * Demo passes (the demo pass spec, section 3): a link an owner mints so that
+ * ONE member of the workspace is signed in without a password, for a
+ * demonstration. Only while DEMO_SIGN_IN is on, on the self-hosted edition.
+ * The secret is sign-in-equivalent, so it is stored nowhere: `secret_hash`
+ * is its sha256 hex, looked up through the unique index at redeem, the same
+ * shape as the invitation tokens. A pass is revoked, never deleted by a
+ * route; it goes with its workspace or its person.
+ */
+export const demoPasses = pgTable(
+  'demo_passes',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    /** The person the pass signs in. */
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    /** The page the link lands on (checked by isSafeDemoPath at mint). */
+    targetPath: text('target_path').notNull().default('/'),
+    secretHash: text('secret_hash').notNull(),
+    createdBy: text('created_by').references(() => user.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    useCount: integer('use_count').notNull().default(0)
+  },
+  (t) => [
+    uniqueIndex('demo_passes_secret_hash_uniq').on(t.secretHash),
+    // The owner's list: one workspace's passes, newest first.
+    index('demo_passes_workspace_created_idx').on(t.workspaceId, t.createdAt)
+  ]
+);
+
+/**
+ * One row per session a demo pass opened (`session_id` is the Better Auth
+ * `session.id`). It is what marks the audit rows written under such a
+ * session with `metadata.demoPassId`, so a workspace's trail tells what was
+ * done through a demo link from what the person did themselves.
+ */
+export const demoPassSessions = pgTable('demo_pass_sessions', {
+  sessionId: text('session_id').primaryKey(),
+  passId: uuid('pass_id')
+    .notNull()
+    .references(() => demoPasses.id, { onDelete: 'cascade' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
+});
+
+/**
  * API keys: `<prefix>_<keyId8>_<secret>`. keyId gives O(1) indexed lookup;
  * the secret is stored as sha256(secret + server pepper) and compared in
  * constant time. Minted by sessions only — a key never mints a key.
@@ -670,6 +721,7 @@ export type InstanceSettings = typeof instanceSettings.$inferSelect;
 export type Workspace = typeof workspaces.$inferSelect;
 export type WorkspaceMember = typeof workspaceMembers.$inferSelect;
 export type Invitation = typeof invitations.$inferSelect;
+export type DemoPassRow = typeof demoPasses.$inferSelect;
 export type ApiKey = typeof apiKeys.$inferSelect;
 export type IdempotencyKey = typeof idempotencyKeys.$inferSelect;
 export type AuditEntry = typeof auditLog.$inferSelect;

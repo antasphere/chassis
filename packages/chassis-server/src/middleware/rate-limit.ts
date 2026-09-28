@@ -57,6 +57,13 @@ export interface RateLimiters {
   /** The unauthenticated OpenAPI document — cheap now that it is a boot-time buffer, but still anonymous. */
   openapiDoc: RateLimiterAbstract;
   /**
+   * The demo pass redeem (demo sign-in, self-hosted only): an anonymous
+   * presentation of a sign-in-equivalent secret, so a guessing wall PER
+   * ADDRESS and nothing else — never keyed on the pass, whose legitimate
+   * audience it would cap. Mounted only while DEMO_SIGN_IN is on.
+   */
+  demoRedeem: RateLimiterAbstract;
+  /**
    * Shared factory riding the same backend (Redis when REDIS_URL is set,
    * memory otherwise) for buckets sized at runtime — the per-principal
    * request quota creates one limiter per distinct quota tier through this.
@@ -121,7 +128,8 @@ export async function createRateLimiters<TBucket extends string = never>(
     breakGlass: make('break-glass', 10, 60 * 60),
     workspaceCreate: make('ws-create', WORKSPACE_CREATE_PER_PERSON, 60 * 60),
     workspaceCreateAddress: make('ws-create-ip', WORKSPACE_CREATE_PER_PERSON * 10, 60 * 60),
-    openapiDoc: make('openapi', 60, 60)
+    openapiDoc: make('openapi', 60, 60),
+    demoRedeem: make('demo-redeem', 20, 15 * 60)
   } satisfies Omit<RateLimiters, 'make'>;
   // The tool's buckets are built after the chassis ones, in declaration order.
   const tool = {} as Record<TBucket, RateLimiterAbstract>;
