@@ -607,7 +607,8 @@ export async function bootPlatform<
           client: hubUserClient,
           audit,
           logger,
-          dials: hubDials
+          dials: hubDials,
+          onMembershipRemoval: tool.membershipRemoval
         })
       : undefined;
   // The SSO login's fail-closed step 3 (assertLogin) runs THIS reconciler.

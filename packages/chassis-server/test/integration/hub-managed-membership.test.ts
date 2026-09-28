@@ -22,8 +22,8 @@ import * as sso from './sso-helpers.js';
  *
  *  - every local membership MUTATION on the projected workspace answers
  *    403 `hub_managed` with `details.manageUrl` → the hub (invitation
- *    create/accept/revoke, member role-change/deactivate/reactivate/delete,
- *    reset-link, change-email-link) — and mutates NOTHING;
+ *    create/accept/revoke, member role-change/deactivate/reactivate/delete/
+ *    remove, reset-link, change-email-link) — and mutates NOTHING;
  *  - READS stay: GET /members serves the projected roster, GET /invitations
  *    lists;
  *  - the SAME credential performs the SAME mutations on a cloud-LOCAL
@@ -227,6 +227,33 @@ describe('mutations on the HUB-ORIGIN workspace → 403 hub_managed + pointer', 
     expect(rows).toHaveLength(1);
   });
 
+  it('member remove (PRDCT-2816) — the row and its grants never move', async () => {
+    // A project grant for the hub member, seeded directly: the local project
+    // routes are not what this suite is about, the refusal leaving it is.
+    const { rows: projectRows } = await app.db.pool.query(
+      `INSERT INTO projects (workspace_id, name) VALUES ($1, 'P7 remove') RETURNING id`,
+      [projectedWorkspaceId]
+    );
+    await app.db.pool.query(
+      `INSERT INTO project_members (project_id, member_id, role) VALUES ($1, $2, 'viewer')`,
+      [projectRows[0].id, hubMemberRowId]
+    );
+    await expectHubManaged(
+      await app.app.request(`/api/v1/members/${hubMemberRowId}/remove`, {
+        method: 'POST',
+        headers: asHubAdmin({ 'x-forwarded-for': nextIp() })
+      })
+    );
+    const { rows } = await app.db.pool.query(`SELECT role, is_active FROM workspace_members WHERE id = $1`, [
+      hubMemberRowId
+    ]);
+    expect(rows[0]).toEqual({ role: 'member', is_active: true });
+    const { rows: grants } = await app.db.pool.query(`SELECT 1 FROM project_members WHERE member_id = $1`, [
+      hubMemberRowId
+    ]);
+    expect(grants).toHaveLength(1);
+  });
+
   it('reset-link and change-email-link (the credential surfaces are the hub’s too)', async () => {
     await expectHubManaged(
       await app.app.request(`/api/v1/members/${hubMemberRowId}/reset-link`, {
@@ -384,6 +411,46 @@ describe('the SAME mutations on a cloud-LOCAL workspace still work (the boundary
     expect(rerole.status).toBe(200);
     expect((await readJson(rerole)).role).toBe('member');
   });
+  it('member remove on the local workspace works: 200, the row off, its grant gone (PRDCT-2816)', async () => {
+    // The hub member gets a local membership in the operator's workspace
+    // (seeded: invitations are not the point here) and a project grant in it.
+    const { rows: users } = await app.db.pool.query(`SELECT id FROM "user" WHERE email = $1`, [
+      HUB_MEMBER_EMAIL
+    ]);
+    const { rows: memberRows } = await app.db.pool.query(
+      `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member') RETURNING id`,
+      [operatorWorkspaceId, users[0].id]
+    );
+    const localRowId = memberRows[0].id;
+    const { rows: projectRows } = await app.db.pool.query(
+      `INSERT INTO projects (workspace_id, name) VALUES ($1, 'P7 local remove') RETURNING id`,
+      [operatorWorkspaceId]
+    );
+    await app.db.pool.query(
+      `INSERT INTO project_members (project_id, member_id, role) VALUES ($1, $2, 'viewer')`,
+      [projectRows[0].id, localRowId]
+    );
+    const res = await app.app.request(`/api/v1/members/${localRowId}/remove`, {
+      method: 'POST',
+      headers: { cookie: operatorCookie, 'x-workspace-id': operatorWorkspaceId, 'x-forwarded-for': nextIp() }
+    });
+    expect(res.status).toBe(200);
+    expect(await readJson(res)).toMatchObject({ id: localRowId, isActive: false });
+    const { rows } = await app.db.pool.query(`SELECT is_active FROM workspace_members WHERE id = $1`, [
+      localRowId
+    ]);
+    expect(rows[0]).toEqual({ is_active: false });
+    const { rows: grants } = await app.db.pool.query(`SELECT 1 FROM project_members WHERE member_id = $1`, [
+      localRowId
+    ]);
+    expect(grants).toHaveLength(0);
+    // The hub member's projected membership is another row, untouched.
+    const { rows: projected } = await app.db.pool.query(
+      `SELECT is_active FROM workspace_members WHERE id = $1`,
+      [hubMemberRowId]
+    );
+    expect(projected[0]).toEqual({ is_active: true });
+  });
 });
 
 describe('/me carries the adaptation signals (and never the raw hub org id)', () => {
@@ -445,6 +512,10 @@ describe('machine credentials: the fail-closed scope map is the first wall', () 
         `/api/v1/members/${hubMemberRowId}`,
         { method: 'DELETE', headers: { ...key, 'x-forwarded-for': nextIp() } }
       ],
+      [
+        `/api/v1/members/${hubMemberRowId}/remove`,
+        { method: 'POST', headers: { ...key, 'x-forwarded-for': nextIp() } }
+      ],
       ['/api/v1/invitations', { headers: { ...key, 'x-forwarded-for': nextIp() } }],
       ['/api/v1/invitations', json({ email: 'x@p7.test', role: 'member' }, key)]
     ] as const) {
@@ -452,5 +523,31 @@ describe('machine credentials: the fail-closed scope map is the first wall', () 
       expect(res.status, `${path} should be scope-refused`).toBe(403);
       expect((await readJson(res)).error.code).toBe('endpoint_not_allowed');
     }
+  });
+});
+
+describe('the default workspace is the account’s on cloud (PRDCT-2815)', () => {
+  it('PUT /me/default-workspace answers hub_managed on the projection, on the cloud-local workspace and for null; no row moves', async () => {
+    const readDefaults = async () =>
+      (
+        await app.db.pool.query(
+          `SELECT wm.workspace_id, wm.is_default FROM workspace_members wm JOIN "user" u ON u.id = wm.user_id
+           WHERE u.email = $1 ORDER BY wm.workspace_id`,
+          [HUB_ADMIN_EMAIL]
+        )
+      ).rows;
+    const before = await readDefaults();
+    // The caller holds both kinds of membership: the contrast is the point.
+    expect(before.map((r: { workspace_id: string }) => r.workspace_id).sort()).toEqual(
+      [projectedWorkspaceId, operatorWorkspaceId].sort()
+    );
+    for (const workspaceId of [projectedWorkspaceId, operatorWorkspaceId, null]) {
+      const res = await app.app.request('/api/v1/me/default-workspace', {
+        ...json({ workspaceId }, { cookie: hubAdminCookie }),
+        method: 'PUT'
+      });
+      await expectHubManaged(res);
+    }
+    expect(await readDefaults()).toEqual(before);
   });
 });

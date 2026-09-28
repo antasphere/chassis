@@ -5,6 +5,7 @@ import { createEmailVerificationToken } from 'better-auth/api';
 import {
   memberChangeEmailLinkRoute,
   memberDeleteRoute,
+  memberRemoveRoute,
   memberResetLinkRoute,
   memberUpdateRoute,
   membersListRoute
@@ -16,6 +17,11 @@ import { mintRefusal as sharedMintRefusal } from '../accounts/mint-refusal.js';
 import { cursorRowId, keysetBefore, pageOf } from '../pagination.js';
 import { requireAuth, requireNonGuest, requireRole } from '../middleware/auth-context.js';
 import { hubManagedMembershipGate } from '../middleware/hub-managed.js';
+import {
+  deleteMembershipGrants,
+  type MembershipRemovalHook,
+  type RemovalCounts
+} from '../members/removal.js';
 
 export interface MemberRouteDeps {
   db: Db;
@@ -30,6 +36,8 @@ export interface MemberRouteDeps {
   hubManaged?: { manageUrl: string } | undefined;
   /** The tool's `guest_target` sentence (`copy.guestTarget`). */
   guestTargetMessage: string;
+  /** The tool's half of a removal (the `membershipRemoval` slot), run in the removal's transaction. */
+  onMembershipRemoval?: MembershipRemovalHook | undefined;
 }
 
 const err = (code: string, message: string) => ({ error: { code, message } });
@@ -244,7 +252,7 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
     }
     // ADR 014: deleting the ACCOUNT erases the user from EVERY workspace, and
     // an admin's authority ends at their own — refuse when the target belongs
-    // to any other workspace (deactivate the membership instead; the account
+    // to any other workspace (remove the person from this one instead; the account
     // holder can erase themselves). Single-workspace instances never hit this.
     const [foreign] = await db
       .select({ id: workspaceMembers.id })
@@ -260,7 +268,7 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
       return c.json(
         err(
           'member_of_other_workspaces',
-          'This account belongs to other workspaces — deactivate the membership instead of deleting the account'
+          'This account belongs to other workspaces — remove the person from this workspace instead of deleting the account'
         ),
         409
       );
@@ -319,6 +327,113 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
       metadata: { targetUserId: target.userId, email: snapshot!.email }
     });
     return c.json(toWire(snapshot!), 200);
+  });
+
+  // Removal (PRDCT-2816): the act between the pause and the account erasure,
+  // and the same one the hub's removal is on cloud. The membership row is
+  // switched off, never deleted (a new invitation reactivates the very same
+  // row), and the person's project grants, their team seats and what the
+  // tool hangs on them in this workspace go with it, in ONE transaction: a
+  // person brought back starts with none. The row is left at the role
+  // `member`: the role a person held is not kept in wait for them either, so
+  // whatever switches the row back on (an admin's Reactivate, an invitation,
+  // which names its own role) never hands an old admin or owner role back.
+  // The account, and the person's memberships of other workspaces, are untouched.
+  // An already paused member can be removed: that turns the pause into a
+  // removal. The 2-segment gate above does NOT cover this 3-segment path, so
+  // it is gated explicitly. Machines never reach it: the path is deliberately
+  // UNLISTED in the fail-closed scope allowlist, like the account deletion.
+  // A hub-origin workspace died at the subtree gate with `hub_managed`.
+  api.use('/members/:id/remove', requireRole('admin'));
+  api.openapi(memberRemoveRoute, async (c) => {
+    const principal = c.get('principal')!;
+    const { id } = c.req.valid('param');
+
+    const [target] = await db
+      .select({
+        id: workspaceMembers.id,
+        userId: workspaceMembers.userId,
+        role: workspaceMembers.role,
+        isActive: workspaceMembers.isActive
+      })
+      .from(workspaceMembers)
+      .where(and(eq(workspaceMembers.id, id), eq(workspaceMembers.workspaceId, principal.workspaceId)))
+      .limit(1);
+    if (!target) return c.json(err('not_found', 'Member not found'), 404);
+    if (target.userId === principal.userId) {
+      return c.json(err('cannot_remove_self', 'You cannot remove yourself'), 400);
+    }
+    if (target.role === 'owner' && principal.role !== 'owner') {
+      return c.json(err('forbidden', 'Only an owner can remove an owner'), 403);
+    }
+
+    // The WHERE names the workspace again: the row is the one read above,
+    // and the statement could not reach another workspace's even if it were not.
+    // What the person held goes first, the row second: the same lock order
+    // as an invitation's accept, which locks the invitation and then the
+    // membership row (members/removal.ts, ORDER).
+    const remove = () =>
+      db.transaction(async (tx) => {
+        const counts = await deleteMembershipGrants(
+          tx,
+          [{ memberId: target.id, workspaceId: principal.workspaceId, userId: target.userId }],
+          deps.onMembershipRemoval
+        );
+        await tx
+          .update(workspaceMembers)
+          .set({ isActive: false, isDefault: false, role: 'member' })
+          .where(
+            and(eq(workspaceMembers.id, target.id), eq(workspaceMembers.workspaceId, principal.workspaceId))
+          );
+        return counts;
+      });
+    let removed: RemovalCounts;
+    try {
+      // Removing an ACTIVE owner runs under the race-free last-owner guard,
+      // as the pause and the account deletion do.
+      removed =
+        target.role === 'owner' && target.isActive
+          ? await accountDeletion.withLastOwnerGuard(principal.workspaceId, target.userId, remove)
+          : await remove();
+    } catch (cause) {
+      if (cause instanceof LastOwnerError || isLastOwnerDbError(cause)) {
+        return c.json(err('last_owner', 'The workspace must keep at least one active owner'), 400);
+      }
+      throw cause;
+    }
+
+    const [after] = await db
+      .select({
+        id: workspaceMembers.id,
+        userId: workspaceMembers.userId,
+        email: userTable.email,
+        name: userTable.name,
+        role: workspaceMembers.role,
+        isActive: workspaceMembers.isActive,
+        createdAt: workspaceMembers.createdAt,
+        lastSeenAt: workspaceMembers.lastSeenAt
+      })
+      .from(workspaceMembers)
+      .innerJoin(userTable, eq(workspaceMembers.userId, userTable.id))
+      .where(eq(workspaceMembers.id, target.id))
+      .limit(1);
+
+    c.set('audit', {
+      action: 'member.remove',
+      resourceType: 'member',
+      resourceId: target.id,
+      // The tool's counts first: a name the chassis writes is the chassis's.
+      metadata: {
+        ...removed.tool,
+        targetUserId: target.userId,
+        roleBefore: target.role,
+        projectGrants: removed.projectGrants,
+        teamSeats: removed.teamSeats,
+        invitations: removed.invitations,
+        demoPasses: removed.demoPasses
+      }
+    });
+    return c.json(toWire(after!), 200);
   });
 
   // The shared refusal of every route that mints a sign-in-equivalent

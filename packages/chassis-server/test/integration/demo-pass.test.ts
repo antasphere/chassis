@@ -931,6 +931,37 @@ describe('a demo link’s session leaves nothing behind', () => {
     expect(await membershipsElsewhere()).toBe(1);
   });
 
+  it('v3. a pass’s session changes no default workspace; the person’s own password session does (PRDCT-2815)', async () => {
+    const { actor, cookie } = await passSessionFor('settled', 'settled@example.com');
+    const defaults = async () =>
+      (
+        await app.db.pool.query(
+          `SELECT workspace_id FROM workspace_members WHERE user_id = $1 AND is_default`,
+          [actor.userId]
+        )
+      ).rows.map((row) => row.workspace_id as string);
+    expect(await defaults()).toEqual([]);
+
+    for (const body of [{ workspaceId }, { workspaceId: null }]) {
+      await expectError(
+        await send(app, 'PUT', '/me/default-workspace', { cookie }, body),
+        403,
+        'demo_session'
+      );
+    }
+    expect(await defaults()).toEqual([]);
+
+    expect((await send(app, 'PUT', '/me/default-workspace', actor, { workspaceId })).status).toBe(200);
+    expect(await defaults()).toEqual([workspaceId]);
+    // The pass's session refuses the clear too, once a default exists.
+    await expectError(
+      await send(app, 'PUT', '/me/default-workspace', { cookie }, { workspaceId: null }),
+      403,
+      'demo_session'
+    );
+    expect(await defaults()).toEqual([workspaceId]);
+  });
+
   it('t4. a pass’s session still reads itself and signs out', async () => {
     const { cookie } = await passSessionFor('visitor', 'visitor@example.com');
     const session = await send(app, 'GET', '/auth/get-session', { cookie });
@@ -1046,5 +1077,145 @@ describe('a demo link’s session leaves nothing behind', () => {
     );
     expect((await send(app, 'GET', '/me', { cookie: second })).status).toBe(200);
     expect((await send(app, 'GET', '/me', { cookie: first })).status).toBe(401);
+  });
+});
+
+describe('a removal ends the demo passes (PRDCT-2816)', () => {
+  const INVALID = JSON.stringify({
+    error: { code: 'invalid_demo_pass', message: 'This demo link is not valid' }
+  });
+
+  const memberIdOf = async (userId: string, inWorkspace = workspaceId) =>
+    (
+      await app.db.pool.query(`SELECT id FROM workspace_members WHERE user_id = $1 AND workspace_id = $2`, [
+        userId,
+        inWorkspace
+      ])
+    ).rows[0].id as string;
+  const revokedAtOf = async (passId: string) =>
+    (await app.db.pool.query(`SELECT revoked_at FROM demo_passes WHERE id = $1`, [passId])).rows[0]
+      .revoked_at as Date | null;
+  const removeMember = (memberId: string) =>
+    send(app, 'POST', `/members/${memberId}/remove`, actors.owner!, undefined);
+  const removalMetadata = async (memberId: string) => {
+    const { rows } = await app.db.pool.query(
+      `SELECT metadata FROM audit_log WHERE action = 'member.remove' AND resource_id = $1`,
+      [memberId]
+    );
+    expect(rows).toHaveLength(1);
+    return rows[0].metadata as Record<string, unknown>;
+  };
+  async function expectRedeemRefused(secret: string): Promise<void> {
+    const res = await redeem(secret);
+    expect({ status: res.status, body: await res.text(), sets: setsSession(res) }).toEqual({
+      status: 401,
+      body: INVALID,
+      sets: false
+    });
+  }
+
+  it('F1: a removed owner’s passes are revoked, their redeem refused, and the sessions they opened signed out', async () => {
+    const o2 = await addMember('o2', 'o2@example.com', { role: 'owner' });
+    const o2MemberId = await memberIdOf(o2.userId);
+    // o2 owns a workspace of their own too, with a demo person in it.
+    const made = await send(app, 'POST', '/workspaces', o2, { name: 'O2 elsewhere' });
+    expect(made.status).toBe(201);
+    const { rows: o2Rows } = await app.db.pool.query(
+      `SELECT workspace_id FROM workspace_members WHERE user_id = $1 AND workspace_id <> $2`,
+      [o2.userId, workspaceId]
+    );
+    expect(o2Rows).toHaveLength(1);
+    const o2Elsewhere = o2Rows[0].workspace_id as string;
+    const far = await app.auth.api.signUpEmail({
+      body: { email: 'far-demo@example.com', password: PASSWORD, name: 'far' }
+    });
+    await app.db.db
+      .insert(workspaceMembers)
+      .values({ workspaceId: o2Elsewhere, userId: far.user.id, role: 'member', origin: 'local' });
+
+    await addMember('f1Target', 'f1-target@example.com', { signIn: false });
+    await addMember('f1Other', 'f1-other@example.com', { signIn: false });
+    await addMember('f1Bystander', 'f1-bystander@example.com', { signIn: false });
+
+    // Two passes o2 minted here, one of them redeemed before the removal.
+    const opened = await mint(o2, { email: 'f1-target@example.com' });
+    const idle = await mint(o2, { email: 'f1-other@example.com' });
+    const redeemed = await redeem(opened.secret);
+    expect(redeemed.status).toBe(200);
+    const passCookie = extractCookie(redeemed);
+    expect((await send(app, 'GET', '/me', { cookie: passCookie })).status).toBe(200);
+    const { rows: links } = await app.db.pool.query(
+      `SELECT session_id FROM demo_pass_sessions WHERE pass_id = $1`,
+      [opened.id]
+    );
+    expect(links).toHaveLength(1);
+    const sessionId = links[0].session_id as string;
+
+    // Boundaries: another owner's pass for another person here, and o2's pass
+    // in o2's other workspace.
+    const bystanderPass = await mint(actors.owner!, { email: 'f1-bystander@example.com' });
+    const awayRes = await send(
+      app,
+      'POST',
+      '/demo/passes',
+      o2,
+      { email: 'far-demo@example.com' },
+      { 'x-workspace-id': o2Elsewhere }
+    );
+    expect(awayRes.status).toBe(201);
+    const away = await readJson(awayRes);
+    secrets.push(away.secret);
+
+    expect((await removeMember(o2MemberId)).status).toBe(200);
+
+    expect(await revokedAtOf(opened.id)).toBeInstanceOf(Date);
+    expect(await revokedAtOf(idle.id)).toBeInstanceOf(Date);
+    await expectRedeemRefused(opened.secret);
+    await expectRedeemRefused(idle.secret);
+
+    // The session the pass opened before the removal is signed out, its rows gone.
+    expect((await send(app, 'GET', '/me', { cookie: passCookie })).status).toBe(401);
+    expect(
+      (await app.db.pool.query(`SELECT 1 FROM demo_pass_sessions WHERE session_id = $1`, [sessionId])).rows
+    ).toHaveLength(0);
+    expect((await app.db.pool.query(`SELECT 1 FROM session WHERE id = $1`, [sessionId])).rows).toHaveLength(
+      0
+    );
+
+    // Untouched: another owner's pass here, and o2's pass in another workspace.
+    expect(await revokedAtOf(bystanderPass.id)).toBeNull();
+    expect((await redeem(bystanderPass.secret)).status).toBe(200);
+    expect(await revokedAtOf(away.pass.id)).toBeNull();
+    expect((await redeem(away.secret)).status).toBe(200);
+
+    // The count: the two passes o2 minted here.
+    expect(await removalMetadata(o2MemberId)).toMatchObject({ demoPasses: 2 });
+  });
+
+  it('a pass minted FOR a removed person is revoked, and stays revoked once they are invited back', async () => {
+    const person = await addMember('forPerson', 'for-person@example.com');
+    const personMemberId = await memberIdOf(person.userId);
+    const minted = await mint(actors.owner!, { email: person.email });
+
+    expect((await removeMember(personMemberId)).status).toBe(200);
+    expect(await revokedAtOf(minted.id)).toBeInstanceOf(Date);
+    await expectRedeemRefused(minted.secret);
+    expect(await removalMetadata(personMemberId)).toMatchObject({ demoPasses: 1 });
+
+    // Invited back and accepted with the person's own session.
+    const invited = await send(app, 'POST', '/invitations', actors.owner!, {
+      email: person.email,
+      role: 'member'
+    });
+    expect(invited.status).toBe(201);
+    const token = ((await readJson(invited)).acceptUrl as string).split('/invite/')[1]!;
+    expect((await send(app, 'POST', '/invitations/accept', person, { token })).status).toBe(200);
+    const { rows } = await app.db.pool.query(`SELECT is_active FROM workspace_members WHERE id = $1`, [
+      personMemberId
+    ]);
+    expect(rows[0].is_active).toBe(true);
+
+    expect(await revokedAtOf(minted.id)).toBeInstanceOf(Date);
+    await expectRedeemRefused(minted.secret);
   });
 });

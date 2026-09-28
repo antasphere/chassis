@@ -1272,7 +1272,8 @@ export function createApiApp<
     publicBaseUrl: env.PUBLIC_BASE_URL,
     accountDeletion: deps.accountDeletion,
     hubManaged,
-    guestTargetMessage: tool.copy.guestTarget
+    guestTargetMessage: tool.copy.guestTarget,
+    onMembershipRemoval: tool.membershipRemoval
   });
   // Teams: the tool's own on self-hosted (and in a cloud-local workspace), the
   // hub's projection in a hub-origin workspace, where the members' gate refuses the writes.

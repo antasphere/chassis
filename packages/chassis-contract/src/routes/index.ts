@@ -6,6 +6,8 @@ import { instanceInfoSchema } from '../schemas/instance.js';
 import { setupRequestSchema, setupResponseSchema } from '../schemas/setup.js';
 import { onboardingDismissedSchema } from '../schemas/me.js';
 import {
+  defaultWorkspaceSchema,
+  defaultWorkspaceSetSchema,
   workspaceCreatedSchema,
   workspaceCreateSchema,
   workspaceUpdatedSchema,
@@ -196,6 +198,29 @@ export const workspaceCreateRoute = createRoute({
   }
 });
 
+// ── The person's default workspace (PRDCT-2815) ─────────────────────────────
+// A setting of the PERSON, not of a workspace: the route names no workspace
+// in its path and is open to every credential of the person (the machine
+// scope allowlist lists it under the write scope, so the CLI sets it), a key
+// pinned to one workspace excepted.
+
+export const defaultWorkspaceSetRoute = createRoute({
+  method: 'put',
+  path: '/me/default-workspace',
+  tags: ['workspaces'],
+  summary: 'Choose the workspace a request naming none resolves to, or clear the choice (self-hosted)',
+  request: {
+    body: jsonRequestBody(defaultWorkspaceSetSchema, 'A workspace the caller is an active member of, or null')
+  },
+  responses: {
+    200: jsonBody(defaultWorkspaceSchema, 'The default as it now is'),
+    400: errorResponses[400],
+    401: errorResponses[401],
+    403: jsonBody(apiErrorSchema, 'hub_managed (cloud: set on the account site), key_pinned'),
+    404: jsonBody(apiErrorSchema, 'Not a workspace the caller is an active member of')
+  }
+});
+
 // ── Members ──────────────────────────────────────────────────────────────────
 
 export const workspaceUpdateRoute = createRoute({
@@ -255,6 +280,25 @@ export const memberDeleteRoute = createRoute({
     403: errorResponses[403],
     404: errorResponses[404],
     409: jsonBody(apiErrorSchema, 'Account belongs to other workspaces (member_of_other_workspaces)')
+  }
+});
+
+export const memberRemoveRoute = createRoute({
+  method: 'post',
+  path: '/members/{id}/remove',
+  tags: ['members'],
+  summary:
+    'Remove a member from the workspace: the membership off, their project grants and team seats deleted, the account kept (admin+; sessions only)',
+  request: { params: uuidParams },
+  responses: {
+    200: jsonBody(memberSchema, 'The removed member (inactive)'),
+    400: jsonBody(apiErrorSchema, 'cannot_remove_self, last_owner'),
+    401: errorResponses[401],
+    403: jsonBody(
+      apiErrorSchema,
+      'insufficient_role, forbidden (an owner is removed by an owner), hub_managed'
+    ),
+    404: errorResponses[404]
   }
 });
 

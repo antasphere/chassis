@@ -1,13 +1,17 @@
 import type { OpenAPIHono } from '@hono/zod-openapi';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, ne, sql } from 'drizzle-orm';
 import { ACTIVE_WORKSPACE_HEADER } from '@antasphere/chassis-contract';
-import { workspaceCreateRoute, workspaceUpdateRoute } from '@antasphere/chassis-contract/routes';
+import {
+  defaultWorkspaceSetRoute,
+  workspaceCreateRoute,
+  workspaceUpdateRoute
+} from '@antasphere/chassis-contract/routes';
 import type { WorkspaceLook } from '@antasphere/chassis-contract';
-import { workspaceMembers, workspaces, type Db, type DbConn } from '@antasphere/chassis-db';
+import { apiKeys, workspaceMembers, workspaces, type Db, type DbConn } from '@antasphere/chassis-db';
 import type { AuditService } from '../audit/service.js';
 import type { Auth } from '../identity/better-auth.js';
 import { projectOrgMembership } from '../identity/hub-projection.js';
-import { requireRole } from '../middleware/auth-context.js';
+import { requireAuth, requireRole } from '../middleware/auth-context.js';
 import type { ReconcilePassOutcome } from '../identity/hub-reconcile.js';
 import type { HubOrgCreator } from '../identity/hub-user-client.js';
 import type { Logger } from '../logger.js';
@@ -455,6 +459,122 @@ export function registerWorkspaceRoutes(api: OpenAPIHono, deps: WorkspaceRouteDe
   // allowlist like the create; re-checked here). The route names no id: the
   // request's one workspace is the one edited (ADR 014). A guest never
   // holds admin, so requireRole covers D2 too.
+  // PUT /me/default-workspace (PRDCT-2815): the person chooses the workspace
+  // a request naming none resolves to. `workspace_members.is_default` and
+  // the selection rule (identity/resolve-membership.ts) are shared by both
+  // editions; only the WRITER differs. On cloud the hub reconcile is the
+  // writer (it clears and sets the flag from the person's account at every
+  // pass, so a local write would be undone within minutes): the route
+  // refuses with the account site to set it on, whatever the workspace. On
+  // self-hosted this route is the writer.
+  //
+  // A setting of the PERSON: it reads `principal.userId` and never the
+  // request's workspace, is open to the person's keys and tokens under the
+  // write scope (the CLI sets it), and is refused to a key pinned to one
+  // workspace, which reaches that workspace alone and must not change where
+  // the person's other credentials land. It writes NO audit row: a
+  // workspace never learns what its members do elsewhere, and the row would
+  // land in the trail of the workspace the request happened to be in. The
+  // path is exempt from the generic audit middleware (audit/service.ts),
+  // and the change is on the server log.
+  api.use('/me/default-workspace', requireAuth());
+  api.openapi(defaultWorkspaceSetRoute, async (c) => {
+    const principal = c.get('principal')!;
+    if (cloud) {
+      return c.json(
+        {
+          error: {
+            code: 'hub_managed',
+            message: 'Your default workspace is a setting of your Antasphere account — choose it there',
+            details: { manageUrl: cloud.manageUrl }
+          }
+        },
+        403
+      );
+    }
+    // A session a demo link opened is a visit (identity/demo-pass.ts): the
+    // person's default is theirs to keep long after the pass, like a
+    // workspace the session would have made.
+    if (c.get('demoPassId')) {
+      return c.json(
+        err(
+          'demo_session',
+          'A session opened by a demo link cannot change your default workspace: sign in with your password'
+        ),
+        403
+      );
+    }
+    if (principal.apiKeyId) {
+      const [key] = await db
+        .select({ pin: apiKeys.workspaceId })
+        .from(apiKeys)
+        .where(eq(apiKeys.id, principal.apiKeyId))
+        .limit(1);
+      if (!key || key.pin !== null) {
+        return c.json(
+          err('key_pinned', 'This key is pinned to one workspace and cannot change your default workspace'),
+          403
+        );
+      }
+    }
+    const { workspaceId } = c.req.valid('json');
+
+    if (workspaceId !== null) {
+      // An ACTIVE membership of the caller, or nothing: a workspace that
+      // does not exist and one the caller does not belong to answer alike.
+      const [membership] = await db
+        .select({ id: workspaceMembers.id })
+        .from(workspaceMembers)
+        .where(
+          and(
+            eq(workspaceMembers.userId, principal.userId),
+            eq(workspaceMembers.workspaceId, workspaceId),
+            eq(workspaceMembers.isActive, true)
+          )
+        )
+        .limit(1);
+      if (!membership) return c.json(err('not_found', 'Workspace not found'), 404);
+    }
+
+    // Clear-then-set in ONE transaction: the partial unique index (user_id
+    // WHERE is_default) forbids two trues even transiently (the reconcile's
+    // own order). The set re-states the active membership, so a membership
+    // switched off between the check and the write is never made the default.
+    const chosen = await db.transaction(async (tx) => {
+      await tx
+        .update(workspaceMembers)
+        .set({ isDefault: false })
+        .where(
+          and(
+            eq(workspaceMembers.userId, principal.userId),
+            eq(workspaceMembers.isDefault, true),
+            ...(workspaceId !== null ? [ne(workspaceMembers.workspaceId, workspaceId)] : [])
+          )
+        );
+      if (workspaceId === null) return null;
+      const set = await tx
+        .update(workspaceMembers)
+        .set({ isDefault: true })
+        .where(
+          and(
+            eq(workspaceMembers.userId, principal.userId),
+            eq(workspaceMembers.workspaceId, workspaceId),
+            eq(workspaceMembers.isActive, true)
+          )
+        )
+        .returning({ workspaceId: workspaceMembers.workspaceId });
+      return set[0]?.workspaceId ?? null;
+    });
+    if (workspaceId !== null && chosen === null) {
+      return c.json(err('not_found', 'Workspace not found'), 404);
+    }
+    logger.info(
+      { userId: principal.userId, via: principal.via, defaultWorkspaceId: chosen },
+      'default workspace changed by the person'
+    );
+    return c.json({ defaultWorkspaceId: chosen }, 200);
+  });
+
   api.use('/workspace', requireRole('admin'));
   api.openapi(workspaceUpdateRoute, async (c) => {
     const principal = c.get('principal');

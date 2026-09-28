@@ -14,6 +14,7 @@ import type {
   CliAuthRequest,
   CliAuthRequested,
   CliAuthRevoked,
+  DefaultWorkspace,
   DemoPass,
   DemoPassesList,
   DemoPassMint,
@@ -310,6 +311,18 @@ export class ChassisClient<TScope extends string> {
   }
 
   /**
+   * Choose the workspace a request naming none resolves to, or clear the
+   * choice with `null` (the oldest active membership answers again). The
+   * person's own setting, open to their keys under the write scope; a key
+   * pinned to one workspace answers 403 `key_pinned`. On the cloud edition
+   * the default is set on the account site: 403 `hub_managed` with
+   * `details.manageUrl`. 404 for a workspace the caller is no active member of.
+   */
+  setDefaultWorkspace(workspaceId: string | null): Promise<DefaultWorkspace> {
+    return this.request('PUT', '/me/default-workspace', { workspaceId });
+  }
+
+  /**
    * Create ANOTHER workspace with the caller as its owner. Sessions only
    * (API keys and OAuth bearers answer 403); offer it only while `/me`'s
    * `canCreateWorkspace` is true. Self-hosted creates it locally under the
@@ -415,6 +428,16 @@ export class ChassisClient<TScope extends string> {
    */
   deleteMember(id: string): Promise<Member> {
     return this.request('DELETE', `/members/${encodeURIComponent(id)}`);
+  }
+
+  /**
+   * Remove a member from the workspace (admin+, sessions only): the
+   * membership is switched off and their project grants and team seats are
+   * deleted; the account stays. Invited back, the person starts with none.
+   * Refused `hub_managed` on a hub-origin workspace (removal is the hub's).
+   */
+  removeMember(id: string): Promise<Member> {
+    return this.request('POST', `/members/${encodeURIComponent(id)}/remove`);
   }
 
   /**

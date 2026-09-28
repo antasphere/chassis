@@ -22,6 +22,7 @@ import type { HubSsoService } from './identity/hub-sso.js';
 import type { HubOrgCreator } from './identity/hub-user-client.js';
 import type { JobDeclaration, Jobs } from './jobs/pgboss.js';
 import type { Logger } from './logger.js';
+import type { MembershipRemovalHook } from './members/removal.js';
 import type { McpToolDefinition } from './mcp/server.js';
 import type { BucketDeclaration, ClientIpFn, RateLimiters } from './middleware/rate-limit.js';
 import type { Otel } from './observability/otel.js';
@@ -294,6 +295,15 @@ export interface ToolDefinition<
   mcp: McpToolDefinition;
   /** Slot 21: the tool's wording of the chassis refusals that name its domain. */
   copy: ToolCopy;
+  /**
+   * Slot 23: the tool's half of a member's removal (PRDCT-2816). The chassis
+   * deletes the person's project grants and team seats; what the TOOL hangs
+   * on a person in a workspace (an invite waiting for them, a grant on one of
+   * its resources) is ended here, in the same transaction, on both editions:
+   * `POST /members/{id}/remove` and the hub reconcile's sweep call it. A tool
+   * with nothing of the kind leaves the slot out.
+   */
+  membershipRemoval?: MembershipRemovalHook;
   /**
    * Slot 22: the billing rail's declarations (the pay-per-use billing rail
    * spec, §7 and §8b) — the priced actions with their default credits, the

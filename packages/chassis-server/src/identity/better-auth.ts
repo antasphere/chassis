@@ -166,6 +166,35 @@ export type Auth = ReturnType<typeof createAuth>;
 const CLIENT_METADATA_URI_FIELDS = ['client_uri', 'logo_uri', 'tos_uri', 'policy_uri'] as const;
 
 /**
+ * Every route that can CHANGE the account's email address from inside the
+ * tool, enumerated against the pinned 1.6.22 surface (re-verify on ANY Better
+ * Auth bump):
+ *
+ *  - POST /change-email: the core self-serve change (`user.changeEmail`);
+ *  - POST /email-otp/request-email-change + POST /email-otp/change-email: the
+ *    emailOTP plugin's pair. Both answer 400 today (the plugin's own
+ *    `changeEmail.enabled` is never set); closed as config insurance, the
+ *    stance /set-password has in isPasswordResetPath.
+ *
+ * On EDITION=cloud the address is the hub's: the sign-in re-syncs it at every
+ * login (identity/hub-sso.ts), so a change made here is overwritten at the
+ * next one, and until then the person's address here differs from the one
+ * their hub identity carries. The dashboard hides the form
+ * (`emailChange: false`); the route itself refuses too (PRDCT-2818), like the
+ * owner's change-email link (api/members.ts, `email_change_disabled`).
+ * Ruled OUT on purpose: the tokened GET /verify-email stays open, since it
+ * also lands the address verification the instance sends, and with both
+ * mints closed no change token can be issued on cloud.
+ */
+function isEmailChangePath(path: string): boolean {
+  return (
+    path.startsWith('/change-email') ||
+    path.startsWith('/email-otp/request-email-change') ||
+    path.startsWith('/email-otp/change-email')
+  );
+}
+
+/**
  * Every Better Auth route that can SET or RESET a local password with no
  * current-password proof, enumerated against the pinned 1.6.22 surface
  * (re-enumerated on the 1.6.15 → 1.6.22 bump, 2026-08-29, ADR 001; the
@@ -764,6 +793,15 @@ export function createAuth({
           throw new APIError('FORBIDDEN', {
             message:
               'Password reset is disabled on this edition — credentials are managed at the Antasphere hub'
+          });
+        }
+        // Cloud edition (PRDCT-2818): the email address is the hub's — see
+        // isEmailChangePath. Unconditional like the reset closure: nothing
+        // server-side calls these paths.
+        if (hubSso && isEmailChangePath(ctx.path)) {
+          throw new APIError('FORBIDDEN', {
+            code: 'email_change_disabled',
+            message: `Email changes are disabled on this edition — change your address on your Antasphere account (${hubSso.accountUrl()})`
           });
         }
         // Cloud edition (D1, hub-only login): the emailOTP SIGN-IN surface

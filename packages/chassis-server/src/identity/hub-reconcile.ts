@@ -1,14 +1,9 @@
 import { Counter } from 'prom-client';
 import { and, eq, inArray, isNotNull, ne, notInArray, sql } from 'drizzle-orm';
-import {
-  projectMembers,
-  workspaceMembers,
-  workspaceTeamMembers,
-  workspaces,
-  type Db
-} from '@antasphere/chassis-db';
+import { workspaceMembers, workspaces, type Db } from '@antasphere/chassis-db';
 import type { AuditService } from '../audit/service.js';
 import type { Logger } from '../logger.js';
+import { deleteMembershipGrants, type MembershipRemovalHook } from '../members/removal.js';
 import { projectOrgMembership, projectOrgTeams, projectTeamSeats } from './hub-projection.js';
 import type { HubDeniedOrg, HubUserClient, LoginAccessToken } from './hub-user-client.js';
 
@@ -134,6 +129,8 @@ export interface HubOrgReconcilerDeps {
   audit: AuditService;
   logger: Logger;
   dials: HubFederationDials;
+  /** The tool's half of a removal (the `membershipRemoval` slot), run in the sweep's transaction. */
+  onMembershipRemoval?: MembershipRemovalHook | undefined;
   /** Test seam. */
   now?: () => number;
 }
@@ -331,13 +328,13 @@ export class HubOrgReconciler {
             )
           )
           .returning({ id: workspaceMembers.id, workspaceId: workspaceMembers.workspaceId });
-        if (rows.length > 0) {
-          const sweptIds = rows.map((row) => row.id);
-          await tx.delete(projectMembers).where(inArray(projectMembers.memberId, sweptIds));
-          // The team seats go with the membership for the same reason: a
-          // re-add at the hub starts from what the hub asserts then.
-          await tx.delete(workspaceTeamMembers).where(inArray(workspaceTeamMembers.memberId, sweptIds));
-        }
+        // The grants and the seats go with the membership: the one statement
+        // of what a removal takes, shared with the tool's own removal route.
+        await deleteMembershipGrants(
+          tx,
+          rows.map((row) => ({ memberId: row.id, workspaceId: row.workspaceId, userId: localUserId })),
+          this.deps.onMembershipRemoval
+        );
         return rows;
       });
       for (const row of deactivated) {
