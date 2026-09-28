@@ -167,6 +167,10 @@ export const DEMO_SESSION_REFUSED_AUTH_PATHS: readonly string[] = [
   '/oauth2/update-consent',
   '/oauth2/continue',
   '/oauth2/create-client',
+  // A session's register stores the client under the person (user_id), a
+  // credential the pass would leave behind; anonymous registration is another
+  // matter, judged by OAUTH_DYNAMIC_CLIENT_REGISTRATION and its own wall.
+  '/oauth2/register',
   '/oauth2/update-client',
   '/oauth2/client/rotate-secret',
   '/oauth2/delete-client',

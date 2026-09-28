@@ -482,6 +482,18 @@ export function registerTeamRoutes(api: OpenAPIHono, deps: TeamRouteDeps): void 
         if (!(await holdLiveMembership(tx, principal.workspaceId, { memberId: target.id }))) {
           return 'member_gone' as const;
         }
+        // A seat already there answers the repeat WITHOUT an insert (the
+        // verifier's F4: 14 of 40 removals answered 500). Under the membership
+        // share lock, a removal's uncommitted delete of this seat keeps the row
+        // visible to a plain read, so the add answers 409 and never waits on
+        // that delete, while the removal's update waits on the add's share
+        // lock: an insert here would wait on the delete, a cycle.
+        const [existing] = await tx
+          .select({ id: workspaceTeamMembers.id })
+          .from(workspaceTeamMembers)
+          .where(and(eq(workspaceTeamMembers.teamId, team.id), eq(workspaceTeamMembers.memberId, target.id)))
+          .limit(1);
+        if (existing) return 'repeat' as const;
         const [row] = await tx
           .insert(workspaceTeamMembers)
           .values({ teamId: team.id, memberId: target.id, addedBy: principal.userId })

@@ -737,8 +737,9 @@ export function createApiApp<
   // `DEMO_SESSION_REFUSED_API_ROUTES`): the routes that mint a credential or
   // make something the person keeps refuse it here, at one place, right after
   // the credential resolves and before anything claims an idempotency key.
-  // `demoPassId` is only ever set while the switch is on.
-  for (const rule of DEMO_SESSION_REFUSED_API_ROUTES) {
+  // `demoPassId` is only ever set while the switch is on. The tool's own
+  // routes of the kind (its `demoSessionRefusedRoutes` slot) join the list here.
+  for (const rule of [...DEMO_SESSION_REFUSED_API_ROUTES, ...(tool.demoSessionRefusedRoutes ?? [])]) {
     const gate: MiddlewareHandler = async (c, next) => {
       if (c.get('demoPassId')) {
         return c.json(err('demo_session', demoSessionApiRefusalMessage(rule.does)), 403);

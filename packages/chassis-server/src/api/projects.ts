@@ -656,6 +656,19 @@ export function registerProjectRoutes(api: OpenAPIHono, deps: ProjectRouteDeps):
       if (!(await holdLiveMembership(tx, principal.workspaceId, { memberId: target.id }))) {
         return 'member_gone' as const;
       }
+      // A grant already there answers `already_member` WITHOUT an insert (the
+      // verifier's F4: a duplicate add beside a removal deadlocked, 14 of 40
+      // removals answered 500). Under the membership share lock, a removal's
+      // uncommitted delete of this grant keeps the row visible to a plain
+      // read, so the add answers 409 and never waits on that delete, while
+      // the removal's update waits on the add's share lock: the insert's
+      // conflict check would wait on the delete, a cycle.
+      const [existing] = await tx
+        .select({ id: projectMembers.id })
+        .from(projectMembers)
+        .where(and(eq(projectMembers.projectId, id), eq(projectMembers.memberId, target.id)))
+        .limit(1);
+      if (existing) return [];
       return tx
         .insert(projectMembers)
         .values({ projectId: id, memberId: target.id, role: body.role, addedBy: principal.userId })

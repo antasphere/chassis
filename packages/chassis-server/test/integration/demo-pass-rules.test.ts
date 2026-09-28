@@ -173,6 +173,23 @@ describe('a demo link’s session mints no credential for anyone', () => {
       'demo_session'
     );
   });
+
+  it('6. registers no OAuth client under the person (F3); an anonymous registration still answers', async () => {
+    const cookie = await passCookieFor(demoAdmin.email);
+    const client = {
+      client_name: 'from-a-pass',
+      redirect_uris: ['http://localhost:9999/callback'],
+      token_endpoint_auth_method: 'none',
+      grant_types: ['authorization_code', 'refresh_token'],
+      response_types: ['code']
+    };
+    await expectError(await send('POST', '/auth/oauth2/register', { cookie }, client), 403, 'demo_session');
+    const { rows } = await app.db.pool.query(`SELECT client_id FROM oauth_client WHERE name = $1`, [
+      'from-a-pass'
+    ]);
+    expect(rows).toHaveLength(0);
+    expect([200, 201]).toContain((await send('POST', '/auth/oauth2/register', {}, client)).status);
+  });
 });
 
 describe('the contract walk: every route that answers a credential is on the list', () => {

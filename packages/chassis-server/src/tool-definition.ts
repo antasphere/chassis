@@ -18,6 +18,7 @@ import type { EnvExtension, ToolEnv } from './env.js';
 import type { FileService } from './files/service.js';
 import type { Auth } from './identity/better-auth.js';
 import type { HubFederationDials } from './identity/hub-reconcile.js';
+import type { DemoSessionRefusedApiRoute } from './identity/demo-pass-rules.js';
 import type { HubSsoService } from './identity/hub-sso.js';
 import type { HubOrgCreator } from './identity/hub-user-client.js';
 import type { JobDeclaration, Jobs } from './jobs/pgboss.js';
@@ -304,6 +305,15 @@ export interface ToolDefinition<
    * with nothing of the kind leaves the slot out.
    */
   membershipRemoval?: MembershipRemovalHook;
+  /**
+   * Slot 24: the tool's own API routes a session opened by a demo link is
+   * refused, appended to `DEMO_SESSION_REFUSED_API_ROUTES` at the one mount
+   * (`api/create-api.ts`), the same 403 `demo_session`. A pass's session is a
+   * visit: a product route that answers a credential (an invite link, a claim
+   * link, a key) joins this list, and the tool's own contract walk test fails
+   * on one that does not. Absent = the chassis list alone.
+   */
+  demoSessionRefusedRoutes?: readonly DemoSessionRefusedApiRoute[];
   /**
    * Slot 22: the billing rail's declarations (the pay-per-use billing rail
    * spec, §7 and §8b) — the priced actions with their default credits, the

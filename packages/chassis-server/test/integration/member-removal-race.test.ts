@@ -86,6 +86,33 @@ async function waitForWaiters(n: number): Promise<void> {
   }
 }
 
+/**
+ * Resolves once a backend of this database waits on a lock while running a
+ * statement that starts with `prefix` (10 s at most): a wait on one named
+ * statement, not on whichever lock happens to be queued.
+ */
+async function waitForStatementWaiting(prefix: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const { rows } = await app.db.pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pg_stat_activity
+        WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE $1`,
+      [`${prefix}%`]
+    );
+    if (rows[0]!.n >= 1) return;
+    if (Date.now() > deadline) throw new Error(`expected a backend waiting on a lock in "${prefix}…"`);
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
+/** The database's deadlock counter, read after the statistics had time to flush. */
+async function deadlockCount(): Promise<number> {
+  const { rows } = await app.db.pool.query<{ deadlocks: string }>(
+    `SELECT deadlocks FROM pg_stat_database WHERE datname = current_database()`
+  );
+  return Number(rows[0]!.deadlocks);
+}
+
 /** Resolves with the promise's value once settled, or with `pending` after `ms`. */
 const settledWithin = <T>(p: Promise<T>, ms: number): Promise<T | 'pending'> =>
   Promise.race([p, new Promise<'pending'>((r) => setTimeout(() => r('pending'), ms))]);
@@ -284,5 +311,110 @@ describe('a removal against a concurrent add', () => {
 
     await reinvite('pass@example.com', x.cookie);
     expect(await livePasses()).toEqual([]);
+  });
+
+  it('E. a duplicate grant add fired with the removal, 20 rounds: the removal answers 200, the add 409 or 404, never a 500, no deadlock', async () => {
+    const x = await addMember('grant-dup@example.com', 'member');
+    const projectId = await newProject('Race E');
+    const addGrant = () =>
+      send(
+        'POST',
+        `/projects/${projectId}/members`,
+        { cookie: adminCookie },
+        { userId: x.userId, role: 'editor' }
+      );
+    // Other backends' pending statistics flush within the idle interval (10 s).
+    await new Promise((r) => setTimeout(r, 11_000));
+    const deadlocksBefore = await deadlockCount();
+
+    const ROUNDS = 20;
+    const adds: number[] = [];
+    const removals: number[] = [];
+    let grantsLeft = 0;
+    for (let round = 0; round < ROUNDS; round++) {
+      // The grant exists and the person is active before each round (a 409:
+      // a failed removal of the round before left it in place).
+      expect([201, 409]).toContain((await addGrant()).status);
+      const [add, removal] = await Promise.all([
+        addGrant(),
+        send('POST', `/members/${x.memberId}/remove`, { cookie: ownerCookie })
+      ]);
+      adds.push(add.status);
+      removals.push(removal.status);
+      grantsLeft += (await grantRows(x.memberId, projectId)).length;
+      // An admin's Reactivate, the act of the workspace that brings the person back.
+      const back = await send('PATCH', `/members/${x.memberId}`, { cookie: ownerCookie }, { isActive: true });
+      expect(back.status).toBe(200);
+    }
+    await new Promise((r) => setTimeout(r, 11_000));
+    const deadlocksAfter = await deadlockCount();
+    const tally = (list: number[]) =>
+      Object.entries(
+        list.reduce<Record<number, number>>((acc, s) => ({ ...acc, [s]: (acc[s] ?? 0) + 1 }), {})
+      )
+        .map(([status, n]) => `${status}=${n}`)
+        .join(' ');
+    console.log(
+      `arm E (${ROUNDS} rounds): add ${tally(adds)}; removal ${tally(removals)}; grants left ${grantsLeft}; deadlocks ${deadlocksBefore} -> ${deadlocksAfter}`
+    );
+    expect(removals.every((status) => status === 200)).toBe(true);
+    expect(adds.every((status) => status === 409 || status === 404)).toBe(true);
+    expect(grantsLeft).toBe(0);
+    expect(deadlocksAfter).toBe(deadlocksBefore);
+  }, 180_000);
+
+  it('F. a project the person creates while the removal sits between its update and its commit: no grant of theirs survives', async () => {
+    const x = await addMember('creator@example.com', 'member');
+    const outcome = await withLockClient(async (holdRow) => {
+      const holdInvitation = await app.db.pool.connect();
+      try {
+        // The removal's first pass runs; its update then waits on the held row.
+        await holdRow.query('BEGIN');
+        await holdRow.query('SELECT 1 FROM workspace_members WHERE id = $1 FOR SHARE', [x.memberId]);
+        const remove = send('POST', `/members/${x.memberId}/remove`, { cookie: ownerCookie });
+        await waitForStatementWaiting('update "workspace_members"');
+        // An invitation the person issued, made after the first pass and held,
+        // parks the removal's SECOND pass after its grant delete, before its commit.
+        const invited = await send(
+          'POST',
+          '/invitations',
+          { cookie: adminCookie },
+          { email: 'someone-creator-asked@example.com', role: 'member' }
+        );
+        expect(invited.status).toBe(201);
+        const invitationId = (await readJson(invited)).invitation.id as string;
+        await app.db.pool.query(`UPDATE invitations SET invited_by = $1 WHERE id = $2`, [
+          x.userId,
+          invitationId
+        ]);
+        await holdInvitation.query('BEGIN');
+        await holdInvitation.query('SELECT 1 FROM invitations WHERE id = $1 FOR UPDATE', [invitationId]);
+        await holdRow.query('COMMIT');
+        await waitForStatementWaiting('update "invitations"');
+        // The person creates a project now: the creator's read of their own
+        // membership waits on the removal's uncommitted update.
+        const create = Promise.resolve(
+          send('POST', '/projects', { cookie: x.cookie }, { name: 'Made during the removal' })
+        );
+        const early = await settledWithin(create, 1500);
+        console.log(
+          'arm F: create settled before the removal committed?',
+          early === 'pending' ? 'no (waiting)' : `yes, ${early.status}`
+        );
+        await holdInvitation.query('ROLLBACK');
+        const [createRes, removeRes] = await Promise.all([create, remove]);
+        return { create: createRes.status, remove: removeRes.status };
+      } finally {
+        await holdInvitation.query('ROLLBACK').catch(() => undefined);
+        holdInvitation.release();
+      }
+    });
+    console.log('arm F outcome', JSON.stringify(outcome));
+    expect(outcome.remove).toBe(200);
+    expect([401, 404, 201]).toContain(outcome.create);
+    const { rows } = await app.db.pool.query(`SELECT project_id FROM project_members WHERE member_id = $1`, [
+      x.memberId
+    ]);
+    expect(rows).toEqual([]);
   });
 });
