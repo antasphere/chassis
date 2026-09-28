@@ -228,8 +228,12 @@ export function rateLimit(
     await next();
     // 4xx/5xx = the credential was not accepted. Better Auth answers 401 for a
     // bad password, 400 for a malformed attempt, 403 for a refused origin —
-    // all of them are attempts that must cost.
-    if (c.res.status >= 400) {
+    // all of them are attempts that must cost. A 429 is not: it is a wall
+    // behind this one (the library's own 3-per-10-seconds on `/sign-in*`)
+    // saying "slow down", no credential was judged. Counting it let a burst of
+    // ordinary sign-ins from one address (a room behind one public IP) spend
+    // this 15-minute wall in seconds (PRDCT-2830, PRDCT-2848).
+    if (c.res.status >= 400 && c.res.status !== 429) {
       for (const key of keys) {
         await limiter.consume(key).catch(() => {});
       }

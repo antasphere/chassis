@@ -501,7 +501,16 @@ export function createApiApp<
   // emptied that account's bucket for the window. Consuming only when the
   // credential was actually refused keeps the brute-force budget identical and
   // makes the owner's own successful sign-ins free.
-  api.use('/auth/sign-in/*', rateLimit(limiters.login, clientIp, emailKeyOf, { consumeOn: 'failure' }));
+  //
+  // The federated start (`/auth/sign-in/oauth2`, the silent start toward the
+  // hub) presents no credential: it only answers the hub's authorize URL, and
+  // the hub checks the person with its own wall. It stays off this one, so a
+  // wall drained by wrong passwords behind a shared address does not also
+  // close the hub sign-in to everyone behind it (PRDCT-2830).
+  const loginWall = rateLimit(limiters.login, clientIp, emailKeyOf, { consumeOn: 'failure' });
+  api.use('/auth/sign-in/*', (c, next) =>
+    c.req.path.endsWith('/auth/sign-in/oauth2') ? next() : loginWall(c, next)
+  );
   api.use('/auth/email-otp/*', rateLimit(limiters.otp, clientIp, emailKeyOf));
   api.use('/auth/sign-up/*', rateLimit(limiters.login, clientIp));
   // Password reset: request keys by IP AND email (tight); reset + change key
