@@ -27,6 +27,7 @@ import {
   type DbConn
 } from '@antasphere/chassis-db';
 import { requireAuth, requireNonGuest } from '../middleware/auth-context.js';
+import { holdLiveMembership } from '../members/removal.js';
 import {
   createdAtText,
   cursorRowId,
@@ -340,6 +341,9 @@ export function registerProjectRoutes(api: OpenAPIHono, deps: ProjectRouteDeps):
             eq(workspaceMembers.isActive, true)
           )
         )
+        // Held until the creator's grant commits, like every add's
+        // (`holdLiveMembership`): a removal of the creator waits for it.
+        .for('share')
         .limit(1);
       if (!membership) return null;
       const [project] = await tx
@@ -644,14 +648,24 @@ export function registerProjectRoutes(api: OpenAPIHono, deps: ProjectRouteDeps):
         403
       );
     }
-    const inserted = await whileLive(principal, id, (tx) =>
-      tx
+    // The read above builds the answer; the one that counts is the locked
+    // re-read inside the insert's transaction (`holdLiveMembership`): a
+    // removal that landed since is seen here, one still running waits for
+    // this insert and takes it in its second pass.
+    const inserted = await whileLive(principal, id, async (tx) => {
+      if (!(await holdLiveMembership(tx, principal.workspaceId, { memberId: target.id }))) {
+        return 'member_gone' as const;
+      }
+      return tx
         .insert(projectMembers)
         .values({ projectId: id, memberId: target.id, role: body.role, addedBy: principal.userId })
         .onConflictDoNothing({ target: [projectMembers.projectId, projectMembers.memberId] })
-        .returning({ createdAt: projectMembers.createdAt })
-    );
+        .returning({ createdAt: projectMembers.createdAt });
+    });
     if (inserted === null) return c.json(archived(), 409);
+    if (inserted === 'member_gone') {
+      return c.json(err('member_not_found', 'No active member of this workspace matches'), 404);
+    }
     const [row] = inserted;
     if (!row) {
       return c.json(err('already_member', 'This person is already a member of the project'), 409);

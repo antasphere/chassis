@@ -58,15 +58,26 @@ const DIALS = {
   retryMs: 250,
   orgsTimeoutMs: 400,
   tokenTimeoutMs: 2_000,
-  // Long enough that a pass right after a login sits inside it under suite
-  // load, short enough to cross with a sleep.
   orgTeamsTtlMs: 1_000
 };
+/**
+ * The reconciler's clock (`hubNow`): its TTL, its retry throttle and the
+ * team-list window read this, so the tests move it forward instead of
+ * sleeping against 120 ms and 250 ms windows a loaded machine overshoots.
+ * It only moves when a test says so: a pass right after another sits inside
+ * every window whatever the machine's load.
+ */
+let clock = Date.now();
+const now = () => clock;
+const advance = (ms: number) => {
+  clock += ms;
+};
+/** Real time, for what the reconciler's clock does not govern (a request in flight, the database's own `now()`). */
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** Let the per-user reconcile cache (and the failure throttle) expire so the next request runs a fresh pass. */
-const expireTtl = () => sleep(Math.max(DIALS.reconcileTtlMs, DIALS.retryMs) + 40);
+const expireTtl = () => advance(Math.max(DIALS.reconcileTtlMs, DIALS.retryMs) + 40);
 /** Let an org's team list go stale so the next pass reads it again. */
-const expireOrgTeams = () => sleep(DIALS.orgTeamsTtlMs + 60);
+const expireOrgTeams = () => advance(DIALS.orgTeamsTtlMs + 60);
 
 let container: StartedPostgreSqlContainer;
 let hub: FakeHub;
@@ -83,7 +94,7 @@ beforeAll(async () => {
       HUB_CLIENT_SECRET: 'integration-test-hub-secret-teams',
       METRICS_TOKEN: 'hub-teams-metrics-token'
     },
-    { hubDials: DIALS }
+    { hubDials: DIALS, hubNow: now }
   );
   const res = await app.app.request(
     '/api/v1/setup',
@@ -182,7 +193,7 @@ describe('the teams projection', () => {
       role: 'member',
       teams: [{ id: TEAM_1, slug: 'design-studio', name: 'Design Studio' }]
     });
-    await expireTtl();
+    expireTtl();
     expect((await me(cookie)).status).toBe(200);
 
     expect(await seatsOf(tess.email, ORG_A)).toEqual([TEAM_1]);
@@ -234,7 +245,7 @@ describe('the teams projection', () => {
     const memberId = memberRows[0].id as string;
 
     hub.removeUserOrg(tess.sub, ORG_A);
-    await expireTtl();
+    expireTtl();
     await me(cookie);
 
     const { rows: after } = await app.db.pool.query(`SELECT is_active FROM workspace_members WHERE id = $1`, [
@@ -280,7 +291,7 @@ describe('the denied hint on /me', () => {
     hub.orgsMode = 'http500';
     try {
       const passesBefore = hub.orgsRequests.length;
-      await expireTtl();
+      expireTtl();
       const body = await readJson(await me(cookie));
       expect(hub.orgsRequests.length).toBeGreaterThan(passesBefore);
       expect(body.hubDenied).toEqual([{ id: ORG_DENY, name: 'Restricted Org' }]);
@@ -291,7 +302,7 @@ describe('the denied hint on /me', () => {
 
   it('a later definitive pass with denied: [] empties it', async () => {
     hub.setUserDenied(dora.sub, []);
-    await expireTtl();
+    expireTtl();
     await me(cookie); // the pass runs in the gate, before the handler reads the hint
     const body = await readJson(await me(cookie));
     expect(body.hubDenied).toEqual([]);
@@ -302,7 +313,7 @@ describe('the denied hint on /me', () => {
     // leaves it out of `orgs` and names it in `denied`.
     hub.removeUserOrg(dora.sub, ORG_B);
     hub.setUserDenied(dora.sub, [{ id: ORG_B, name: 'Org B' }]);
-    await expireTtl();
+    expireTtl();
     const revoked = await me(cookie);
     expect(revoked.status).toBe(401);
     expect((await readJson(revoked)).error.code).toBe('membership_revoked');
@@ -344,7 +355,7 @@ describe('re-admission of a single-organization person', () => {
     // the org out of her list and names it as denied.
     hub.removeUserOrg(rita.sub, ORG_C);
     hub.setUserDenied(rita.sub, [{ id: ORG_C, name: 'Org C' }]);
-    await expireTtl();
+    expireTtl();
     const revoked = await me(cookie);
     expect(revoked.status).toBe(401);
     expect((await readJson(revoked)).error.code).toBe('membership_revoked');
@@ -371,7 +382,7 @@ describe('re-admission of a single-organization person', () => {
       teams: [{ id: TEAM_3, slug: 'ops', name: 'Ops' }]
     });
     hub.setUserDenied(rita.sub, []);
-    await expireTtl();
+    expireTtl();
     const back = await me(cookie);
     expect(back.status).toBe(200);
     const body = await readJson(back);
@@ -495,12 +506,12 @@ describe('the organization’s whole team list (PRDCT-2813)', () => {
   it('a pass inside orgTeamsTtlMs does not read the list again; one past it does', async () => {
     const orgsBefore = hub.orgsRequests.length;
     const teamsBefore = hub.teamsRequests.length;
-    await sleep(DIALS.reconcileTtlMs + 40);
+    advance(DIALS.reconcileTtlMs + 40);
     expect((await me(cookie)).status).toBe(200);
     expect(hub.orgsRequests.length).toBeGreaterThan(orgsBefore);
     expect(hub.teamsRequests.length).toBe(teamsBefore);
 
-    await expireOrgTeams();
+    expireOrgTeams();
     expect((await me(cookie)).status).toBe(200);
     expect(hub.teamsRequests.length).toBe(teamsBefore + 1);
   });
@@ -516,7 +527,7 @@ describe('the organization’s whole team list (PRDCT-2813)', () => {
     expect(hub.teamsRequests.length).toBe(teamsBefore + 1);
     expect(await hubIdsOf()).toContain(D.id);
     hub.setOrgTeams(ORG_T, [A, B, C]);
-    await expireOrgTeams();
+    expireOrgTeams();
     expect((await me(cookie)).status).toBe(200);
     expect(await hubIdsOf()).not.toContain(D.id);
   });
@@ -535,7 +546,7 @@ describe('the organization’s whole team list (PRDCT-2813)', () => {
       .returning({ id: workspaceTeams.id });
 
     hub.setOrgTeams(ORG_T, [A, B]);
-    await expireOrgTeams();
+    expireOrgTeams();
     expect((await me(cookie)).status).toBe(200);
 
     expect(await hubIdsOf()).toEqual([TEAM_A, TEAM_B, null]);
@@ -553,7 +564,7 @@ describe('the organization’s whole team list (PRDCT-2813)', () => {
   it('a team renamed at the hub follows, on the same row', async () => {
     const before = (await teamsOf(ORG_T)).find((t) => t.hub_team_id === TEAM_B)!;
     hub.setOrgTeams(ORG_T, [A, { id: TEAM_B, slug: 'beta-squad', name: 'Beta Squad' }]);
-    await expireOrgTeams();
+    expireOrgTeams();
     expect((await me(cookie)).status).toBe(200);
     const after = (await teamsOf(ORG_T)).find((t) => t.hub_team_id === TEAM_B)!;
     expect(after).toMatchObject({ id: before.id, slug: 'beta-squad', name: 'Beta Squad' });
@@ -564,7 +575,7 @@ describe('the organization’s whole team list (PRDCT-2813)', () => {
     hub.setOrgTeams(ORG_T, [A]);
     hub.teamsMode = 'http500';
     try {
-      await expireOrgTeams();
+      expireOrgTeams();
       const teamsBefore = hub.teamsRequests.length;
       expect((await me(cookie)).status).toBe(200);
       expect(hub.teamsRequests.length).toBe(teamsBefore + 1);
@@ -573,7 +584,7 @@ describe('the organization’s whole team list (PRDCT-2813)', () => {
       // Another pass inside retryMs: no read. A LOGIN inside retryMs: no
       // read either (a login skips the window, never the failure throttle,
       // verifier round 2).
-      await sleep(DIALS.reconcileTtlMs + 40);
+      advance(DIALS.reconcileTtlMs + 40);
       expect((await me(cookie)).status).toBe(200);
       expect(hub.teamsRequests.length).toBe(teamsBefore + 1);
       cookie = await sso.ssoLogin(app, hub, tom);
@@ -581,7 +592,7 @@ describe('the organization’s whole team list (PRDCT-2813)', () => {
 
       // Past retryMs: read again, an older hub this time.
       hub.teamsMode = 'http404';
-      await sleep(DIALS.retryMs + 40);
+      advance(DIALS.retryMs + 40);
       expect((await me(cookie)).status).toBe(200);
       expect(hub.teamsRequests.length).toBe(teamsBefore + 2);
       expect(await hubIdsOf()).toEqual([TEAM_A, TEAM_B, null]);
@@ -645,7 +656,7 @@ describe('the organization’s whole team list (PRDCT-2813)', () => {
     try {
       const okBefore = await refreshOkCount();
       const before = hub.teamsRequests.length;
-      await expireOrgTeams();
+      expireOrgTeams();
       expect((await me(pagyCookie)).status).toBe(200);
       // Both pages were read, the read counted ok, and nothing was deleted.
       expect(hub.teamsRequests.length).toBe(before + 2);
@@ -661,7 +672,7 @@ describe('the organization’s whole team list (PRDCT-2813)', () => {
     }
 
     // The next honest read deletes what the hub dropped, and only that.
-    await expireOrgTeams();
+    expireOrgTeams();
     expect((await me(pagyCookie)).status).toBe(200);
     const after = await pagedIds();
     expect(after).toHaveLength(101);
@@ -689,7 +700,7 @@ describe('the organization’s whole team list (PRDCT-2813)', () => {
     // long enough for a write to land while the read is out.
     hub.teamsDelayMs = 250;
     try {
-      await expireOrgTeams();
+      expireOrgTeams();
       const before = hub.teamsRequests.length;
       const pending = me(cookie);
       // The read has begun (the hub holds it): another replica projects a team
@@ -735,7 +746,7 @@ describe('the organization’s whole team list (PRDCT-2813)', () => {
     expect(await hubIdsOf()).toEqual(expect.arrayContaining([TEAM_A, TEAM_B]));
 
     hub.setOrgTeams(ORG_T, []);
-    await expireOrgTeams();
+    expireOrgTeams();
     expect((await me(cookie)).status).toBe(200);
 
     const { rows } = await app.db.pool.query(

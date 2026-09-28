@@ -8,9 +8,48 @@ import {
   projectMembers,
   session as sessionTable,
   user as userTable,
+  workspaceMembers,
   workspaceTeamMembers,
   type DbConn
 } from '@antasphere/chassis-db';
+
+/**
+ * The membership an ADD hangs a right on, re-read inside the add's own
+ * transaction and held FOR SHARE until it commits: true when the row is
+ * there, in that workspace, and active. Every add of something a removal
+ * takes (a project grant, a team seat, a demo pass) calls this before its
+ * insert, and refuses on false the way it refuses an inactive member.
+ *
+ * Why the lock (the end-to-end verification, finding 5): the add's first read
+ * is outside any transaction, and the insert's foreign key check takes only a
+ * KEY SHARE lock, which a removal's `UPDATE workspace_members` does not wait
+ * for. An add that read the row active, then waited on another lock (the
+ * project row, the team row), inserted after a removal had committed, on the
+ * now inactive row, and the right came back with the person at their
+ * re-invitation. Held FOR SHARE, the row makes the removal's update wait for
+ * the add to commit (the removal's second pass then takes what the add
+ * wrote, `deleteMembershipGrants`'s caller); an add that arrives after the
+ * update re-reads the row off and inserts nothing.
+ */
+export async function holdLiveMembership(
+  tx: DbConn,
+  workspaceId: string,
+  who: { memberId: string } | { userId: string }
+): Promise<boolean> {
+  const [row] = await tx
+    .select({ id: workspaceMembers.id })
+    .from(workspaceMembers)
+    .where(
+      and(
+        'memberId' in who ? eq(workspaceMembers.id, who.memberId) : eq(workspaceMembers.userId, who.userId),
+        eq(workspaceMembers.workspaceId, workspaceId),
+        eq(workspaceMembers.isActive, true)
+      )
+    )
+    .for('share')
+    .limit(1);
+  return row !== undefined;
+}
 
 /** One membership a removal switched off. */
 export interface RemovedMembership {
@@ -80,6 +119,10 @@ export interface RemovalCounts {
  * The two callers: the hub reconcile's sweep (cloud, the hub removed the
  * person) and `POST /members/{id}/remove` (a workspace managed here). Run it
  * in the transaction that switches the rows off.
+ *
+ * Idempotent, so a caller may run it twice in one transaction: the deletes
+ * are by membership, the revokes filter on what is still open. The removal
+ * route does (a second pass after the row is off, `mergeRemovalCounts`).
  */
 export async function deleteMembershipGrants(
   tx: DbConn,
@@ -155,6 +198,19 @@ export async function deleteMembershipGrants(
     teamSeats: seats.length,
     invitations: revokedInvitations,
     demoPasses: revokedPasses,
+    tool
+  };
+}
+
+/** Two passes of `deleteMembershipGrants` as one record: every count summed, the tool's by name. */
+export function mergeRemovalCounts(a: RemovalCounts, b: RemovalCounts): RemovalCounts {
+  const tool: Record<string, number> = { ...a.tool };
+  for (const [key, n] of Object.entries(b.tool)) tool[key] = (tool[key] ?? 0) + n;
+  return {
+    projectGrants: a.projectGrants + b.projectGrants,
+    teamSeats: a.teamSeats + b.teamSeats,
+    invitations: a.invitations + b.invitations,
+    demoPasses: a.demoPasses + b.demoPasses,
     tool
   };
 }

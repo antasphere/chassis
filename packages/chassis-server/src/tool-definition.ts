@@ -366,6 +366,13 @@ export interface BootOverrides<TToolOverrides = never> {
    */
   hubDials?: Partial<HubFederationDials>;
   /**
+   * The hub reconciler's clock (its TTL, retry throttle and team-list
+   * window, identity/hub-reconcile.ts), so a test moves time forward
+   * instead of sleeping against those windows. Production always reads
+   * `Date.now`.
+   */
+  hubNow?: () => number;
+  /**
    * Replaces the ONE hub call POST /workspaces makes on cloud
    * (`HubUserClient.createOrg`) — the function boundary its tests fake to
    * drive every hub answer without a hub. Ignored on oss.

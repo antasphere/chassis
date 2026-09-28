@@ -410,8 +410,9 @@ describe('the redeem', () => {
       const me = await readJson(await send(app, 'GET', '/me', { cookie }));
       expect(me.user.id).toBe(actors.member!.userId);
       expect(me.role).toBe('member');
-      // An owner-only route stays closed to the member's session.
-      await expectError(await send(app, 'GET', '/demo/passes', { cookie }), 403, 'forbidden');
+      // An owner-only route stays closed to the member's session: the demo
+      // session list (`DEMO_SESSION_REFUSED_API_ROUTES`) answers before the role.
+      await expectError(await send(app, 'GET', '/demo/passes', { cookie }), 403, 'demo_session');
     }
     const { rows } = await app.db.pool.query(
       `SELECT use_count, last_used_at FROM demo_passes WHERE id = $1`,
