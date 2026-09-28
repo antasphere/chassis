@@ -2,7 +2,7 @@ import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { StartedPostgreSqlContainer } from '@testcontainers/postgresql';
-import { GenericContainer, type StartedTestContainer } from 'testcontainers';
+import { GenericContainer, type StartedTestContainer, Wait } from 'testcontainers';
 import {
   createDatabase,
   createTestApp,
@@ -258,12 +258,19 @@ describe('s3 driver (MinIO)', () => {
   let cookie: string;
 
   beforeAll(async () => {
-    // MinIO's own registry, pinned: the Docker Hub repository `minio/minio` is
-    // gone (404), so `:latest` there only resolved from a machine's local cache.
-    minio = await new GenericContainer('quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z')
-      .withCommand(['server', '/data'])
+    // MinIO no longer publishes images anonymously: Docker Hub's `minio/minio`
+    // answers "pull access denied" and quay.io/minio/minio answers 401 to any
+    // client without credentials (the GitHub runner's case; a Mac with the
+    // image cached never pulls). Bitnami's frozen legacy build of MinIO is
+    // still public; pinned on its multi-arch digest so the reference cannot
+    // move. Its entrypoint starts the server itself (no command), and the
+    // readiness probe waits past the entrypoint's own setup restart.
+    minio = await new GenericContainer(
+      'bitnamilegacy/minio:2025.7.23-debian-12-r5@sha256:6dabb4a2088c9a79908de3bc05f4586c23ad2182c8908e7e3acbf61c1467fb20'
+    )
       .withEnvironment({ MINIO_ROOT_USER: 'minioadmin', MINIO_ROOT_PASSWORD: 'minioadmin' })
       .withExposedPorts(9000)
+      .withWaitStrategy(Wait.forHttp('/minio/health/ready', 9000))
       .start();
 
     const endpoint = `http://${minio.getHost()}:${minio.getMappedPort(9000)}`;
