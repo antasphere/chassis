@@ -423,7 +423,8 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
         targetUserId: target.userId,
         roleBefore: target.role,
         projectGrants: removed.projectGrants,
-        teamSeats: removed.teamSeats
+        teamSeats: removed.teamSeats,
+        invitations: removed.invitations
       }
     });
     return c.json(toWire(after!), 200);
