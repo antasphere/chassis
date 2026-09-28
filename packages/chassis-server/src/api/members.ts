@@ -16,7 +16,11 @@ import { isLastOwnerDbError, LastOwnerError, type AccountDeletionService } from 
 import { cursorRowId, keysetBefore, pageOf } from '../pagination.js';
 import { requireAuth, requireNonGuest, requireRole } from '../middleware/auth-context.js';
 import { hubManagedMembershipGate } from '../middleware/hub-managed.js';
-import { deleteMembershipGrants } from '../members/removal.js';
+import {
+  deleteMembershipGrants,
+  type MembershipRemovalHook,
+  type RemovalCounts
+} from '../members/removal.js';
 
 export interface MemberRouteDeps {
   db: Db;
@@ -31,6 +35,8 @@ export interface MemberRouteDeps {
   hubManaged?: { manageUrl: string } | undefined;
   /** The tool's `guest_target` sentence (`copy.guestTarget`). */
   guestTargetMessage: string;
+  /** The tool's half of a removal (the `membershipRemoval` slot), run in the removal's transaction. */
+  onMembershipRemoval?: MembershipRemovalHook | undefined;
 }
 
 const err = (code: string, message: string) => ({ error: { code, message } });
@@ -245,7 +251,7 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
     }
     // ADR 014: deleting the ACCOUNT erases the user from EVERY workspace, and
     // an admin's authority ends at their own — refuse when the target belongs
-    // to any other workspace (deactivate the membership instead; the account
+    // to any other workspace (remove the person from this one instead; the account
     // holder can erase themselves). Single-workspace instances never hit this.
     const [foreign] = await db
       .select({ id: workspaceMembers.id })
@@ -261,7 +267,7 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
       return c.json(
         err(
           'member_of_other_workspaces',
-          'This account belongs to other workspaces — deactivate the membership instead of deleting the account'
+          'This account belongs to other workspaces — remove the person from this workspace instead of deleting the account'
         ),
         409
       );
@@ -325,9 +331,13 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
   // Removal (PRDCT-2816): the act between the pause and the account erasure,
   // and the same one the hub's removal is on cloud. The membership row is
   // switched off, never deleted (a new invitation reactivates the very same
-  // row), and the person's project grants and team seats are deleted with
-  // it, in ONE transaction: a person invited back starts with none. The
-  // account, and the person's memberships of other workspaces, are untouched.
+  // row), and the person's project grants, their team seats and what the
+  // tool hangs on them in this workspace go with it, in ONE transaction: a
+  // person brought back starts with none. The row is left at the role
+  // `member`: the role a person held is not kept in wait for them either, so
+  // whatever switches the row back on (an admin's Reactivate, an invitation,
+  // which names its own role) never hands an old admin or owner role back.
+  // The account, and the person's memberships of other workspaces, are untouched.
   // An already paused member can be removed: that turns the pause into a
   // removal. The 2-segment gate above does NOT cover this 3-segment path, so
   // it is gated explicitly. Machines never reach it: the path is deliberately
@@ -362,13 +372,17 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
       db.transaction(async (tx) => {
         await tx
           .update(workspaceMembers)
-          .set({ isActive: false, isDefault: false })
+          .set({ isActive: false, isDefault: false, role: 'member' })
           .where(
             and(eq(workspaceMembers.id, target.id), eq(workspaceMembers.workspaceId, principal.workspaceId))
           );
-        return deleteMembershipGrants(tx, [target.id]);
+        return deleteMembershipGrants(
+          tx,
+          [{ memberId: target.id, workspaceId: principal.workspaceId, userId: target.userId }],
+          deps.onMembershipRemoval
+        );
       });
-    let removed: { projectGrants: number; teamSeats: number };
+    let removed: RemovalCounts;
     try {
       // Removing an ACTIVE owner runs under the race-free last-owner guard,
       // as the pause and the account deletion do.
@@ -403,7 +417,13 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
       action: 'member.remove',
       resourceType: 'member',
       resourceId: target.id,
-      metadata: { targetUserId: target.userId, ...removed }
+      metadata: {
+        targetUserId: target.userId,
+        roleBefore: target.role,
+        projectGrants: removed.projectGrants,
+        teamSeats: removed.teamSeats,
+        ...removed.tool
+      }
     });
     return c.json(toWire(after!), 200);
   });

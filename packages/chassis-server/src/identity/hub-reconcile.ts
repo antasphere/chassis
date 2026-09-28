@@ -3,7 +3,7 @@ import { and, eq, inArray, isNotNull, ne, notInArray, sql } from 'drizzle-orm';
 import { workspaceMembers, workspaces, type Db } from '@antasphere/chassis-db';
 import type { AuditService } from '../audit/service.js';
 import type { Logger } from '../logger.js';
-import { deleteMembershipGrants } from '../members/removal.js';
+import { deleteMembershipGrants, type MembershipRemovalHook } from '../members/removal.js';
 import { projectOrgMembership, projectOrgTeams, projectTeamSeats } from './hub-projection.js';
 import type { HubDeniedOrg, HubUserClient, LoginAccessToken } from './hub-user-client.js';
 
@@ -129,6 +129,8 @@ export interface HubOrgReconcilerDeps {
   audit: AuditService;
   logger: Logger;
   dials: HubFederationDials;
+  /** The tool's half of a removal (the `membershipRemoval` slot), run in the sweep's transaction. */
+  onMembershipRemoval?: MembershipRemovalHook | undefined;
   /** Test seam. */
   now?: () => number;
 }
@@ -330,7 +332,8 @@ export class HubOrgReconciler {
         // of what a removal takes, shared with the tool's own removal route.
         await deleteMembershipGrants(
           tx,
-          rows.map((row) => row.id)
+          rows.map((row) => ({ memberId: row.id, workspaceId: row.workspaceId, userId: localUserId })),
+          this.deps.onMembershipRemoval
         );
         return rows;
       });
