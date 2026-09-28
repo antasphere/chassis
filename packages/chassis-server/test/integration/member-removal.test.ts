@@ -9,6 +9,7 @@ import {
   workspaceTeamMembers,
   workspaceTeams
 } from '@antasphere/chassis-db';
+import { deleteMembershipGrants, type RemovedMembership } from '../../src/members/removal.js';
 import {
   createDatabase,
   createTestApp,
@@ -379,7 +380,9 @@ describe('who may remove whom', () => {
     // A was not the last active owner: B removes A.
     const res = await remove(ownerA.memberId, ownerB);
     expect(res.status).toBe(200);
-    expect(await readJson(res)).toMatchObject({ id: ownerA.memberId, role: 'owner', isActive: false });
+    // The removed owner's row is left at the member role (PRDCT-2816 F1).
+    expect(await readJson(res)).toMatchObject({ id: ownerA.memberId, role: 'member', isActive: false });
+    expect(await memberRow(ownerA.memberId)).toMatchObject({ role: 'member', isActive: false });
     // An admin never removes an owner, and nothing moves.
     await expectError(await remove(ownerB.memberId, actors.admin!), 403, 'forbidden');
     expect(await memberRow(ownerB.memberId)).toMatchObject({ role: 'owner', isActive: true });
@@ -463,6 +466,82 @@ describe('the default flag goes with the membership', () => {
   });
 });
 
+describe('a removed admin comes back as a plain member', () => {
+  it('removed: the row reads member and inactive; reactivated by an admin: a plain member', async () => {
+    const exAdmin = await addActor('ex-admin', { role: 'admin' });
+    const res = await remove(exAdmin.memberId, actors.owner!);
+    expect(res.status).toBe(200);
+    expect(await readJson(res)).toMatchObject({ id: exAdmin.memberId, role: 'member', isActive: false });
+    expect(await memberRow(exAdmin.memberId)).toMatchObject({ role: 'member', isActive: false });
+
+    const back = await send('PATCH', `/members/${exAdmin.memberId}`, actors.admin!, { isActive: true });
+    expect(back.status).toBe(200);
+    expect(await readJson(back)).toMatchObject({ id: exAdmin.memberId, role: 'member', isActive: true });
+    expect(await memberRow(exAdmin.memberId)).toMatchObject({ role: 'member', isActive: true });
+
+    // A plain member reads the roster, and is refused an admin's act.
+    expect((await send('GET', '/members', exAdmin)).status).toBe(200);
+    const invite = await send('POST', '/invitations', exAdmin, {
+      email: 'nobody-new@removal.test',
+      role: 'member'
+    });
+    expect(invite.status).toBe(403);
+  });
+});
+
+describe('deleteMembershipGrants, called directly (S06)', () => {
+  it('two memberships with a grant and a seat each: both counted, both gone; the hook sees both', async () => {
+    const d1 = await addActor('direct-1');
+    const d2 = await addActor('direct-2');
+    const project = await createProject(actors.owner!, 'Direct project');
+    const team = await createTeam(actors.owner!, 'Direct team');
+    for (const who of [d1, d2]) {
+      await grant(project, who, 'viewer');
+      await seatIn(team, who);
+      expect(await grantsOf(who.memberId)).toHaveLength(1);
+      expect(await seatsOf(who.memberId)).toHaveLength(1);
+    }
+    const removed: RemovedMembership[] = [d1, d2].map((who) => ({
+      memberId: who.memberId,
+      workspaceId,
+      userId: who.userId
+    }));
+
+    const plain = await app.db.db.transaction((tx) => deleteMembershipGrants(tx, removed));
+    expect(plain).toEqual({ projectGrants: 2, teamSeats: 2, tool: {} });
+    for (const who of [d1, d2]) {
+      expect(await grantsOf(who.memberId)).toHaveLength(0);
+      expect(await seatsOf(who.memberId)).toHaveLength(0);
+    }
+
+    const seen: Array<readonly RemovedMembership[]> = [];
+    const hooked = await app.db.db.transaction((tx) =>
+      deleteMembershipGrants(tx, removed, async (_tx, rows) => {
+        seen.push(rows);
+        return { things: 3 };
+      })
+    );
+    expect(hooked).toEqual({ projectGrants: 0, teamSeats: 0, tool: { things: 3 } });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual([
+      { memberId: d1.memberId, workspaceId, userId: d1.userId },
+      { memberId: d2.memberId, workspaceId, userId: d2.userId }
+    ]);
+  });
+
+  it('an empty list calls no hook and counts nothing', async () => {
+    let calls = 0;
+    const result = await app.db.db.transaction((tx) =>
+      deleteMembershipGrants(tx, [], async () => {
+        calls += 1;
+        return { things: 3 };
+      })
+    );
+    expect(result).toEqual({ projectGrants: 0, teamSeats: 0, tool: {} });
+    expect(calls).toBe(0);
+  });
+});
+
 describe('the record', () => {
   it('every removal wrote member.remove, with the target and the counts', async () => {
     const res = await send('GET', '/audit?action=member.remove&limit=100', actors.owner!);
@@ -479,7 +558,7 @@ describe('the record', () => {
     expect(mine[0]).toMatchObject({
       action: 'member.remove',
       resourceType: 'member',
-      metadata: { targetUserId: leaver.userId, projectGrants: 1, teamSeats: 1 }
+      metadata: { targetUserId: leaver.userId, roleBefore: 'member', projectGrants: 1, teamSeats: 1 }
     });
     for (const e of entries) {
       expect(typeof e.metadata.projectGrants).toBe('number');
@@ -487,5 +566,13 @@ describe('the record', () => {
     }
     const paused = entries.find((e) => e.resourceId === actors.paused!.memberId);
     expect(paused?.metadata).toMatchObject({ projectGrants: 1, teamSeats: 1 });
+    // The role the person held before the removal is on the record.
+    const exAdmin = entries.find((e) => e.resourceId === actors['ex-admin']!.memberId);
+    expect(exAdmin?.metadata).toMatchObject({
+      targetUserId: actors['ex-admin']!.userId,
+      roleBefore: 'admin'
+    });
+    const ownerA = entries.find((e) => e.resourceId === actors['owner-a']!.memberId);
+    expect(ownerA?.metadata).toMatchObject({ roleBefore: 'owner' });
   });
 });

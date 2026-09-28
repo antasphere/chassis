@@ -279,6 +279,28 @@ describe('it touches the caller’s rows only', () => {
     expect(await defaultsOf(other.userId)).toEqual([secondId]);
     expect(await defaultsOf(owner.userId)).toEqual([]);
   });
+
+  it('two other members of the workspace whose default is false stay false after the owner sets it', async () => {
+    const plainA = await addActor('plain-a', { workspace: secondId });
+    const plainB = await addActor('plain-b', { workspace: secondId });
+    const isDefaultOf = async (memberId: string) =>
+      (
+        await app.db.db
+          .select({ isDefault: workspaceMembers.isDefault })
+          .from(workspaceMembers)
+          .where(eq(workspaceMembers.id, memberId))
+      )[0]?.isDefault;
+    expect(await isDefaultOf(plainA.memberId)).toBe(false);
+    expect(await isDefaultOf(plainB.memberId)).toBe(false);
+
+    const owner = actors.owner!;
+    expect((await setDefault(owner, secondId)).status).toBe(200);
+    expect(await defaultsOf(owner.userId)).toEqual([secondId]);
+    // A set that lost its user_id clause would turn these two true.
+    expect(await isDefaultOf(plainA.memberId)).toBe(false);
+    expect(await isDefaultOf(plainB.memberId)).toBe(false);
+    expect((await setDefault(owner, null)).status).toBe(200);
+  });
 });
 
 describe('the request’s workspace header does not decide', () => {

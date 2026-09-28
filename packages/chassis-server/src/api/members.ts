@@ -417,12 +417,13 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
       action: 'member.remove',
       resourceType: 'member',
       resourceId: target.id,
+      // The tool's counts first: a name the chassis writes is the chassis's.
       metadata: {
+        ...removed.tool,
         targetUserId: target.userId,
         roleBefore: target.role,
         projectGrants: removed.projectGrants,
-        teamSeats: removed.teamSeats,
-        ...removed.tool
+        teamSeats: removed.teamSeats
       }
     });
     return c.json(toWire(after!), 200);
