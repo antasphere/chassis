@@ -363,6 +363,52 @@ describe('a removal against a concurrent add', () => {
     expect(deadlocksAfter).toBe(deadlocksBefore);
   }, 180_000);
 
+  it('G. a duplicate seat add fired with the removal, 20 rounds: the removal answers 200, the add 409 or 404, never a 500, no deadlock', async () => {
+    // Arm E's twin on the team seat (verifier round 2, G4): the seat add
+    // reads the existing row before it inserts, so a repeat never waits on
+    // the removal's uncommitted delete of that seat.
+    const x = await addMember('seat-dup@example.com', 'member');
+    const team = await send('POST', '/teams', { cookie: ownerCookie }, { name: 'Race G team' });
+    expect(team.status).toBe(201);
+    const teamId = (await readJson(team)).id as string;
+    const addSeat = () =>
+      send('POST', `/teams/${teamId}/members`, { cookie: adminCookie }, { userId: x.userId });
+    await new Promise((r) => setTimeout(r, 11_000));
+    const deadlocksBefore = await deadlockCount();
+
+    const ROUNDS = 20;
+    const adds: number[] = [];
+    const removals: number[] = [];
+    let seatsLeft = 0;
+    for (let round = 0; round < ROUNDS; round++) {
+      expect([201, 409]).toContain((await addSeat()).status);
+      const [add, removal] = await Promise.all([
+        addSeat(),
+        send('POST', `/members/${x.memberId}/remove`, { cookie: ownerCookie })
+      ]);
+      adds.push(add.status);
+      removals.push(removal.status);
+      seatsLeft += (await seatRows(x.memberId, teamId)).length;
+      const back = await send('PATCH', `/members/${x.memberId}`, { cookie: ownerCookie }, { isActive: true });
+      expect(back.status).toBe(200);
+    }
+    await new Promise((r) => setTimeout(r, 11_000));
+    const deadlocksAfter = await deadlockCount();
+    const tally = (list: number[]) =>
+      Object.entries(
+        list.reduce<Record<number, number>>((acc, s) => ({ ...acc, [s]: (acc[s] ?? 0) + 1 }), {})
+      )
+        .map(([status, n]) => `${status}=${n}`)
+        .join(' ');
+    console.log(
+      `arm G (${ROUNDS} rounds): add ${tally(adds)}; removal ${tally(removals)}; seats left ${seatsLeft}; deadlocks ${deadlocksBefore} -> ${deadlocksAfter}`
+    );
+    expect(removals.every((status) => status === 200)).toBe(true);
+    expect(adds.every((status) => status === 409 || status === 404)).toBe(true);
+    expect(seatsLeft).toBe(0);
+    expect(deadlocksAfter).toBe(deadlocksBefore);
+  }, 180_000);
+
   it('F. a project the person creates while the removal sits between its update and its commit: no grant of theirs survives', async () => {
     const x = await addMember('creator@example.com', 'member');
     const outcome = await withLockClient(async (holdRow) => {
