@@ -14,6 +14,7 @@ import {
 } from '@antasphere/chassis-db';
 import type { DemoPass } from '@antasphere/chassis-contract';
 import { mintRefusal } from '../accounts/mint-refusal.js';
+import { holdLiveMembership } from '../members/removal.js';
 import { isDemoAddress } from './demo-pass-rules.js';
 
 /**
@@ -90,12 +91,30 @@ const passColumns = {
   useCount: demoPasses.useCount
 };
 
+/** The mint found the person's membership gone or off inside its transaction: answered as `no_such_member`. */
+export class DemoPassMemberGoneError extends Error {
+  readonly code = 'no_such_member';
+  constructor() {
+    super('No member of this workspace holds that address');
+    this.name = 'DemoPassMemberGoneError';
+  }
+}
+
 export class DemoPassService {
   constructor(private readonly db: Db) {}
 
   /**
    * Mint a pass. The caller (the owner's route) has already judged every
    * refusal; this writes the row and hands the secret back, once.
+   *
+   * The person's membership is re-read inside the insert's transaction and
+   * held FOR SHARE (`holdLiveMembership`, the end-to-end verification,
+   * finding 5): the route's read ran before, outside any lock, and a pass
+   * minted after a removal committed would sit on the inactive row and open
+   * the account again the day the person is re-invited. A removal still
+   * running waits for this insert and revokes the pass in its second pass.
+   * Throws `DemoPassMemberGoneError` when the membership is gone or off: the
+   * route answers it as the `no_such_member` 404.
    */
   async mint(input: {
     workspaceId: string;
@@ -106,18 +125,23 @@ export class DemoPassService {
   }): Promise<{ pass: PassWithPerson; secret: string }> {
     const secret = randomBytes(32).toString('base64url');
     const expiresAt = new Date(Date.now() + input.expiresInMinutes * 60 * 1000);
-    const [row] = await this.db
-      .insert(demoPasses)
-      .values({
-        workspaceId: input.workspaceId,
-        userId: input.userId,
-        targetPath: input.targetPath,
-        secretHash: demoPassSecretHash(secret),
-        createdBy: input.createdBy,
-        expiresAt
-      })
-      .returning({ id: demoPasses.id });
-    const pass = await this.get(input.workspaceId, row!.id);
+    const row = await this.db.transaction(async (tx) => {
+      if (!(await holdLiveMembership(tx, input.workspaceId, { userId: input.userId }))) return null;
+      const [inserted] = await tx
+        .insert(demoPasses)
+        .values({
+          workspaceId: input.workspaceId,
+          userId: input.userId,
+          targetPath: input.targetPath,
+          secretHash: demoPassSecretHash(secret),
+          createdBy: input.createdBy,
+          expiresAt
+        })
+        .returning({ id: demoPasses.id });
+      return inserted!;
+    });
+    if (!row) throw new DemoPassMemberGoneError();
+    const pass = await this.get(input.workspaceId, row.id);
     return { pass: pass!, secret };
   }
 

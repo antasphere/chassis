@@ -19,6 +19,7 @@ import { requireAuth, requireNonGuest, requireRole } from '../middleware/auth-co
 import { hubManagedMembershipGate } from '../middleware/hub-managed.js';
 import {
   deleteMembershipGrants,
+  mergeRemovalCounts,
   type MembershipRemovalHook,
   type RemovalCounts
 } from '../members/removal.js';
@@ -374,18 +375,24 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
     // membership row (members/removal.ts, ORDER).
     const remove = () =>
       db.transaction(async (tx) => {
-        const counts = await deleteMembershipGrants(
-          tx,
-          [{ memberId: target.id, workspaceId: principal.workspaceId, userId: target.userId }],
-          deps.onMembershipRemoval
-        );
+        const removedRow = [
+          { memberId: target.id, workspaceId: principal.workspaceId, userId: target.userId }
+        ];
+        const counts = await deleteMembershipGrants(tx, removedRow, deps.onMembershipRemoval);
         await tx
           .update(workspaceMembers)
           .set({ isActive: false, isDefault: false, role: 'member' })
           .where(
             and(eq(workspaceMembers.id, target.id), eq(workspaceMembers.workspaceId, principal.workspaceId))
           );
-        return counts;
+        // The second pass, after the row is off (the end-to-end verification,
+        // finding 5): an add that held the membership row FOR SHARE before the
+        // update (`holdLiveMembership`: a project grant, a team seat, a demo
+        // pass) made the update wait, and committed its right between the
+        // first pass and the update. This pass takes it. Any add after the
+        // update re-reads the row off and writes nothing, so two passes end it.
+        const late = await deleteMembershipGrants(tx, removedRow, deps.onMembershipRemoval);
+        return mergeRemovalCounts(counts, late);
       });
     let removed: RemovalCounts;
     try {

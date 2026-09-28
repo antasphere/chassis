@@ -21,7 +21,11 @@ import type { z } from 'zod';
 import { hubConfig, type ToolEnv } from '../env.js';
 import type { Logger } from '../logger.js';
 import type { Auth } from '../identity/index.js';
-import { demoSessionAuthRefusal } from '../identity/index.js';
+import {
+  DEMO_SESSION_REFUSED_API_ROUTES,
+  demoSessionApiRefusalMessage,
+  demoSessionAuthRefusal
+} from '../identity/index.js';
 import { DemoPassService } from '../identity/demo-pass.js';
 import type { PlatformRegistry } from '../platform/index.js';
 import type {
@@ -728,6 +732,23 @@ export function createApiApp<
       guestForbiddenMessage: tool.copy.guestForbidden
     })
   );
+
+  // A session a demo link opened is a visit (identity/demo-pass-rules.ts
+  // `DEMO_SESSION_REFUSED_API_ROUTES`): the routes that mint a credential or
+  // make something the person keeps refuse it here, at one place, right after
+  // the credential resolves and before anything claims an idempotency key.
+  // `demoPassId` is only ever set while the switch is on. The tool's own
+  // routes of the kind (its `demoSessionRefusedRoutes` slot) join the list here.
+  for (const rule of [...DEMO_SESSION_REFUSED_API_ROUTES, ...(tool.demoSessionRefusedRoutes ?? [])]) {
+    const gate: MiddlewareHandler = async (c, next) => {
+      if (c.get('demoPassId')) {
+        return c.json(err('demo_session', demoSessionApiRefusalMessage(rule.does)), 403);
+      }
+      return next();
+    };
+    if (rule.method === 'ALL') api.use(rule.path, gate);
+    else api.on(rule.method, rule.path, gate);
+  }
 
   // Idempotency sits strictly BETWEEN authContext (it needs the resolved
   // principal to scope claims) and auditMiddleware (a replayed short-circuit

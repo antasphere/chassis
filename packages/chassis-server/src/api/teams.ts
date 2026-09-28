@@ -20,6 +20,7 @@ import {
 } from '@antasphere/chassis-db';
 import { requireAuth, requireNonGuest } from '../middleware/auth-context.js';
 import { HUB_MANAGED_TEAMS_MESSAGE, hubManagedMembershipGate } from '../middleware/hub-managed.js';
+import { holdLiveMembership } from '../members/removal.js';
 import { createdAtText, decodeKeysetCursor, encodeKeysetCursor, keysetBeforeValue } from '../pagination.js';
 
 /**
@@ -459,7 +460,7 @@ export function registerTeamRoutes(api: OpenAPIHono, deps: TeamRouteDeps): void 
 
     // The insert runs while the team row is held FOR SHARE and re-read as the
     // tool's own: a team that turned out projected, or went, is never seated.
-    let outcome: { createdAt: Date } | 'gone' | 'repeat';
+    let outcome: { createdAt: Date } | 'gone' | 'member_gone' | 'repeat';
     try {
       outcome = await db.transaction(async (tx) => {
         const [live] = await tx
@@ -475,6 +476,24 @@ export function registerTeamRoutes(api: OpenAPIHono, deps: TeamRouteDeps): void 
           .for('share')
           .limit(1);
         if (!live) return 'gone' as const;
+        // The read above builds the answer; this locked re-read is the one
+        // that counts (`holdLiveMembership`): a removal that landed since is
+        // seen here, one still running waits and takes the seat in its second pass.
+        if (!(await holdLiveMembership(tx, principal.workspaceId, { memberId: target.id }))) {
+          return 'member_gone' as const;
+        }
+        // A seat already there answers the repeat WITHOUT an insert (the
+        // verifier's F4: 14 of 40 removals answered 500). Under the membership
+        // share lock, a removal's uncommitted delete of this seat keeps the row
+        // visible to a plain read, so the add answers 409 and never waits on
+        // that delete, while the removal's update waits on the add's share
+        // lock: an insert here would wait on the delete, a cycle.
+        const [existing] = await tx
+          .select({ id: workspaceTeamMembers.id })
+          .from(workspaceTeamMembers)
+          .where(and(eq(workspaceTeamMembers.teamId, team.id), eq(workspaceTeamMembers.memberId, target.id)))
+          .limit(1);
+        if (existing) return 'repeat' as const;
         const [row] = await tx
           .insert(workspaceTeamMembers)
           .values({ teamId: team.id, memberId: target.id, addedBy: principal.userId })
@@ -488,6 +507,7 @@ export function registerTeamRoutes(api: OpenAPIHono, deps: TeamRouteDeps): void 
       throw cause;
     }
     if (outcome === 'gone') return c.json(TEAM_NOT_FOUND, 404);
+    if (outcome === 'member_gone') return c.json(MEMBER_NOT_FOUND, 404);
     if (outcome === 'repeat') {
       return c.json(err('already_member', 'This person is already a member of the team'), 409);
     }

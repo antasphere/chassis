@@ -169,10 +169,12 @@ describe('isSafeDemoPath: one leading slash, no fragment, no control character',
 
 describe('demoSessionAuthRefusal: what a pass’s session may not do at the sign-in library', () => {
   it('refuses every listed path', () => {
-    expect(DEMO_SESSION_REFUSED_AUTH_PATHS.length).toBe(26);
+    expect(DEMO_SESSION_REFUSED_AUTH_PATHS.length).toBe(27);
     for (const path of DEMO_SESSION_REFUSED_AUTH_PATHS) {
       expect(demoSessionAuthRefusal(path), path).toBe(true);
     }
+    // A session's dynamic client registration stores the client under the person.
+    expect(demoSessionAuthRefusal('/oauth2/register')).toBe(true);
   });
 
   it('refuses them whatever the case, and with one trailing slash', () => {

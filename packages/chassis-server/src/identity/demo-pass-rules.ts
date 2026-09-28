@@ -167,6 +167,10 @@ export const DEMO_SESSION_REFUSED_AUTH_PATHS: readonly string[] = [
   '/oauth2/update-consent',
   '/oauth2/continue',
   '/oauth2/create-client',
+  // A session's register stores the client under the person (user_id), a
+  // credential the pass would leave behind; anonymous registration is another
+  // matter, judged by OAUTH_DYNAMIC_CLIENT_REGISTRATION and its own wall.
+  '/oauth2/register',
   '/oauth2/update-client',
   '/oauth2/client/rotate-secret',
   '/oauth2/delete-client',
@@ -188,4 +192,38 @@ const REFUSED_AUTH_PATHS: ReadonlySet<string> = new Set(DEMO_SESSION_REFUSED_AUT
 export function demoSessionAuthRefusal(authPath: string): boolean {
   const trimmed = authPath.endsWith('/') ? authPath.slice(0, -1) : authPath;
   return REFUSED_AUTH_PATHS.has(trimmed.toLowerCase());
+}
+
+/** One API route a demo pass's session is refused, and what the refusal says it cannot do. */
+export interface DemoSessionRefusedApiRoute {
+  /** An HTTP method, or `ALL` for every method of the path. */
+  readonly method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'ALL';
+  /** A path relative to /api/v1, in the router's spelling (`:id`, a trailing `*` for a subtree). */
+  readonly path: string;
+  /** The act, completing "A session opened by a demo link cannot …". */
+  readonly does: string;
+}
+
+/**
+ * API routes (relative to /api/v1) a demo pass's session is refused. A pass's
+ * session is a visit: it mints no credential for anyone (a reset link, a
+ * change-email link, an invitation, an API key, a demo link) and owns nothing
+ * that outlives the pass (a workspace, a default). Mounted once, right after
+ * the credential middleware (`api/create-api.ts`); a new route that mints a
+ * credential or creates something the person keeps joins this list.
+ */
+export const DEMO_SESSION_REFUSED_API_ROUTES: readonly DemoSessionRefusedApiRoute[] = [
+  { method: 'POST', path: '/members/:id/reset-link', does: 'make a password reset link' },
+  { method: 'POST', path: '/members/:id/change-email-link', does: 'make an email change link' },
+  { method: 'POST', path: '/invitations', does: 'send an invitation' },
+  { method: 'POST', path: '/api-keys', does: 'create an API key' },
+  { method: 'ALL', path: '/demo/passes', does: 'manage demo links' },
+  { method: 'ALL', path: '/demo/passes/*', does: 'manage demo links' },
+  { method: 'POST', path: '/workspaces', does: 'create a workspace' },
+  { method: 'PUT', path: '/me/default-workspace', does: 'change your default workspace' }
+];
+
+/** The refusal's sentence for one entry of `DEMO_SESSION_REFUSED_API_ROUTES`. */
+export function demoSessionApiRefusalMessage(does: string): string {
+  return `A session opened by a demo link cannot ${does}: sign in with your password`;
 }

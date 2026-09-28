@@ -79,16 +79,6 @@ export function registerApiKeyRoutes(
     if (principal.via !== 'session') {
       return c.json(err('sessions_only', 'API keys can only be created from a browser session'), 403);
     }
-    // A session a demo link opened is a visit: a key would outlive the pass.
-    if (c.get('demoPassId')) {
-      return c.json(
-        err(
-          'demo_session',
-          'A session opened by a demo link cannot create an API key: sign in with your password'
-        ),
-        403
-      );
-    }
     const body = c.req.valid('json');
     // Optional PIN: an ACTIVE membership of the pinned workspace is required
     // — one uniform 403 whether the workspace does not exist or the caller
