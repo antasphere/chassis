@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { and, eq } from 'drizzle-orm';
 import {
+  invitations,
   projectMembers,
   projectTeams,
   user as userTable,
@@ -508,7 +509,7 @@ describe('deleteMembershipGrants, called directly (S06)', () => {
     }));
 
     const plain = await app.db.db.transaction((tx) => deleteMembershipGrants(tx, removed));
-    expect(plain).toEqual({ projectGrants: 2, teamSeats: 2, tool: {} });
+    expect(plain).toEqual({ projectGrants: 2, teamSeats: 2, invitations: 0, tool: {} });
     for (const who of [d1, d2]) {
       expect(await grantsOf(who.memberId)).toHaveLength(0);
       expect(await seatsOf(who.memberId)).toHaveLength(0);
@@ -521,7 +522,7 @@ describe('deleteMembershipGrants, called directly (S06)', () => {
         return { things: 3 };
       })
     );
-    expect(hooked).toEqual({ projectGrants: 0, teamSeats: 0, tool: { things: 3 } });
+    expect(hooked).toEqual({ projectGrants: 0, teamSeats: 0, invitations: 0, tool: { things: 3 } });
     expect(seen).toHaveLength(1);
     expect(seen[0]).toEqual([
       { memberId: d1.memberId, workspaceId, userId: d1.userId },
@@ -537,8 +538,164 @@ describe('deleteMembershipGrants, called directly (S06)', () => {
         return { things: 3 };
       })
     );
-    expect(result).toEqual({ projectGrants: 0, teamSeats: 0, tool: {} });
+    expect(result).toEqual({ projectGrants: 0, teamSeats: 0, invitations: 0, tool: {} });
     expect(calls).toBe(0);
+  });
+});
+
+describe('the invitations open at the removal', () => {
+  type Invited = { id: string; token: string };
+
+  const invite = async (
+    who: { cookie?: string },
+    email: string,
+    role: 'owner' | 'admin' | 'member',
+    headers: Record<string, string> = {}
+  ): Promise<Invited> => {
+    const res = await send('POST', '/invitations', who, { email, role }, headers);
+    expect(res.status).toBe(201);
+    const body = await readJson(res);
+    return { id: body.invitation.id, token: (body.acceptUrl as string).split('/invite/')[1]! };
+  };
+  const invitationRow = async (id: string) =>
+    (await app.db.db.select().from(invitations).where(eq(invitations.id, id)))[0]!;
+  const pause = async (who: Actor): Promise<void> => {
+    const res = await send('PATCH', `/members/${who.memberId}`, actors.admin!, { isActive: false });
+    expect(res.status).toBe(200);
+  };
+  const removalEntry = async (memberId: string) => {
+    const res = await send('GET', '/audit?action=member.remove&limit=100', actors.owner!);
+    expect(res.status).toBe(200);
+    const entries = (await readJson(res)).entries as Array<{
+      resourceId: string;
+      metadata: Record<string, unknown>;
+    }>;
+    const mine = entries.filter((e) => e.resourceId === memberId);
+    expect(mine).toHaveLength(1);
+    return mine[0]!;
+  };
+
+  it('N1: an invitation for a paused person, open at the removal, is revoked and brings nobody back', async () => {
+    const n1 = await addActor('n1-paused');
+    await pause(n1);
+    const open = await invite(actors.admin!, n1.email, 'admin');
+    expect(await invitationRow(open.id)).toMatchObject({ revokedAt: null, acceptedAt: null });
+
+    expect((await remove(n1.memberId, actors.owner!)).status).toBe(200);
+    expect((await invitationRow(open.id)).revokedAt).toBeInstanceOf(Date);
+
+    // Pinned as observed: a revoked invitation is not live, so the accept
+    // answers the lookup's 404 not_found.
+    await expectError(await send('POST', '/invitations/accept', n1, { token: open.token }), 404, 'not_found');
+    expect(await memberRow(n1.memberId)).toMatchObject({ isActive: false, role: 'member' });
+  });
+
+  it('an invitation made after the removal is the workspace’s own act: accepted, at the role it names', async () => {
+    const n1 = actors['n1-paused']!;
+    const after = await invite(actors.owner!, n1.email, 'admin');
+    const res = await send('POST', '/invitations/accept', n1, { token: after.token });
+    expect(res.status).toBe(200);
+    expect(await memberRow(n1.memberId)).toMatchObject({ isActive: true, role: 'admin' });
+  });
+
+  it('N2: an invitation a removed admin issued is revoked, and accepting it creates no member', async () => {
+    const issuer = await addActor('n2-issuer', { role: 'admin' });
+    const address = 'n2-other-address@removal.test';
+    const issued = await invite(issuer, address, 'admin');
+
+    expect((await remove(issuer.memberId, actors.owner!)).status).toBe(200);
+    expect((await invitationRow(issued.id)).revokedAt).toBeInstanceOf(Date);
+
+    // Clean context (no cookie), the account-creating shape. Pinned as observed.
+    await expectError(
+      await send(
+        'POST',
+        '/invitations/accept',
+        {},
+        { token: issued.token, name: 'Other', password: PASSWORD }
+      ),
+      404,
+      'not_found'
+    );
+    const members = await app.db.db
+      .select({ id: workspaceMembers.id })
+      .from(workspaceMembers)
+      .innerJoin(userTable, eq(workspaceMembers.userId, userTable.id))
+      .where(eq(userTable.email, address));
+    expect(members).toHaveLength(0);
+    expect(await app.db.db.select().from(userTable).where(eq(userTable.email, address))).toHaveLength(0);
+  });
+
+  it('boundaries: another workspace, accepted, already revoked and other people’s rows are untouched; case is ignored', async () => {
+    const bound = await addActor('bound-case');
+    const elsewhere = { 'x-workspace-id': otherWorkspaceId };
+    const inOther = await invite(actors.owner!, bound.email, 'member', elsewhere);
+
+    // An ACCEPTED invitation for the person: paused, invited, accepted back.
+    await pause(bound);
+    const accepted = await invite(actors.owner!, bound.email, 'member');
+    expect((await send('POST', '/invitations/accept', bound, { token: accepted.token })).status).toBe(200);
+    const acceptedAt = (await invitationRow(accepted.id)).acceptedAt;
+    expect(acceptedAt).toBeInstanceOf(Date);
+
+    // An already REVOKED one, its revoked_at moved to a fixed old time.
+    await pause(bound);
+    const revoked = await invite(actors.owner!, bound.email, 'member');
+    expect((await send('DELETE', `/invitations/${revoked.id}`, actors.owner!)).status).toBe(200);
+    const oldRevokedAt = new Date('2020-01-01T00:00:00.000Z');
+    await app.db.db
+      .update(invitations)
+      .set({ revokedAt: oldRevokedAt })
+      .where(eq(invitations.id, revoked.id));
+
+    // An OPEN one whose stored address is in mixed case.
+    const mixed = await invite(actors.owner!, bound.email, 'member');
+    await app.db.db
+      .update(invitations)
+      .set({ email: 'Bound-Case@Removal.TEST' })
+      .where(eq(invitations.id, mixed.id));
+
+    // Someone else's invitation, issued by someone else.
+    const bystander = await invite(actors.admin!, 'bystander@removal.test', 'member');
+
+    const res = await remove(bound.memberId, actors.owner!);
+    expect(res.status).toBe(200);
+
+    expect(await invitationRow(inOther.id)).toMatchObject({ revokedAt: null, acceptedAt: null });
+    expect(await invitationRow(accepted.id)).toMatchObject({ acceptedAt, revokedAt: null });
+    expect((await invitationRow(revoked.id)).revokedAt).toEqual(oldRevokedAt);
+    expect(await invitationRow(bystander.id)).toMatchObject({ revokedAt: null, acceptedAt: null });
+    const mixedRow = await invitationRow(mixed.id);
+    expect(mixedRow.revokedAt).toBeInstanceOf(Date);
+    expect(mixedRow.acceptedAt).toBeNull();
+
+    // Only the mixed-case open row was this removal's to revoke.
+    expect((await removalEntry(bound.memberId)).metadata).toMatchObject({ invitations: 1 });
+  });
+
+  it('the member.remove entries count the invitations revoked', async () => {
+    expect((await removalEntry(actors['n1-paused']!.memberId)).metadata).toMatchObject({ invitations: 1 });
+    expect((await removalEntry(actors['n2-issuer']!.memberId)).metadata).toMatchObject({ invitations: 1 });
+  });
+
+  it('a direct call with two memberships, each with one invitation for them: invitations 2, both revoked', async () => {
+    const e1 = await addActor('direct-inv-1');
+    const e2 = await addActor('direct-inv-2');
+    const opened: Invited[] = [];
+    for (const who of [e1, e2]) {
+      await pause(who);
+      opened.push(await invite(actors.owner!, who.email, 'member'));
+    }
+    const removed: RemovedMembership[] = [e1, e2].map((who) => ({
+      memberId: who.memberId,
+      workspaceId,
+      userId: who.userId
+    }));
+    const result = await app.db.db.transaction((tx) => deleteMembershipGrants(tx, removed));
+    expect(result).toEqual({ projectGrants: 0, teamSeats: 0, invitations: 2, tool: {} });
+    for (const row of opened) {
+      expect((await invitationRow(row.id)).revokedAt).toBeInstanceOf(Date);
+    }
   });
 });
 
