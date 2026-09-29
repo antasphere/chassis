@@ -362,30 +362,31 @@ function upgradeLink(
  * plan's value by staying silent; the instance's hard caps (the body limits
  * and the services' mid-stream ceilings) still bound a body that lies.
  */
-async function planCheck(
+function planCheck(
   c: Context,
   entry: RouteEntitlementEntry,
-  ctx: EntitlementRequest,
   profile: ResolvedProfile,
   deps: EntitlementGateDeps,
   /** Whether the route's feature applies to this request (judged before the plan was read). */
   feature: boolean,
+  /** The value the route's limit observed for this request (read once, before the plan). */
+  observed: number | null,
   /** No principal: a viewer, who must learn nothing of the owner's plan or upgrade page. */
   anonymous = false
-): Promise<Response | null> {
-  const refusal = await planCheckDetailed(c, entry, ctx, profile, deps, feature);
+): Response | null {
+  const refusal = planCheckDetailed(c, entry, profile, deps, feature, observed);
   if (refusal && anonymous) return c.json(err(PLAN_REQUIRED, ANONYMOUS_DENIED_MESSAGE), 403);
   return refusal;
 }
 
-async function planCheckDetailed(
+function planCheckDetailed(
   c: Context,
   entry: RouteEntitlementEntry,
-  ctx: EntitlementRequest,
   profile: ResolvedProfile,
   deps: EntitlementGateDeps,
-  feature: boolean
-): Promise<Response | null> {
+  feature: boolean,
+  observed: number | null
+): Response | null {
   const featureKey = featureKeyOf(entry);
   if (featureKey && feature) {
     const key = featureKey;
@@ -412,7 +413,6 @@ async function planCheckDetailed(
   if (entry.limit) {
     const { key } = entry.limit;
     const max = profile.limits[key];
-    const observed = await observedOf(entry, ctx, deps.logger);
     if (max !== null && max !== undefined && observed !== null && observed > max) {
       const requiredPlan = requiredPlanFor(deps.tool, profile.plan, (tier) => {
         const value = deps.tool.limits[key]?.[tier];
@@ -548,13 +548,25 @@ export function entitlementGate(entry: RouteEntitlementEntry, deps: EntitlementG
     // against it (verifier round 3), and a conditional feature whose
     // condition does not hold costs no hub read (the code review of
     // PRDCT-2702: a link renamed must not wait on a cold plan).
+    // A count limit's hook that answers null (or throws) has nothing to judge:
+    // the caller is one the handler refuses on its own (a guest at a door
+    // closed to guests, a resource the caller cannot see), or the lookup
+    // failed. The gate's judgement of that request ends there, on the plan,
+    // the feature and the price alike, and nothing is metered: the hub is
+    // never asked about an act the handler will refuse, so no refusal can
+    // show that caller the organization's plan or balance (the tool
+    // template's feedback of 29 September 2026). The hook runs once, before
+    // the plan is read. A size limit never answers null (the declared length
+    // reads 0 when absent, and the 411 below refuses it).
+    const observed = metered && entry.limit ? await observedOf(entry, ctx, deps.logger) : null;
+    if (metered && entry.limit && observed === null) return deferredRefusal ? deferredRefusal() : next();
     const feature = metered && entry.feature ? await featureApplies(entry, ctx, deps.logger) : false;
     if (metered && (feature || entry.limit)) {
       const profile = await deps.cloud!.profiles.get(actor.accountRef!, deps.tool).catch((cause: unknown) => {
         deps.logger.warn({ err: cause }, 'entitlements: profile read threw — the free tier applies');
         return defaultProfile(deps.tool);
       });
-      const refused = await planCheck(c, entry, ctx, profile, deps, feature, viewer);
+      const refused = planCheck(c, entry, profile, deps, feature, observed, viewer);
       if (refused) return refused;
     }
     // The size cap's deferred refusal: the plan has had its say (or none
