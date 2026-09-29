@@ -11,8 +11,8 @@
 // The hub's file: `HUB_WIRE_SNAPSHOT` when set (the `hub-wire` CI job points
 // it at a sparse checkout of the hub's `dev`), else the hub checkout beside
 // this repository in the Antasphere workspace. This package sits at
-// labs/products/antasphere/tools/slideless/<checkout>/packages/chassis-contract,
-// so five levels up (packages, <checkout>, slideless, tools, antasphere) is
+// labs/products/antasphere/tools/<tool>/<checkout>/packages/chassis-contract,
+// so five levels up (packages, <checkout>, <tool>, tools, antasphere) is
 // labs/products/antasphere/, where the hub lives as `hub/`.
 //
 // Needs the package built first (`pnpm --filter @antasphere/chassis-contract build`).

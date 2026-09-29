@@ -42,7 +42,7 @@ import * as sso from './sso-helpers.js';
  *    /metrics; a price past `Number.MAX_SAFE_INTEGER` reaches the check as
  *    the hub's `unpriceable` refusal, never an outage (PRDCT-2677).
  *
- * The suite runs twice (the minimal host, then the Slideless composition):
+ * The suite runs twice (the minimal host, then the tool's own composition):
  * what the two declare differently (the free upload value) is read from
  * discovery, never assumed.
  */
@@ -132,8 +132,8 @@ describe('oss: unmetered by construction, the cap byte for byte', () => {
     // What discovery advertises is what the instance serves (PRDCT-2653):
     // the paid tier's value is the operator's cap, like the oss value.
     expect(info.entitlements.limits['files.maxBytes']).toMatchObject({ oss: MB, pro: MB });
-    // The minimal host declares free as a fifth of the cap; Slideless as
-    // 100 MB or the cap when smaller (the cap, at 1 MiB).
+    // The minimal host declares free as a fifth of the cap; a tool may
+    // declare 100 MB or the cap when smaller (the cap, at 1 MiB).
     expect([Math.floor(MB / 5), MB]).toContain(info.entitlements.limits['files.maxBytes'].free);
   });
 
@@ -481,7 +481,7 @@ describe('cloud: every metered action of a hub organization lands in the hub', (
   it('the plan limit is a metered account’s ceiling (PRDCT-2653): pro uploads above the free value, free meets plan_required with the hub’s upgrade page', async (ctx) => {
     const info = await readJson(await app.app.request('/api/v1/instance'));
     const { free, pro } = info.entitlements.limits['files.maxBytes'] as { free: number; pro: number };
-    // A host whose free value IS the cap at this size (Slideless at 1 MiB)
+    // A host whose free value IS the cap at this size (the cap, at 1 MiB)
     // has no size between the two to upload: its own metering suite pins it.
     if (!(free < pro)) return ctx.skip();
     const size = free + Math.floor((pro - free) / 2);

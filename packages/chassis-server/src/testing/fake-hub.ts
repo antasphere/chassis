@@ -314,7 +314,7 @@ export class FakeHub {
        * The tool's REGISTRY slug at the hub (`TOOL_REGISTRY[].slug`, the
        * name the hub records on every usage row and judges a body's
        * `toolSlug` against). Defaults to the client id without its `tool-`
-       * prefix (`tool-slideless-cloud` → `slideless-cloud`), which is what
+       * prefix (`tool-things-cloud` → `things-cloud`), which is what
        * the production recipe and the drill harness name it — and NOT the
        * tool's identity slug, so a body that stamps its own name is refused
        * here exactly as the real hub refuses it (PRDCT-2629).
