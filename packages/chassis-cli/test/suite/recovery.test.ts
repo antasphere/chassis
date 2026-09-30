@@ -332,4 +332,17 @@ describe('a cached key of another Antasphere account (PRDCT-3032)', () => {
       expect(loadConfig(env).profiles.work?.connectKeys?.default?.apiKey).toBe(OLD);
     }
   });
+
+  it('the same account in another case is the same account: the cached key is served (verifier M3)', async () => {
+    const env = await switchedEnv({ apiKey: OLD, email: 'ada@x.co' }, 'ADA@X.CO');
+    const h = routedHarness(routesFor([OLD, NEW]), env);
+    expect(await run(['whoami'], h.io)).toBe(0);
+    // No DELETE, no exchange: the one call on the wire is the cached key's.
+    expect(trace(h)).toEqual([`GET http://tool/api/v1/me Bearer ${OLD}`]);
+    expect(h.err()).toBe('');
+    expect(loadConfig(env).profiles.work?.connectKeys?.default).toMatchObject({
+      apiKey: OLD,
+      email: 'ada@x.co'
+    });
+  });
 });

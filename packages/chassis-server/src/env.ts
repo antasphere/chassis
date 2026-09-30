@@ -214,6 +214,8 @@ const chassisEnvShape = (version: string) => ({
   API_RATE_LIMIT_PER_MINUTE: numeric(z.coerce.number().int().min(0).default(600)),
   /** Spike cap for the general API quota: max requests per principal in any 1-second burst. 0 disables burst smoothing (the per-minute window still applies). */
   API_RATE_LIMIT_BURST: numeric(z.coerce.number().int().min(0).default(100)),
+  /** Cloud: CLI connects (`POST /sso/cli-connect`, what `<tool> login` and every first command after `antasphere login` call) one client address may make per 15 minutes. A venue's Wi-Fi is one address behind the proxy (TRUST_PROXY), so the default is sized for a room; each connect presents a one-time exchange token the hub minted for one person, which is what bounds a single account. Never disabled (minimum 1). */
+  CLI_CONNECT_IP_LIMIT_PER_15_MIN: numeric(z.coerce.number().int().min(1).default(300)),
   /** Email delivery. `none` (default) never blocks a flow: links stay copyable. */
   EMAIL_DRIVER: z.preprocess(blankToUndefined, z.enum(['none', 'smtp', 'resend', 'brevo']).default('none')),
   /** smtp(s)://user:pass@host:port — required when EMAIL_DRIVER=smtp. */

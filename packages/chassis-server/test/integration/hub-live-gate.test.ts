@@ -565,3 +565,48 @@ describe('the default moved at the hub lands the request that reconciled it (PRD
     expect((await readJson(viaSession)).activeWorkspaceId).toBe(wsA);
   });
 });
+
+describe('a sweep of the default organization is told, never papered over by the moved default (PRDCT-2958, F2)', () => {
+  const ORG_SWEPT_A = '55555555-aaaa-4bbb-8ccc-00000000000a';
+  const ORG_SWEPT_B = '55555555-aaaa-4bbb-8ccc-00000000000b';
+  const sam: HubUserFixture = {
+    sub: 'hub-sam',
+    email: 'sam@swept.test',
+    name: 'Sam Swept',
+    workspaceId: ORG_SWEPT_A,
+    role: 'owner',
+    workspaceName: 'Swept A Org'
+  };
+
+  it('a person swept from their DEFAULT organization reads membership_revoked on the request that swept it, never a silent move (verifier M2)', async () => {
+    // Two organizations at the hub, A the default, before the first login.
+    hub.setUserOrg('hub-sam', ORG_SWEPT_A, { name: 'Swept A Org', role: 'owner', isDefault: true });
+    hub.setUserOrg('hub-sam', ORG_SWEPT_B, { name: 'Swept B Org', role: 'member' });
+    const cookie = await sso.ssoLogin(app, hub, sam);
+    const body = await readJson(await me(cookie));
+    const byOrg = (org: string) =>
+      body.workspaces.find((w: { centralAccountId: string | null }) => w.centralAccountId === org)
+        .id as string;
+    const wsA = byOrg(ORG_SWEPT_A);
+    const wsB = byOrg(ORG_SWEPT_B);
+    expect(wsA).not.toBe(wsB);
+    const key = await mintApiKey(cookie);
+    const viaKey = () => app.app.request('/api/v1/me', { headers: { authorization: `Bearer ${key}` } });
+    expect((await readJson(await viaKey())).activeWorkspaceId).toBe(wsA);
+
+    // Removed from A at the hub; B becomes the default.
+    hub.removeUserOrg('hub-sam', ORG_SWEPT_A);
+    hub.setUserOrg('hub-sam', ORG_SWEPT_B, { name: 'Swept B Org', role: 'member', isDefault: true });
+    await expireTtl();
+
+    // The request whose pass swept A carries the reason — never a 200 in B.
+    const swept = await viaKey();
+    expect(swept.status).toBe(401);
+    expect((await readJson(swept)).error.code).toBe('membership_revoked');
+
+    // The next request resolves in B, the new default.
+    const next = await viaKey();
+    expect(next.status).toBe(200);
+    expect((await readJson(next)).activeWorkspaceId).toBe(wsB);
+  });
+});

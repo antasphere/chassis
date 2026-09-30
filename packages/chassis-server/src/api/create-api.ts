@@ -565,11 +565,14 @@ export function createApiApp<
   // (openapi-doc.ts) and this wall is the defence in depth on top.
   api.use('/openapi.json', rateLimit(limiters.openapiDoc, clientIp));
   // CLI cross-tool connect (cloud only, api/sso-connect.ts): presenting an
-  // exchange token is a credential presentation — the same login wall as
-  // /cli/auth/complete (per IP; no email dimension exists pre-verification).
-  // Conditional like the route itself: oss mounts zero hub surface.
+  // exchange token is a credential presentation, walled per client address
+  // on its own bucket sized for a room (CLI_CONNECT_IP_LIMIT_PER_15_MIN): on
+  // the login wall (10 per 15 minutes) the 11th `<tool> login` behind one
+  // venue address was refused (PRDCT-2958, verifier F1). The token itself is
+  // one-time and the hub's walls bound each person. Conditional like the
+  // route itself: oss mounts zero hub surface.
   if (deps.hubSso) {
-    api.use('/sso/cli-connect', rateLimit(limiters.login, clientIp));
+    api.use('/sso/cli-connect', rateLimit(limiters.cliConnect, clientIp));
   }
 
   // ── JSON pre-validation in front of the Better Auth mount (AF-1 + the

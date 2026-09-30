@@ -25,6 +25,14 @@ export interface RateLimiters {
   invitationAccept: RateLimiterAbstract;
   setup: RateLimiterAbstract;
   apiKeyFailures: RateLimiterAbstract;
+  /**
+   * CLI connect (`POST /sso/cli-connect`, cloud): per client address, sized by
+   * CLI_CONNECT_IP_LIMIT_PER_15_MIN for a room behind one address (PRDCT-2958,
+   * the lane E verifier's F1: on the login wall, 10 per 15 minutes, the 11th
+   * `<tool> login` of a venue was refused). The exchange token it presents is
+   * one-time and minted by the hub for one person, behind the hub's own walls.
+   */
+  cliConnect: RateLimiterAbstract;
   /** RFC 7591 dynamic client registration — unauthenticated by design, so tight. */
   oauthRegister: RateLimiterAbstract;
   /** OAuth token endpoint — a full connector dance is ~8 requests, so generous. */
@@ -89,7 +97,7 @@ export interface BucketDeclaration {
  * bucket's name — the type refuses it.
  */
 export async function createRateLimiters<TBucket extends string = never>(
-  env: Pick<Env, 'REDIS_URL'>,
+  env: Pick<Env, 'REDIS_URL'> & Partial<Pick<Env, 'CLI_CONNECT_IP_LIMIT_PER_15_MIN'>>,
   logger: Logger,
   toolBuckets?: { [K in TBucket]: K extends keyof RateLimiters ? never : BucketDeclaration }
 ): Promise<RateLimiters & Record<TBucket, RateLimiterAbstract>> {
@@ -120,6 +128,7 @@ export async function createRateLimiters<TBucket extends string = never>(
     invitationAccept: make('inv-accept', 10, 60 * 60),
     setup: make('setup', 5, 60 * 60),
     apiKeyFailures: make('key-fail', 20, 15 * 60),
+    cliConnect: make('cli-connect', Math.max(1, env.CLI_CONNECT_IP_LIMIT_PER_15_MIN ?? 300), 15 * 60),
     oauthRegister: make('oauth-dcr', 10, 60 * 60),
     oauthToken: make('oauth-token', 60, 60),
     mcp: make('mcp', 120, 60),
