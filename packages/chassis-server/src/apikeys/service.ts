@@ -216,7 +216,8 @@ export class ApiKeyService {
       scopes: new Set(row.scopes),
       apiKeyId: row.id,
       ...(row.expiresAt ? { apiKeyExpiresAt: row.expiresAt.toISOString() } : {}),
-      ...(member.accountRef ? { accountRef: member.accountRef } : {})
+      ...(member.accountRef ? { accountRef: member.accountRef } : {}),
+      ...(row.workspaceId ? { pinned: true as const } : {})
     };
   }
 }

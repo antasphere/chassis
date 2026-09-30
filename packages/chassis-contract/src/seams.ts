@@ -68,6 +68,13 @@ export interface Principal {
   apiKeyExpiresAt?: string;
   /** Central account id — undefined in local mode. */
   accountRef?: string;
+  /**
+   * The credential itself fixed the workspace (an API key pinned to one):
+   * the request's selector was checked against the pin, and no default of
+   * the person ever moves the request elsewhere. Absent on every credential
+   * whose workspace the request selected, or the person's default chose.
+   */
+  pinned?: true;
 }
 
 /**

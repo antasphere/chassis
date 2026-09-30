@@ -1,8 +1,9 @@
 import { and, eq } from 'drizzle-orm';
 import { workspaceMembers, workspaces, type Db } from '@antasphere/chassis-db';
 import type { Logger } from '../logger.js';
-import type { PrincipalGate, PrincipalGateResult } from '../middleware/auth-context.js';
+import type { GateWorkspace, PrincipalGate, PrincipalGateResult } from '../middleware/auth-context.js';
 import type { HubOrgReconciler } from './hub-reconcile.js';
+import { resolveMembership } from './resolve-membership.js';
 
 /**
  * The cloud edition's post-resolution principal gate (user-scoped
@@ -24,7 +25,13 @@ import type { HubOrgReconciler } from './hub-reconcile.js';
  *    `GET /api/v1/me` — suspended is VISIBLE-BUT-BLOCKED, and /me is how
  *    the dashboard shows the suspended badge instead of stranding the user
  *    (the reason the PrincipalGate seam carries the request);
- *  - a role delta from the reconciled row applies to THIS request (D11).
+ *  - a role delta from the reconciled row applies to THIS request (D11);
+ *  - a request that SELECTED no workspace, on a credential that pins none,
+ *    runs in the person's default AS THE PASS LEFT IT: the resolver chose
+ *    the workspace before the pass ran, so a default moved at the hub
+ *    (`antasphere org use`) would land the very command that read it in the
+ *    old organization and only the next one in the new (PRDCT-2958, F2).
+ *    The membership is resolved again here and handed back as `workspace`.
  *
  * Guest and local-origin rows in a projected workspace skip hub enforcement
  * entirely EXCEPT the org-level suspension read — and that reads the
@@ -80,25 +87,13 @@ export class HubLiveGate {
 
     // Judge the FRESHLY RECONCILED local rows (the pass above may have
     // swept the membership, synced the role, or flipped hub_status).
-    const [row] = await this.deps.db
-      .select({
-        role: workspaceMembers.role,
-        isActive: workspaceMembers.isActive,
-        hubStatus: workspaces.hubStatus
-      })
-      .from(workspaceMembers)
-      .innerJoin(workspaces, eq(workspaceMembers.workspaceId, workspaces.id))
-      .where(
-        and(
-          eq(workspaceMembers.userId, principal.userId),
-          eq(workspaceMembers.workspaceId, principal.workspaceId)
-        )
-      )
-      .limit(1);
+    const row = await this.memberRow(principal.userId, principal.workspaceId);
     if (!row || !row.isActive) {
       // Resolution saw an active row moments ago; the reconcile swept it —
       // the hub no longer asserts this membership. Every later request dies
-      // at resolution itself (plain 401); THIS one carries the reason.
+      // at resolution itself (plain 401); THIS one carries the reason. A
+      // swept membership is never papered over by a move to another
+      // workspace below: the person learns what happened.
       return {
         ok: false,
         status: 401,
@@ -106,6 +101,30 @@ export class HubLiveGate {
         message: 'Your membership of this organization was removed on Antasphere'
       };
     }
+
+    // A selector-less request on an unpinned credential runs in the default
+    // membership as the pass above left it (the resolver read it before, so
+    // a default moved at the hub would land THIS request in the old one).
+    // The moved-to workspace is judged exactly as the resolved one is.
+    if (request.selector === null && !principal.pinned) {
+      const fresh = await resolveMembership(this.deps.db, principal.userId, null);
+      if (fresh && fresh.workspaceId !== principal.workspaceId) {
+        const target = await this.memberRow(principal.userId, fresh.workspaceId);
+        if (target?.isActive) {
+          if (target.hubStatus === 'suspended' && !isMeRead(request)) {
+            return { ok: false, status: 403, code: 'account_suspended', message: SUSPENDED_MESSAGE };
+          }
+          const moved: GateWorkspace = {
+            workspaceId: fresh.workspaceId,
+            role: target.role,
+            origin: fresh.origin,
+            accountRef: fresh.accountRef
+          };
+          return { ok: true, workspace: moved };
+        }
+      }
+    }
+
     if (row.hubStatus === 'suspended' && !isMeRead(request)) {
       return { ok: false, status: 403, code: 'account_suspended', message: SUSPENDED_MESSAGE };
     }
@@ -116,6 +135,20 @@ export class HubLiveGate {
     }
     return { ok: true };
   };
+
+  private async memberRow(userId: string, workspaceId: string) {
+    const [row] = await this.deps.db
+      .select({
+        role: workspaceMembers.role,
+        isActive: workspaceMembers.isActive,
+        hubStatus: workspaces.hubStatus
+      })
+      .from(workspaceMembers)
+      .innerJoin(workspaces, eq(workspaceMembers.workspaceId, workspaces.id))
+      .where(and(eq(workspaceMembers.userId, userId), eq(workspaceMembers.workspaceId, workspaceId)))
+      .limit(1);
+    return row;
+  }
 
   private async assertOrgActive(
     workspaceId: string,

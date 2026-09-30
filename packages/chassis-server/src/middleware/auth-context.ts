@@ -46,19 +46,41 @@ export function isPublicApiPath(path: string): boolean {
 /**
  * An edition's post-resolution verdict on an otherwise-valid principal.
  * `ok` with a `role` means "the caller's authoritative role just changed —
- * run THIS request under it"; a refusal carries the exact wire error. The
- * seam exists for the cloud edition's hub gates (org suspension + hub
- * membership re-assertion, internal/federation.md P4); oss never wires one.
- * The gate also sees WHAT is being asked (`request`), so a policy can exempt
- * specific surfaces (e.g. suspension keeping GET /me readable — the
- * visible-but-blocked posture); implementations may ignore it.
+ * run THIS request under it"; `ok` with a `workspace` means "the person's
+ * DEFAULT workspace just moved (the pass this request ran read it off the
+ * hub) — run THIS request there", which the gate says only for a request
+ * that selected nothing (`request.selector` null) on a credential that pins
+ * nothing (PRDCT-2958, F2: the command that runs the pass used to land in
+ * the old default, the one after it in the new); a refusal carries the
+ * exact wire error. The seam exists for the cloud edition's hub gates (org
+ * suspension + hub membership re-assertion, internal/federation.md P4); oss
+ * never wires one. The gate also sees WHAT is being asked (`request`), so a
+ * policy can exempt specific surfaces (e.g. suspension keeping GET /me
+ * readable — the visible-but-blocked posture); implementations may ignore
+ * it.
  */
 export type PrincipalGateResult =
-  { ok: true; role?: Principal['role'] } | { ok: false; status: 401 | 403; code: string; message: string };
+  | { ok: true; role?: Principal['role']; workspace?: GateWorkspace }
+  | { ok: false; status: 401 | 403; code: string; message: string };
+
+/** The membership a gate re-resolved for the request: the fields of the principal it replaces. */
+export interface GateWorkspace {
+  workspaceId: string;
+  role: Principal['role'];
+  origin: Principal['origin'];
+  accountRef: string | null;
+}
+
+export interface PrincipalGateRequest {
+  path: string;
+  method: string;
+  /** The request's own workspace selector (the X-Workspace-Id header), null when it named none. */
+  selector: string | null;
+}
 
 export type PrincipalGate = (
   principal: Principal,
-  request: { path: string; method: string }
+  request: PrincipalGateRequest
 ) => Promise<PrincipalGateResult>;
 
 /** The gate's verdict applied: the principal to run the request as, or the exact wire refusal. */
@@ -93,15 +115,22 @@ export async function admitPrincipal(
   principalGate: PrincipalGate | undefined
 ): Promise<AdmitResult> {
   if (!principalGate) return { ok: true, principal };
-  const verdict = await principalGate(principal, { path: c.req.path, method: c.req.method });
+  const verdict = await principalGate(principal, {
+    path: c.req.path,
+    method: c.req.method,
+    selector: c.req.header(ACTIVE_WORKSPACE_HEADER)?.trim() || null
+  });
   if (!verdict.ok) return verdict;
-  return {
-    ok: true,
-    principal:
-      verdict.role !== undefined && verdict.role !== principal.role
-        ? { ...principal, role: verdict.role }
-        : principal
-  };
+  let admitted = principal;
+  if (verdict.workspace && verdict.workspace.workspaceId !== principal.workspaceId) {
+    const { accountRef, ...rest } = verdict.workspace;
+    const { accountRef: _previous, ...withoutRef } = admitted;
+    admitted = { ...withoutRef, ...rest, ...(accountRef ? { accountRef } : {}) };
+  }
+  if (verdict.role !== undefined && verdict.role !== admitted.role) {
+    admitted = { ...admitted, role: verdict.role };
+  }
+  return { ok: true, principal: admitted };
 }
 
 export interface AuthContextDeps {

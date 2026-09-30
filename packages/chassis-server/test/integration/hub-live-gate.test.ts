@@ -39,6 +39,8 @@ const ORG_SUSPEND = '55555555-aaaa-4bbb-8ccc-000000000002';
 const ORG_OUTAGE = '55555555-aaaa-4bbb-8ccc-000000000003';
 const ORG_DEAD = '55555555-aaaa-4bbb-8ccc-000000000004';
 const ORG_ROLE = '55555555-aaaa-4bbb-8ccc-000000000005';
+const ORG_DEFAULT_A = '55555555-aaaa-4bbb-8ccc-000000000008';
+const ORG_DEFAULT_B = '55555555-aaaa-4bbb-8ccc-000000000009';
 
 const DIALS = {
   reconcileTtlMs: 120,
@@ -453,5 +455,113 @@ describe('workspaces with no hub projection never touch the hub', () => {
       ).status
     ).toBe(200);
     expect(hub.orgsRequests.length + hub.refreshRequests.length).toBe(before);
+  });
+});
+
+describe('the default moved at the hub lands the request that reconciled it (PRDCT-2958, F2)', () => {
+  const dana: HubUserFixture = {
+    sub: 'hub-dana',
+    email: 'dana@default.test',
+    name: 'Dana Default',
+    workspaceId: ORG_DEFAULT_A,
+    role: 'owner',
+    workspaceName: 'Default A Org'
+  };
+  let cookie: string;
+  let key: string;
+  let pinnedKey: string;
+  let wsA: string;
+  let wsB: string;
+
+  const meAs = async (authorization: string, workspaceId?: string) =>
+    app.app.request('/api/v1/me', {
+      headers: { authorization, ...(workspaceId ? { 'x-workspace-id': workspaceId } : {}) }
+    });
+
+  const moveDefaultTo = (org: string) => {
+    hub.setUserOrg('hub-dana', ORG_DEFAULT_A, {
+      name: 'Default A Org',
+      role: 'owner',
+      ...(org === ORG_DEFAULT_A ? { isDefault: true } : {})
+    });
+    hub.setUserOrg('hub-dana', ORG_DEFAULT_B, {
+      name: 'Default B Org',
+      role: 'member',
+      ...(org === ORG_DEFAULT_B ? { isDefault: true } : {})
+    });
+  };
+
+  beforeAll(async () => {
+    // Two organizations at the hub, A the default, before the first login.
+    moveDefaultTo(ORG_DEFAULT_A);
+    cookie = await sso.ssoLogin(app, hub, dana);
+    // The workspace ids come off /me's rows by their hub organization id —
+    // never by position.
+    const body = await readJson(await me(cookie));
+    const byOrg = (org: string) =>
+      body.workspaces.find((w: { centralAccountId: string | null }) => w.centralAccountId === org)
+        .id as string;
+    wsA = byOrg(ORG_DEFAULT_A);
+    wsB = byOrg(ORG_DEFAULT_B);
+    key = await mintApiKey(cookie);
+    const pin = await app.app.request('/api/v1/api-keys', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({
+        name: 'gate pinned key',
+        scopes: [chassisHost.scopes.read, chassisHost.scopes.write],
+        workspaceId: wsA
+      })
+    });
+    expect(pin.status).toBe(201);
+    pinnedKey = (await readJson(pin)).key;
+  });
+
+  it('a selector-less request lands in the hub default, for the session and an unpinned key', async () => {
+    expect(wsA).not.toBe(wsB);
+    expect((await readJson(await me(cookie))).activeWorkspaceId).toBe(wsA);
+    expect((await readJson(await meAs(`Bearer ${key}`))).activeWorkspaceId).toBe(wsA);
+  });
+
+  it('the default moves to B: the FIRST selector-less request after the pass lands in B', async () => {
+    moveDefaultTo(ORG_DEFAULT_B);
+    await expireTtl();
+    // The very request whose pass read the move off the hub runs in B —
+    // before the fix it still ran in A and only the next one moved.
+    const viaKey = await meAs(`Bearer ${key}`);
+    expect(viaKey.status).toBe(200);
+    expect((await readJson(viaKey)).activeWorkspaceId).toBe(wsB);
+    await expireTtl();
+    const viaSession = await me(cookie);
+    expect(viaSession.status).toBe(200);
+    expect((await readJson(viaSession)).activeWorkspaceId).toBe(wsB);
+  });
+
+  it('a selector wins over the moved default', async () => {
+    await expireTtl();
+    expect((await readJson(await meAs(`Bearer ${key}`, wsA))).activeWorkspaceId).toBe(wsA);
+    await expireTtl();
+    expect((await readJson(await me(cookie, wsA))).activeWorkspaceId).toBe(wsA);
+  });
+
+  it('a pinned key is never moved: no header lands in its pin, a header naming B is workspace_mismatch', async () => {
+    await expireTtl();
+    const pinned = await meAs(`Bearer ${pinnedKey}`);
+    expect(pinned.status).toBe(200);
+    expect((await readJson(pinned)).activeWorkspaceId).toBe(wsA);
+    const mismatch = await meAs(`Bearer ${pinnedKey}`, wsB);
+    expect(mismatch.status).toBe(403);
+    expect((await readJson(mismatch)).error.code).toBe('workspace_mismatch');
+  });
+
+  it('the session lands on the request that reconciled it too: the default back to A', async () => {
+    // The key's pass above already materialized B, so the session leg of
+    // the move proves nothing on its own; a second move whose FIRST reader
+    // is the session does.
+    moveDefaultTo(ORG_DEFAULT_A);
+    await expireTtl();
+    const viaSession = await me(cookie);
+    expect(viaSession.status).toBe(200);
+    expect((await readJson(viaSession)).activeWorkspaceId).toBe(wsA);
   });
 });
