@@ -3,6 +3,7 @@ import type { Command } from 'commander';
 import {
   activeHubProfile,
   CLOUD_PROFILE,
+  CliAuthClient,
   CliUsageError,
   connectOnDemand,
   lookupConnectKey,
@@ -225,11 +226,11 @@ export interface CliContextKit<TClient extends ChassisClient<string>> {
 export function createContext<TClient extends ChassisClient<string>>(input: {
   identity: CliIdentity;
   createClient: (options: ClientOptions) => TClient;
-  config: Pick<CliConfigStore, 'loadConfig'>;
+  config: Pick<CliConfigStore, 'loadConfig' | 'removeConnectKey'>;
   workspace: CliWorkspace;
 }): CliContextKit<TClient> {
   const { identity, createClient } = input;
-  const { loadConfig } = input.config;
+  const { loadConfig, removeConnectKey } = input.config;
   const { describeSelection, explainRefusal, pickWorkspaceSelection } = input.workspace;
   const unknownHint = `run \`${identity.bin} profiles\` to list them.`;
 
@@ -305,9 +306,14 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
             : 'none';
     if (!apiKey && sameProfileInstance) {
       // No direct key: the connect cache's slot is the ACTIVE hub profile
-      // (what `antasphere login` stored) — org-independent by design.
+      // (what `antasphere login` stored) — org-independent by design. A key
+      // cached for ANOTHER account than the login now stored on that slot
+      // (`antasphere login --email other` since) is never served: it is the
+      // other person's credential (PRDCT-3032); connectForKey retires it.
       const hub = activeHubProfile(io.env);
-      if (hub.name) apiKey = lookupConnectKey(profile, hub.name);
+      if (hub.name && !cachedForAnotherAccount(profile, hub.name, hub.profile?.email)) {
+        apiKey = lookupConnectKey(profile, hub.name);
+      }
       if (apiKey) credentialSource = 'hub-cache';
     }
     const fetchImpl = io.fetch ?? globalThis.fetch.bind(globalThis);
@@ -336,6 +342,21 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
       ctx.client = createClient({ baseUrl, apiKey, fetch: recoveringFetch(ctx, fetchImpl) });
     }
     return ctx;
+  }
+
+  /**
+   * The cached connect key on `slot` was minted for another Antasphere
+   * account than the one whose login the slot now holds. Both addresses must
+   * be known: a cache entry or a hub profile without one is trusted as before.
+   */
+  function cachedForAnotherAccount(
+    profile: CliProfile | undefined,
+    slot: string,
+    hubEmail: string | undefined
+  ): boolean {
+    const cached = profile?.connectKeys?.[slot]?.email;
+    if (!cached || !hubEmail) return false;
+    return cached.toLowerCase() !== hubEmail.toLowerCase();
   }
 
   const NO_KEY_MESSAGE =
@@ -496,6 +517,29 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
 
   async function connectForKey(ctx: CliContext<TClient>): Promise<string> {
     const { io } = ctx;
+    // The cached key of another account (the hub login on the slot changed)
+    // is revoked on its instance and forgotten before the exchange runs for
+    // the account now signed in (PRDCT-3032). Best effort: a dead key
+    // answers 401 and is forgotten all the same.
+    const hub = activeHubProfile(io.env);
+    if (ctx.profileName && hub.name) {
+      const profile = loadConfig(io.env).profiles[ctx.profileName];
+      if (cachedForAnotherAccount(profile, hub.name, hub.profile?.email)) {
+        const stale = profile?.connectKeys?.[hub.name];
+        if (stale) {
+          io.err.write(
+            `The ${identity.displayName} key cached for ${stale.email ?? 'another Antasphere login'} is retired: ` +
+              `the Antasphere login is now ${hub.profile?.email ?? 'another account'}.\n`
+          );
+          const auth = new CliAuthClient({
+            baseUrl: profileUrl(profile),
+            ...(io.fetch ? { fetch: io.fetch } : {})
+          });
+          await auth.revoke(stale.apiKey).catch(() => undefined);
+          removeConnectKey(io.env, ctx.profileName, hub.name);
+        }
+      }
+    }
     const outcome = await connectOnDemand(connectOptions(ctx));
     if (outcome.outcome === 'not_cloud') {
       // Self-hosted / unreachable: the classic error, byte-identical.

@@ -39,6 +39,22 @@ function scripted(h: ReturnType<typeof routedHarness>, answers: string[]): strin
   return asked;
 }
 
+/** A second Antasphere account's hub key (PRDCT-3032). */
+const BOB_HUB_KEY = 'ant_bobkey12_secretsecretsecret1234';
+
+/** The routes as given, every answer that names a person naming `email` instead. */
+function answeringAs(email: string, routes: Route[]): Route[] {
+  return routes.map((r) => ({
+    ...r,
+    reply: (call) => {
+      const answer = r.reply(call);
+      const body = answer.body as Record<string, unknown> | undefined;
+      if (!body || typeof body !== 'object' || !('user' in body)) return answer;
+      return { ...answer, body: { ...body, user: { ...(body.user as object), email } } };
+    }
+  }));
+}
+
 describe('login with a pasted key', () => {
   it('verifies the key with /me, saves it on the instance profile and makes it active', async () => {
     const env = await tempConfigEnv();
@@ -614,6 +630,75 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
       `GET http://tool/api/v1/me Bearer ${key('tool')}`
     ]);
     expect(loadCoreConfig(env, HUB_TOOL).profiles.default?.apiKey).toBe(fresh);
+  });
+
+  it('--email naming ANOTHER account than the stored login signs that account in afresh, and the cached key of the old one is revoked and replaced (PRDCT-3032)', async () => {
+    const env = await hubEnv();
+    seedHubLogin(env);
+    const old = key('adakey');
+    const minted = key('bobkey');
+    saveConfig(env, {
+      activeProfile: 'tool',
+      profiles: {
+        tool: { baseUrl: 'http://tool', connectKeys: { default: { apiKey: old, email: 'ada@x.co' } } }
+      }
+    });
+    const h = routedHarness(
+      [
+        cloudInstanceRoute,
+        { method: 'DELETE', path: /\/api\/v1\/cli\/auth\/key$/, reply: () => ({ body: { revoked: true } }) },
+        ...answeringAs('bob@x.co', [...otpRoutes(BOB_HUB_KEY, ORG), ...exchangeRoutes([minted])]),
+        meRoute()
+      ],
+      env
+    );
+    const asked = scripted(h, ['123456']);
+    expect(await run(['login', '--email', 'bob@x.co', '--api-url', 'http://tool'], h.io)).toBe(0);
+    expect(asked).toEqual(['Code: ']);
+    expect(h.err()).toContain('Replacing the Antasphere login ada@x.co with bob@x.co.\n');
+    expect(h.wire.map((c) => `${c.method} ${c.origin}${c.path} ${c.auth ?? '-'}`)).toEqual([
+      'GET http://tool/api/v1/instance -',
+      `POST ${HUB}/api/v1/cli/auth/request -`,
+      `POST ${HUB}/api/v1/cli/auth/complete -`,
+      `DELETE http://tool/api/v1/cli/auth/key Bearer ${old}`,
+      'GET http://tool/api/v1/instance -',
+      `POST ${HUB}/api/v1/sso/tool-token Bearer ${BOB_HUB_KEY}`,
+      'POST http://tool/api/v1/sso/cli-connect -',
+      `GET http://tool/api/v1/me Bearer ${minted}`
+    ]);
+    expect(h.wire[1]?.body).toEqual({ email: 'bob@x.co' });
+    expect(loadCoreConfig(env, HUB_TOOL).profiles.default).toEqual({
+      apiKey: BOB_HUB_KEY,
+      baseUrl: HUB,
+      email: 'bob@x.co',
+      workspaceId: ORG
+    });
+    const tool = loadConfig(env).profiles.tool;
+    expect(Object.keys(tool?.connectKeys ?? {})).toEqual(['default']);
+    expect(tool?.connectKeys?.default).toMatchObject({ apiKey: minted, email: 'bob@x.co' });
+    expect(JSON.stringify(loadConfig(env))).not.toContain(old);
+    expect(JSON.stringify(loadCoreConfig(env, HUB_TOOL))).not.toContain(HUB_KEY);
+  });
+
+  it('--email naming the SAME account as the stored login (any case): no question, no new sign-in, the exchange alone', async () => {
+    const env = await hubEnv();
+    seedHubLogin(env);
+    const h = routedHarness(
+      [cloudInstanceRoute, ...otpRoutes(BOB_HUB_KEY, ORG), ...exchangeRoutes([key('tool')]), meRoute()],
+      env
+    );
+    const asked = scripted(h, []);
+    expect(await run(['login', '--email', 'ADA@X.co', '--api-url', 'http://tool'], h.io)).toBe(0);
+    expect(asked).toEqual([]);
+    expect(h.err()).not.toContain('Replacing');
+    expect(h.wire.map((c) => `${c.method} ${c.origin}${c.path} ${c.auth ?? '-'}`)).toEqual([
+      'GET http://tool/api/v1/instance -',
+      'GET http://tool/api/v1/instance -',
+      `POST ${HUB}/api/v1/sso/tool-token Bearer ${HUB_KEY}`,
+      'POST http://tool/api/v1/sso/cli-connect -',
+      `GET http://tool/api/v1/me Bearer ${key('tool')}`
+    ]);
+    expect(loadCoreConfig(env, HUB_TOOL).profiles.default?.apiKey).toBe(HUB_KEY);
   });
 
   it('--json: via antasphere, the hub profile, the workspaces', async () => {

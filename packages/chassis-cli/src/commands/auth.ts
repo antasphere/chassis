@@ -280,9 +280,18 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
       const probe = await probeToolInstance(baseUrl, io.fetch);
       if (probe?.cloud) {
         // The hub login, once: stored on the hub profile as `antasphere login`
-        // stores it, so every other tool CLI is signed in too.
+        // stores it, so every other tool CLI is signed in too. `--email`
+        // naming ANOTHER account than the stored login signs that account in
+        // afresh, replacing the stored login (PRDCT-3032): the person who
+        // signed in with the wrong address switches from here.
         let hub = activeHubProfile(io.env);
-        if (!hub.profile?.apiKey) await hubLogin(opts);
+        const stored = hub.profile?.apiKey ? hub.profile.email : undefined;
+        const switching =
+          Boolean(stored) && opts.email !== undefined && opts.email.toLowerCase() !== stored!.toLowerCase();
+        if (switching) {
+          io.err.write(`Replacing the Antasphere login ${stored} with ${opts.email}.\n`);
+        }
+        if (!hub.profile?.apiKey || switching) await hubLogin(opts);
         // A login is an explicit re-sign-in (verifier round 1, F3): the key
         // cached on this profile is revoked on its instance (best effort: a
         // dead one answers 401) and forgotten, and the exchange runs afresh,
@@ -358,17 +367,62 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
       );
     });
 
+  /** The hub login `--all` ends: `antasphere logout` from here (the key revoked on the hub, the profile cleared). */
+  async function hubLogout(): Promise<{ email: string | undefined; revoked: boolean } | null> {
+    const hub = activeHubProfile(io.env);
+    if (!hub.name || !hub.profile?.apiKey) return null;
+    const auth = new CliAuthClient({
+      baseUrl: profileUrl(hub.profile),
+      ...(io.fetch ? { fetch: io.fetch } : {})
+    });
+    let revoked = false;
+    try {
+      await auth.revoke(hub.profile.apiKey);
+      revoked = true;
+    } catch (e) {
+      if (!(e instanceof CliAuthError && (e.status === 401 || e.status === 403))) throw e;
+      io.err.write('The stored Antasphere login was already unusable; forgetting it.\n');
+    }
+    const fresh = loadCoreConfig(io.env, HUB_TOOL);
+    delete fresh.profiles[hub.name];
+    if (fresh.activeProfile === hub.name) delete fresh.activeProfile;
+    saveCoreConfig(io.env, HUB_TOOL, fresh);
+    return { email: hub.profile.email, revoked };
+  }
+
   program
     .command('logout')
     .description(
-      'Sign out of the active (or named) profile: revokes every key it holds on the instance, then forgets them'
+      'Sign out of the active (or named) profile: revokes every key it holds on the instance, then forgets them; ' +
+        'with --all, also ends the Antasphere login of this machine (what `antasphere logout` does)'
     )
-    .action(async (_opts, cmd: Command) => {
+    .option('--all', 'also revoke the Antasphere login and clear its profile', false)
+    .action(async (opts: { all: boolean }, cmd: Command) => {
       const globals = cmd.optsWithGlobals() as AuthGlobals;
       const ctx = resolveContext(cmd, io);
       const profileName = ctx.profileName;
       const profile = profileName ? ctx.config.profiles[profileName] : undefined;
+      const hubLogin = activeHubProfile(io.env).profile;
       if (!profileName || !profile) {
+        // Nothing of this tool's on the machine. The Antasphere login, when
+        // there is one, is the family's: it is ended here on --all, else
+        // named with the two commands that end it (PRDCT-3032).
+        if (hubLogin?.apiKey) {
+          if (opts.all) {
+            const ended = await hubLogout();
+            if (globals.json) return printJson(io, { profile: null, revoked: 0, refused: 0, hub: ended });
+            io.out.write(
+              `Nothing of ${identity.displayName}'s to sign out of on this machine. ` +
+                `The Antasphere login ${ended?.email ?? ''} is ${ended?.revoked ? 'revoked and ' : ''}forgotten.\n`
+            );
+            return;
+          }
+          throw new CliUsageError(
+            `Nothing of ${identity.displayName}'s to sign out of on this machine. The Antasphere login ` +
+              `${hubLogin.email ?? ''} stays for the whole tool family: \`${identity.bin} logout --all\` or ` +
+              '`antasphere logout` ends it.'
+          );
+        }
         throw new CliUsageError('No profile to log out of.');
       }
       // Every key is revoked on the instance the PROFILE names, never on a
@@ -413,6 +467,7 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
         delete current.email;
         saveConfig(io.env, config);
       }
+      const ended = opts.all ? await hubLogout() : null;
       if (globals.json) {
         return printJson(io, {
           profile: profileName,
@@ -420,11 +475,19 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
           revoked,
           refused,
           hubProfiles: slots.map(([slot]) => slot),
-          forgotten: true
+          forgotten: true,
+          ...(opts.all ? { hub: ended } : {})
         });
       }
+      const hubLine = opts.all
+        ? ended
+          ? ` The Antasphere login ${ended.email ?? ''} is ${ended.revoked ? 'revoked and ' : ''}forgotten.`
+          : ' No Antasphere login to end.'
+        : hubLogin?.apiKey
+          ? ` The Antasphere login ${hubLogin.email ?? ''} stays for the whole tool family (\`${identity.bin} logout --all\` ends it too).`
+          : '';
       if (revoked === 0 && slots.length === 0 && !profile.apiKey) {
-        io.out.write(`Profile "${profileName}" held no key.\n`);
+        io.out.write(`Profile "${profileName}" held no key.${hubLine}\n`);
         return;
       }
       io.out.write(
@@ -433,7 +496,7 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
           (refused > 0
             ? ` — ${refused} key${refused === 1 ? '' : 's'} could NOT be revoked and stay valid`
             : '') +
-          '.\n'
+          `.${hubLine}\n`
       );
     });
 
