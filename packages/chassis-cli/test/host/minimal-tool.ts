@@ -21,7 +21,8 @@ export const cli = defineCli({
     displayName: 'Things',
     envPrefix: 'THINGS',
     keyPrefix: 'thk',
-    exportScope: 'things:export'
+    exportScope: 'things:export',
+    cloudUrl: 'https://things.antasphere.test'
   },
   description: 'Command-line client for a Things instance',
   createClient: (options) => new ChassisClient<ThingsScope>(options)

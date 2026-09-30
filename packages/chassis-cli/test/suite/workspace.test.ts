@@ -6,12 +6,15 @@ import {
   type MeResponse,
   type MeWorkspace
 } from '@antasphere/chassis-cli';
-import { cli } from '@chassis-cli-test/host';
+import { routedHarness, tempConfigEnv } from '@antasphere/chassis-cli/testing';
+import { cli, run } from '@chassis-cli-test/host';
+import { filesRoute, key, meBody, meRoute, wsRow } from './signin-fixtures.js';
 
 // The kit's workspace functions, and the literals that spell the tool (its identity).
 const { describeSelection, describeSource, explainRefusal, pickWorkspaceSelection } = cli.workspace;
 const { bin } = cli.identity;
 const WS_ENV = `${cli.identity.envPrefix}_WORKSPACE`;
+const ORG_ENV = `${cli.identity.envPrefix}_ORG`;
 
 /**
  * PRDCT-2419, the pure half: which value selects the workspace (the
@@ -33,78 +36,85 @@ function ws(id: string, name: string, over: Partial<MeWorkspace> = {}): MeWorksp
     look: { theme: null, pattern: null, field: null, grain: null },
     suspended: false,
     default: false,
+    centralAccountId: null,
     ...over
   };
 }
 
 const pick = (over: Partial<Parameters<typeof pickWorkspaceSelection>[0]>) =>
-  pickWorkspaceSelection({
-    flag: undefined,
-    env: {},
-    profile: undefined,
-    profileName: undefined,
-    baseUrl: URL,
-    ...over
-  });
+  pickWorkspaceSelection({ workspaceFlag: undefined, orgFlag: undefined, env: {}, ...over });
 
-describe('the resolution order: flag, then environment, then profile, then nothing', () => {
-  const profile = { baseUrl: URL, activeWorkspaceId: C };
-
-  it('the flag wins over the environment and the profile', () => {
-    expect(pick({ flag: 'Acme', env: { [WS_ENV]: B }, profile, profileName: 'work' })).toEqual({
+describe('the selection: --org or --workspace, then ORG or WORKSPACE, then nothing', () => {
+  it('a flag wins over a variable of either kind', () => {
+    expect(pick({ workspaceFlag: 'Acme', env: { [WS_ENV]: B } })).toEqual({
       value: 'Acme',
-      source: 'flag'
+      source: 'flag',
+      kind: 'workspace'
+    });
+    expect(pick({ workspaceFlag: 'Acme', env: { [ORG_ENV]: B } })).toEqual({
+      value: 'Acme',
+      source: 'flag',
+      kind: 'workspace'
+    });
+    expect(pick({ orgFlag: 'Acme', env: { [WS_ENV]: B } })).toEqual({
+      value: 'Acme',
+      source: 'flag',
+      kind: 'org'
     });
   });
 
-  it('the environment wins over the profile', () => {
-    expect(pick({ env: { [WS_ENV]: B }, profile, profileName: 'work' })).toEqual({
-      value: B,
-      source: 'env'
+  it('a flag wins even over two variables at once', () => {
+    expect(pick({ orgFlag: 'Acme', env: { [WS_ENV]: B, [ORG_ENV]: C } })).toEqual({
+      value: 'Acme',
+      source: 'flag',
+      kind: 'org'
     });
   });
 
-  it('the profile field is last, and carries the profile name', () => {
-    expect(pick({ profile, profileName: 'work' })).toEqual({
-      value: C,
-      source: 'profile',
-      profileName: 'work'
-    });
+  it('each variable selects its own kind', () => {
+    expect(pick({ env: { [WS_ENV]: B } })).toEqual({ value: B, source: 'env', kind: 'workspace' });
+    expect(pick({ env: { [ORG_ENV]: B } })).toEqual({ value: B, source: 'env', kind: 'org' });
   });
 
   it('nothing selected is undefined: no header, the server picks', () => {
     expect(pick({})).toBeUndefined();
-    expect(pick({ profile: { baseUrl: URL }, profileName: 'work' })).toBeUndefined();
   });
 
   it('values are trimmed', () => {
-    expect(pick({ flag: '  Acme  ' })?.value).toBe('Acme');
+    expect(pick({ workspaceFlag: '  Acme  ' })?.value).toBe('Acme');
+    expect(pick({ orgFlag: '  Acme  ' })?.value).toBe('Acme');
     expect(pick({ env: { [WS_ENV]: ` ${B}\n` } })?.value).toBe(B);
+    expect(pick({ env: { [ORG_ENV]: ` ${B}\n` } })?.value).toBe(B);
+  });
+
+  it('both flags at once is a usage error', () => {
+    expect(() => pick({ orgFlag: 'Acme', workspaceFlag: 'Beta' })).toThrow(
+      'Pass --org or --workspace, not both.'
+    );
+  });
+
+  it('both variables at once is a usage error', () => {
+    expect(() => pick({ env: { [ORG_ENV]: A, [WS_ENV]: B } })).toThrow(
+      `Set ${ORG_ENV} or ${WS_ENV}, not both.`
+    );
   });
 
   it('an empty flag is a usage error, never a silent fall-through', () => {
-    expect(() => pick({ flag: '   ', env: { [WS_ENV]: B } })).toThrow(/--workspace needs/);
-  });
-
-  it('an empty environment variable is an unset one and falls through to the profile', () => {
-    expect(pick({ env: { [WS_ENV]: '' }, profile, profileName: 'work' })?.source).toBe('profile');
-    expect(pick({ env: { [WS_ENV]: '  ' } })).toBeUndefined();
-  });
-
-  it('the profile field counts only for the instance the profile names', () => {
-    expect(pick({ profile, profileName: 'work', baseUrl: 'https://other.example.com' })).toBeUndefined();
-    // A trailing slash is the same instance.
-    expect(pick({ profile: { baseUrl: `${URL}/`, activeWorkspaceId: C }, profileName: 'work' })?.value).toBe(
-      C
+    expect(() => pick({ workspaceFlag: '   ', env: { [WS_ENV]: B } })).toThrow(/--workspace needs/);
+    expect(() => pick({ orgFlag: '  ', env: { [ORG_ENV]: B } })).toThrow(
+      '--org needs an organization id or name.'
     );
-    // A profile with no instance of its own selects nothing.
-    expect(pick({ profile: { activeWorkspaceId: C }, profileName: 'work' })).toBeUndefined();
   });
 
-  it('a profile field that is not a usable string selects nothing', () => {
-    const bad = { baseUrl: URL, activeWorkspaceId: 42 as unknown as string };
-    expect(pick({ profile: bad, profileName: 'work' })).toBeUndefined();
-    expect(pick({ profile: { baseUrl: URL, activeWorkspaceId: ' ' }, profileName: 'work' })).toBeUndefined();
+  it('an empty environment variable is an unset one and falls through', () => {
+    expect(pick({ env: { [WS_ENV]: '' } })).toBeUndefined();
+    expect(pick({ env: { [WS_ENV]: '  ' } })).toBeUndefined();
+    expect(pick({ env: { [ORG_ENV]: ' ', [WS_ENV]: B } })).toEqual({
+      value: B,
+      source: 'env',
+      kind: 'workspace'
+    });
+    expect(pick({ env: { [ORG_ENV]: B, [WS_ENV]: '' } })).toEqual({ value: B, source: 'env', kind: 'org' });
   });
 });
 
@@ -164,6 +174,44 @@ describe('matching a value against the memberships', () => {
     expect(findWorkspace(list, 'nope')).toEqual({ match: null, ambiguous: [] });
   });
 
+  it('a hub organization id matches the row that projects it, without regard to case', () => {
+    const O = '99999999-9999-4999-8999-999999999999';
+    const withOrg = [ws(A, 'Acme', { centralAccountId: O }), ws(B, 'Beta')];
+    expect(findWorkspace(withOrg, O).match?.id).toBe(A);
+    expect(findWorkspace(withOrg, O.toUpperCase()).match?.id).toBe(A);
+  });
+
+  it('the workspace id wins over a row carrying that id as its organization id', () => {
+    const tricky = [ws(A, 'First', { centralAccountId: B }), ws(B, 'Second')];
+    expect(findWorkspace(tricky, B).match?.name).toBe('Second');
+  });
+
+  it('the organization id wins over a row carrying it as its name', () => {
+    const O = '99999999-9999-4999-8999-999999999999';
+    const tricky = [ws(A, O), ws(B, 'Real', { centralAccountId: O })];
+    expect(findWorkspace(tricky, O).match?.name).toBe('Real');
+  });
+
+  it('a row from an older server, with no organization id, still matches by id and name', () => {
+    const older = { ...ws(A, 'Acme') } as Partial<MeWorkspace>;
+    delete older.centralAccountId;
+    expect(findWorkspace([older as MeWorkspace], 'acme').match?.id).toBe(A);
+    expect(findWorkspace([older as MeWorkspace], A).match?.id).toBe(A);
+  });
+
+  it('the candidate lines name the organization of a row that has one', () => {
+    const O = '99999999-9999-4999-8999-999999999999';
+    let message = '';
+    try {
+      matchWorkspace([ws(A, 'Acme', { centralAccountId: O }), ws(B, 'Beta')], 'Nowhere');
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain(`${A}  member  Acme  (organization ${O})`);
+    expect(message).toContain(`${B}  member  Beta\n`.trimEnd());
+    expect(message).not.toContain(`Beta  (organization`);
+  });
+
   it('only the server selector shape is an id', () => {
     expect(isWorkspaceId(A)).toBe(true);
     expect(isWorkspaceId(A.toUpperCase())).toBe(true);
@@ -174,12 +222,16 @@ describe('matching a value against the memberships', () => {
 });
 
 describe('the words for a source', () => {
-  it('names the flag, the variable, the profile and the default', () => {
-    expect(describeSelection({ source: 'flag' })).toBe('the --workspace flag');
-    expect(describeSelection({ source: 'env' })).toBe(WS_ENV);
-    expect(describeSelection({ source: 'profile', profileName: 'work' })).toBe('profile "work"');
-    expect(describeSource('default', undefined)).toContain("the server's default");
-    expect(describeSource('profile', 'work')).toBe('profile "work"');
+  it('names each flag, each variable and the default', () => {
+    expect(describeSelection({ source: 'flag', kind: 'org' })).toBe('the --org flag');
+    expect(describeSelection({ source: 'flag', kind: 'workspace' })).toBe('the --workspace flag');
+    expect(describeSelection({ source: 'env', kind: 'org' })).toBe(ORG_ENV);
+    expect(describeSelection({ source: 'env', kind: 'workspace' })).toBe(WS_ENV);
+    expect(describeSource('default', undefined)).toBe("the server's default (nothing selected)");
+    expect(describeSource('default', 'org')).toBe("the server's default (nothing selected)");
+    expect(describeSource('flag', undefined)).toBe("the server's default (nothing selected)");
+    expect(describeSource('flag', 'org')).toBe('the --org flag');
+    expect(describeSource('env', 'workspace')).toBe(WS_ENV);
   });
 });
 
@@ -195,7 +247,7 @@ describe('explaining a refusal the selection caused', () => {
     const text = explainRefusal({
       code: 'workspace_mismatch',
       status: 403,
-      selection: { value: 'atelier nord', source: 'flag' },
+      selection: { value: 'atelier nord', source: 'flag', kind: 'workspace' },
       workspaceId: B,
       me,
       baseUrl: URL
@@ -204,31 +256,72 @@ describe('explaining a refusal the selection caused', () => {
     expect(text).toContain(`the --workspace flag selects "Atelier Nord" (${B})`);
   });
 
-  it('401 on a workspace that is not yours says the key works, lists yours, and offers --clear for a profile', () => {
+  it('401 on a workspace that is not yours says the key works and lists yours', () => {
     const text = explainRefusal({
       code: 'invalid_api_key',
       status: 401,
-      selection: { value: C, source: 'profile', profileName: 'work' },
+      selection: { value: C, source: 'env', kind: 'workspace' },
       workspaceId: C,
       me,
       baseUrl: URL
     });
-    expect(text).toContain(`The workspace "${C}" (selected by profile "work") is not one of yours on ${URL}`);
-    expect(text).toContain('the API key itself works');
-    expect(text).toContain(`${B}  member  Atelier Nord`);
-    expect(text).toContain(`${bin} workspace use --clear`);
+    expect(text).toBe(
+      `The workspace "${C}" (selected by ${WS_ENV}) is not one of yours on ${URL}; the API key itself works. ` +
+        `Yours:\n  ${A}  member  Acme\n  ${B}  member  Atelier Nord`
+    );
+    expect(text).not.toContain('--clear');
+    expect(text).not.toContain(`${bin} workspace use`);
   });
 
-  it('the --clear advice is for a profile selection only', () => {
+  it('401 on an organization that is not yours says organization, and names the --org flag', () => {
     const text = explainRefusal({
       code: 'invalid_api_key',
       status: 401,
-      selection: { value: C, source: 'env' },
+      selection: { value: 'Nowhere', source: 'flag', kind: 'org' },
       workspaceId: C,
       me,
       baseUrl: URL
     });
-    expect(text).not.toContain('--clear');
+    expect(text).toBe(
+      `The organization "Nowhere" (selected by the --org flag) is not one of yours on ${URL}; the API key itself works. ` +
+        `Yours:\n  ${A}  member  Acme\n  ${B}  member  Atelier Nord`
+    );
+  });
+
+  it('403 workspace_mismatch finds the selected row by its organization id too', () => {
+    const O = '99999999-9999-4999-8999-999999999999';
+    const withOrg = {
+      ...me,
+      workspaces: [ws(A, 'Acme', { default: true }), ws(B, 'Atelier Nord', { centralAccountId: O })]
+    } as unknown as MeResponse;
+    const text = explainRefusal({
+      code: 'workspace_mismatch',
+      status: 403,
+      selection: { value: O, source: 'flag', kind: 'org' },
+      workspaceId: O,
+      me: withOrg,
+      baseUrl: URL
+    });
+    expect(text).toContain(`pinned to the workspace "Acme" (${A})`);
+    expect(text).toContain(`the --org flag selects "Atelier Nord" (${B})`);
+  });
+
+  it('401 on an organization id that IS yours (by its hub id) is not explained away', () => {
+    const O = '99999999-9999-4999-8999-999999999999';
+    const withOrg = {
+      ...me,
+      workspaces: [ws(A, 'Acme'), ws(B, 'Atelier Nord', { centralAccountId: O })]
+    } as unknown as MeResponse;
+    expect(
+      explainRefusal({
+        code: 'invalid_api_key',
+        status: 401,
+        selection: { value: O, source: 'flag', kind: 'org' },
+        workspaceId: O,
+        me: withOrg,
+        baseUrl: URL
+      })
+    ).toBeNull();
   });
 
   it('401 on a workspace that IS yours is not explained away: the plain error stands', () => {
@@ -236,7 +329,7 @@ describe('explaining a refusal the selection caused', () => {
       explainRefusal({
         code: 'invalid_api_key',
         status: 401,
-        selection: { value: B, source: 'flag' },
+        selection: { value: B, source: 'flag', kind: 'workspace' },
         workspaceId: B,
         me,
         baseUrl: URL
@@ -249,7 +342,7 @@ describe('explaining a refusal the selection caused', () => {
       explainRefusal({
         code: 'workspace_mismatch',
         status: 500,
-        selection: { value: B, source: 'flag' },
+        selection: { value: B, source: 'flag', kind: 'workspace' },
         workspaceId: B,
         me,
         baseUrl: URL
@@ -262,11 +355,48 @@ describe('explaining a refusal the selection caused', () => {
       explainRefusal({
         code: 'forbidden',
         status: 403,
-        selection: { value: C, source: 'flag' },
+        selection: { value: C, source: 'flag', kind: 'workspace' },
         workspaceId: C,
         me,
         baseUrl: URL
       })
     ).toBeNull();
+  });
+});
+
+describe('the selection on the wire: a name is looked up, an id is sent as it is (verifier round 1, N3)', () => {
+  const ORG_OF_B = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+  const ROWS = [
+    wsRow(A, 'Acme', { default: true }),
+    wsRow(B, 'Beta', { hubOrigin: true, centralAccountId: ORG_OF_B })
+  ];
+
+  async function signedIn(): Promise<Record<string, string>> {
+    const env = await tempConfigEnv();
+    cli.saveConfig(env, {
+      activeProfile: 'inst',
+      profiles: { inst: { apiKey: key('work'), baseUrl: 'http://inst' } }
+    });
+    return env;
+  }
+
+  it.each([
+    ['--workspace <name>', ['--workspace', 'beta']],
+    ['--org <name>', ['--org', 'Beta']]
+  ] as const)('%s: one bare /me, then the LOCAL id as x-workspace-id', async (_label, args) => {
+    const h = routedHarness([meRoute(meBody({ workspaces: ROWS })), filesRoute], await signedIn());
+    expect(await run(['files', 'list', ...args], h.io)).toBe(0);
+    expect(h.wire.map((c) => `${c.method} ${c.path} ${c.workspace ?? '-'}`)).toEqual([
+      'GET /api/v1/me -',
+      `GET /api/v1/files ${B}`
+    ]);
+  });
+
+  it('--org <hub organization id>: sent as it is, no lookup (the server maps it)', async () => {
+    const h = routedHarness([meRoute(meBody({ workspaces: ROWS })), filesRoute], await signedIn());
+    expect(await run(['files', 'list', '--org', ORG_OF_B], h.io)).toBe(0);
+    expect(h.wire.map((c) => `${c.method} ${c.path} ${c.workspace ?? '-'}`)).toEqual([
+      `GET /api/v1/files ${ORG_OF_B}`
+    ]);
   });
 });

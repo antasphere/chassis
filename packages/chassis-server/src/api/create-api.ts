@@ -826,6 +826,9 @@ export function createApiApp<
         features: { mcp: true, oauth: true, files: true },
         // Present only while demo links sign people in here (the banner's cue).
         ...(demoSignIn ? { demoSignIn: true } : {}),
+        // Present only on a cloud instance whose operator restricted the tool
+        // (PRDCT-2947): organizations are opened by Antasphere, not created here.
+        ...(hub && env.TOOL_RESTRICTED ? { restricted: true } : {}),
         // What this version declares for the billing rail (§7): the hub seeds
         // from it, staff read it, a client reads the limit it is held to.
         entitlements: {
@@ -1000,6 +1003,7 @@ export function createApiApp<
   // refuses. Never throws into /me: a failed read answers false.
   const creationPolicy = workspaceCreationPolicy({
     maxPerUser: env.MAX_WORKSPACES_PER_USER,
+    restricted: env.TOOL_RESTRICTED,
     cloud: deps.workspaceCloud
   });
   const creationWall = { person: limiters.workspaceCreate, address: limiters.workspaceCreateAddress };
@@ -1162,13 +1166,15 @@ export function createApiApp<
       .innerJoin(workspaces, eq(workspaceMembers.workspaceId, workspaces.id))
       .where(and(eq(workspaceMembers.userId, principal.userId), eq(workspaceMembers.isActive, true)))
       .orderBy(desc(workspaceMembers.isDefault), asc(workspaceMembers.createdAt), asc(workspaceMembers.id));
-    // hubOrigin is the BOOLEAN projection flag (P7): the raw hub org id
-    // never leaves the instance — map explicitly, never spread the row.
+    // hubOrigin is the BOOLEAN projection flag (P7); the hub org id rides
+    // beside it since PRDCT-2947 (the person's own organization ids, which
+    // `--org <name>` resolves against). Map explicitly, never spread the row.
     const wireWorkspaces = memberships.map((m) => ({
       id: m.id,
       name: m.name,
       role: m.role,
       hubOrigin: m.centralAccountId !== null,
+      centralAccountId: m.centralAccountId,
       look: { theme: m.lookTheme, pattern: m.lookPattern, field: m.lookField, grain: m.lookGrain },
       suspended: m.hubStatus === 'suspended',
       default: m.isDefault
@@ -1229,8 +1235,10 @@ export function createApiApp<
     clientIp,
     wall: creationWall,
     maxPerUser: env.MAX_WORKSPACES_PER_USER,
+    restricted: env.TOOL_RESTRICTED,
     cloud: deps.workspaceCloud,
-    guestForbiddenMessage: tool.copy.guestForbidden
+    guestForbiddenMessage: tool.copy.guestForbidden,
+    displayName: tool.identity.displayName
   });
 
   // ── Platform modules ─────────────────────────────────────────────────────

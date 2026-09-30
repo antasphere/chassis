@@ -87,6 +87,15 @@ export function defineMeSchemas<TScope extends string>(scopeSchema: ScopeSchema<
         role: workspaceRoleSchema,
         /** Same semantics as `workspace.hubOrigin`, per listed workspace. */
         hubOrigin: z.boolean(),
+        /**
+         * The id of the hub organization this workspace projects (cloud
+         * edition), null on a local workspace and always on self-hosted. It
+         * is the person's own organization id, the one the account site
+         * shows them, and it is what `--org <hub org id or name>` resolves
+         * against: a request may name a workspace by this id in
+         * X-Workspace-Id as well as by `id` (PRDCT-2947).
+         */
+        centralAccountId: z.string().nullable(),
         /** Each workspace's look, so the switcher's tiles carry them (schemas/workspaces.ts). */
         look: workspaceLookSchema,
         /**

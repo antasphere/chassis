@@ -51,6 +51,14 @@ export const instanceInfoSchema = z.object({
    */
   demoSignIn: z.boolean().optional(),
   /**
+   * `true` when this cloud instance is a RESTRICTED tool (the operator's
+   * TOOL_RESTRICTED switch, PRDCT-2947): organizations that open it are
+   * granted by Antasphere, and `POST /workspaces` refuses here. A CLI reads
+   * it to say so before offering to create one. ABSENT otherwise, never
+   * false, so the self-hosted discovery bytes are unchanged.
+   */
+  restricted: z.boolean().optional(),
+  /**
    * What this version of the tool declares for the billing rail (its priced
    * actions with their default credits, its limits and features per tier):
    * the hub seeds its price book and its plan entitlements from it, staff

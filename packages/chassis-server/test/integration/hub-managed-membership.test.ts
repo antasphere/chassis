@@ -30,8 +30,9 @@ import * as sso from './sso-helpers.js';
  *    workspace (centralAccountId NULL) — the operator's own — unhindered:
  *    the boundary is the workspace's projection, never the edition alone;
  *  - /me carries the new adaptation signals (workspace.hubOrigin, per-entry
- *    hubOrigin, membership `origin`, hubManageUrl) without leaking the raw
- *    hub org id;
+ *    hubOrigin, membership `origin`, hubManageUrl), and since PRDCT-2947 the
+ *    hub org id rides on each `workspaces[]` row (`centralAccountId`, null on
+ *    a local workspace) so a CLI can resolve `--org` by name;
  *  - machine credentials: the fail-closed scope allowlist keeps every
  *    /members + /invitations shape unreachable to keys (403
  *    endpoint_not_allowed) — the P7 gate is a second wall behind it;
@@ -453,7 +454,7 @@ describe('the SAME mutations on a cloud-LOCAL workspace still work (the boundary
   });
 });
 
-describe('/me carries the adaptation signals (and never the raw hub org id)', () => {
+describe('/me carries the adaptation signals, the hub org id beside hubOrigin', () => {
   it('projected workspace: hubOrigin true, origin hub, hubManageUrl → the hub', async () => {
     const res = await app.app.request('/api/v1/me', { headers: asHubAdmin() });
     expect(res.status).toBe(200);
@@ -467,8 +468,13 @@ describe('/me carries the adaptation signals (and never the raw hub org id)', ()
     );
     expect(byId[projectedWorkspaceId]).toBe(true);
     expect(byId[operatorWorkspaceId]).toBe(false);
-    // The raw hub org id never crosses the wire.
-    expect(JSON.stringify(me)).not.toContain(ORG_A);
+    // The hub org id rides beside the flag (PRDCT-2947): the projection's row
+    // carries ORG_A, the local workspace's row carries null.
+    const rows = Object.fromEntries(
+      me.workspaces.map((w: { id: string; centralAccountId: string | null }) => [w.id, w])
+    );
+    expect(rows[projectedWorkspaceId].centralAccountId).toBe(ORG_A);
+    expect(rows[operatorWorkspaceId].centralAccountId).toBeNull();
   });
 
   it('local workspace, same session: hubOrigin false, origin local, hubManageUrl null', async () => {

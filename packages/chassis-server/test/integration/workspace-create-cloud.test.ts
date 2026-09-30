@@ -17,6 +17,10 @@ import * as sso from './sso-helpers.js';
  *  - `scripted` fakes the hub call AT THE FUNCTION BOUNDARY the route
  *    depends on (`BootOverrides.hubCreateOrg`), so every verdict maps to its
  *    code without needing a hub that can produce it.
+ *
+ * A third app, `restricted`, boots the same cloud env with TOOL_RESTRICTED
+ * (PRDCT-2947): organizations that open the tool are granted by Antasphere,
+ * so creation refuses here before any hub call.
  */
 
 const OPERATOR = { email: 'operator@wscloud.test', name: 'Op Cloud', password: 'op-cloud-password-1234' };
@@ -45,6 +49,7 @@ let container: StartedPostgreSqlContainer;
 let hub: FakeHub;
 let app: TestApp;
 let scripted: TestApp;
+let restricted: TestApp;
 let nextScripted: HubCreateOrgResult = { kind: 'inconclusive' };
 const scriptedCalls: Array<{ userId: string; name: string }> = [];
 
@@ -83,7 +88,12 @@ beforeAll(async () => {
       }
     }
   );
-  for (const target of [app, scripted]) {
+  restricted = await createTestApp(
+    await createDatabase(container, 'ws_create_cloud_restricted'),
+    { ...CLOUD_ENV(hub), TOOL_RESTRICTED: 'true' },
+    { hubDials: DIALS }
+  );
+  for (const target of [app, scripted, restricted]) {
     const res = await target.app.request(
       '/api/v1/setup',
       sso.json({ setupToken: 'integration-test-setup-token', instanceName: 'Cloud', owner: OPERATOR })
@@ -93,7 +103,7 @@ beforeAll(async () => {
 }, 300_000);
 
 afterAll(async () => {
-  await Promise.all([app?.stop(), scripted?.stop()]);
+  await Promise.all([app?.stop(), scripted?.stop(), restricted?.stop()]);
   await Promise.all([container?.stop(), hub?.stop()]);
 });
 
@@ -480,5 +490,34 @@ describe('cloud: the hub call faked at the function boundary', () => {
     const res = await create(scripted, cookie, 'Roleless');
     expect(res.status).toBe(403);
     expect((await readJson(res)).error.code).toBe('hub_unavailable');
+  });
+});
+
+describe('cloud: a restricted tool (TOOL_RESTRICTED)', () => {
+  let cookie = '';
+
+  it('discovery says restricted: true on the restricted instance, and carries no key at all otherwise', async () => {
+    const onRestricted = await readJson(await restricted.app.request('/api/v1/instance'));
+    expect(onRestricted.restricted).toBe(true);
+    const onPlain = await readJson(await app.app.request('/api/v1/instance'));
+    expect('restricted' in onPlain).toBe(false);
+  });
+
+  it('/me.canCreateWorkspace is false for a hub-linked person', async () => {
+    cookie = await sso.ssoLogin(restricted, hub, ada);
+    expect((await me(restricted, cookie)).canCreateWorkspace).toBe(false);
+  });
+
+  it('POST /workspaces answers 403 restricted_tool naming the tool, and never calls the hub', async () => {
+    const res = await create(restricted, cookie, 'Not here');
+    expect(res.status).toBe(403);
+    const body = await readJson(res);
+    expect(body.error.code).toBe('restricted_tool');
+    expect(body.error.message).toBe(
+      `Organizations that open ${host.identity.displayName} are granted by Antasphere; ask Antasphere to open it for yours`
+    );
+    expect(hub.orgCreateRequests).toHaveLength(0);
+    const { rows } = await restricted.db.pool.query(`SELECT 1 FROM workspaces WHERE name = 'Not here'`);
+    expect(rows).toHaveLength(0);
   });
 });

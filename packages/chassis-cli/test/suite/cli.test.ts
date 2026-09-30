@@ -54,6 +54,19 @@ const INSTANCE = {
 const ME = {
   user: { id: 'u1', name: 'Ada', email: 'ada@x.co' },
   workspace: { id: 'w1', name: 'Acme' },
+  workspaces: [
+    {
+      id: 'w1',
+      name: 'Acme',
+      role: 'owner',
+      hubOrigin: false,
+      centralAccountId: null,
+      look: { theme: null, pattern: null, field: null, grain: null },
+      suspended: false,
+      default: true
+    }
+  ],
+  activeWorkspaceId: 'w1',
   role: 'owner',
   via: 'api_key',
   scopes: ['items:read']

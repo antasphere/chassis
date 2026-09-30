@@ -64,11 +64,19 @@ export type WorkspaceCreationRefusal =
   | 'workspace_creation_disabled'
   | 'guest_forbidden'
   | 'workspace_limit_reached'
-  | 'hub_link_required';
+  | 'hub_link_required'
+  | 'restricted_tool';
 
 export interface WorkspaceCreationPolicy {
   /** `MAX_WORKSPACES_PER_USER`. 0 closes creation for everyone, on both editions. */
   maxPerUser: number;
+  /**
+   * `TOOL_RESTRICTED` (PRDCT-2947): on cloud, organizations that open this
+   * tool are granted by Antasphere, so nobody creates one from here. Judged
+   * only where `hasHubLink` is set (the cloud edition); inert on self-hosted,
+   * where a workspace is local and the switch means nothing.
+   */
+  restricted?: boolean | undefined;
   /**
    * Cloud only: whether the user holds a LIVE hub link (a stored grant) —
    * the organization is created at the hub AS THEM, so without one there is
@@ -90,7 +98,8 @@ export interface WorkspaceCreationPolicy {
  *    workspace-level act. One non-guest active membership anywhere lifts it
  *    — it is a fact about the PERSON, not about the workspace they are in;
  *  - oss: fewer ACTIVE OWNER memberships than the cap (setup's counts);
- *  - cloud: a live hub link. The count is the hub's own cap, asked there.
+ *  - cloud: the tool not restricted (TOOL_RESTRICTED), then a live hub link.
+ *    The count is the hub's own cap, asked there.
  */
 export async function workspaceCreationRefusal(
   conn: DbConn,
@@ -105,19 +114,34 @@ export async function workspaceCreationRefusal(
     .where(and(eq(workspaceMembers.userId, caller.userId), eq(workspaceMembers.isActive, true)));
   if (rows.length > 0 && rows.every((r) => r.origin === 'guest')) return 'guest_forbidden';
   if (policy.hasHubLink) {
+    if (policy.restricted) return 'restricted_tool';
     return (await policy.hasHubLink(caller.userId)) ? null : 'hub_link_required';
   }
   const owned = rows.filter((r) => r.role === 'owner').length;
   return owned >= policy.maxPerUser ? 'workspace_limit_reached' : null;
 }
 
-/** Every refusal but `guest_forbidden`, whose sentence is the tool's (`WorkspaceRouteDeps.guestForbiddenMessage`). */
-const CHASSIS_REFUSAL_MESSAGES: Record<Exclude<WorkspaceCreationRefusal, 'guest_forbidden'>, string> = {
+/**
+ * Every refusal but `guest_forbidden`, whose sentence is the tool's
+ * (`WorkspaceRouteDeps.guestForbiddenMessage`), and `restricted_tool`, whose
+ * sentence names the tool (`restrictedToolMessage`).
+ */
+const CHASSIS_REFUSAL_MESSAGES: Record<
+  Exclude<WorkspaceCreationRefusal, 'guest_forbidden' | 'restricted_tool'>,
+  string
+> = {
   session_required: 'Creating a workspace requires a browser session',
   workspace_creation_disabled: 'Workspace creation is closed on this instance',
   workspace_limit_reached: 'This account already owns the maximum number of workspaces',
   hub_link_required: 'Sign in with Antasphere to create an organization'
 };
+
+/**
+ * The restricted tool's refusal (PRDCT-2947), tool-neutral through the
+ * identity: who opens an organization to the tool, and whom to ask.
+ */
+export const restrictedToolMessage = (displayName: string): string =>
+  `Organizations that open ${displayName} are granted by Antasphere; ask Antasphere to open it for yours`;
 
 /**
  * The creation rate wall. Two buckets, spent IN THE HANDLER once the caller
@@ -215,15 +239,19 @@ export interface WorkspaceRouteDeps {
   clientIp: ClientIpFn;
   wall: WorkspaceCreateWall;
   maxPerUser: number;
+  /** `TOOL_RESTRICTED` (see `WorkspaceCreationPolicy.restricted`). */
+  restricted: boolean;
   cloud?: WorkspaceCloudDeps | undefined;
   /** The tool's `guest_forbidden` sentence (`copy.guestForbidden`), the same one the route guard answers with. */
   guestForbiddenMessage: string;
+  /** The tool's name in the restricted refusal (`identity.displayName`). */
+  displayName: string;
 }
 
 export function workspaceCreationPolicy(
-  deps: Pick<WorkspaceRouteDeps, 'maxPerUser' | 'cloud'>
+  deps: Pick<WorkspaceRouteDeps, 'maxPerUser' | 'restricted' | 'cloud'>
 ): WorkspaceCreationPolicy {
-  return { maxPerUser: deps.maxPerUser, hasHubLink: deps.cloud?.hasHubLink };
+  return { maxPerUser: deps.maxPerUser, restricted: deps.restricted, hasHubLink: deps.cloud?.hasHubLink };
 }
 
 export function registerWorkspaceRoutes(api: OpenAPIHono, deps: WorkspaceRouteDeps): void {
@@ -231,7 +259,8 @@ export function registerWorkspaceRoutes(api: OpenAPIHono, deps: WorkspaceRouteDe
   const policy = workspaceCreationPolicy(deps);
   const REFUSAL_MESSAGES: Record<WorkspaceCreationRefusal, string> = {
     ...CHASSIS_REFUSAL_MESSAGES,
-    guest_forbidden: deps.guestForbiddenMessage
+    guest_forbidden: deps.guestForbiddenMessage,
+    restricted_tool: restrictedToolMessage(deps.displayName)
   };
 
   api.openapi(workspaceCreateRoute, async (c) => {

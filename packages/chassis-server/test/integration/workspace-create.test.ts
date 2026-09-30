@@ -471,3 +471,40 @@ describe('the creation rate wall counts identified POSTs only, per person first,
     expect(left).toBe(57);
   }, 120_000);
 });
+
+describe('TOOL_RESTRICTED does nothing on the self-hosted edition', () => {
+  // PRDCT-2947: the switch is the cloud's (organizations granted by
+  // Antasphere); a self-hosted workspace is local, so creation stays open
+  // and discovery carries no `restricted` key.
+  let oss: TestApp;
+  let cookie = '';
+
+  beforeAll(async () => {
+    oss = await createTestApp(await createDatabase(container, 'ws_create_restricted_oss'), {
+      TOOL_RESTRICTED: 'true'
+    });
+    const setup = await oss.app.request(
+      '/api/v1/setup',
+      post({ setupToken: 'integration-test-setup-token', instanceName: 'Restricted OSS', owner: OWNER })
+    );
+    expect(setup.status).toBe(201);
+    cookie = await signIn(oss, OWNER.email, OWNER.password);
+  }, 240_000);
+
+  afterAll(async () => {
+    await oss?.stop();
+  });
+
+  it('/me.canCreateWorkspace stays true, POST /workspaces answers 201, /instance carries no restricted key', async () => {
+    const meRes = await oss.app.request('/api/v1/me', { headers: { cookie } });
+    expect(meRes.status).toBe(200);
+    expect((await readJson(meRes)).canCreateWorkspace).toBe(true);
+
+    const res = await oss.app.request('/api/v1/workspaces', post({ name: 'Still open' }, { cookie }));
+    expect(res.status).toBe(201);
+    expect((await readJson(res)).workspace.name).toBe('Still open');
+
+    const info = await readJson(await oss.app.request('/api/v1/instance'));
+    expect('restricted' in info).toBe(false);
+  });
+});

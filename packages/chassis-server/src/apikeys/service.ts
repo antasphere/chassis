@@ -186,9 +186,16 @@ export class ApiKeyService {
     if (!member) return null;
     // A valid PINNED key + a header naming another workspace: reject loudly
     // (the pre-model-change contract). Checked after the membership resolves
-    // so a dead key/membership stays the uniform 401, exactly as before.
-    if (row.workspaceId && requested && requested.toLowerCase() !== row.workspaceId.toLowerCase()) {
-      throw new WorkspaceMismatchError();
+    // so a dead key/membership stays the uniform 401, exactly as before. The
+    // header may name the pinned workspace by its LOCAL id or by the id of
+    // the hub organization it projects (the resolved row's accountRef,
+    // PRDCT-2947): both are the same workspace, neither is a mismatch.
+    if (row.workspaceId && requested) {
+      const named = requested.toLowerCase();
+      const isPin =
+        named === row.workspaceId.toLowerCase() ||
+        (member.accountRef !== null && named === member.accountRef.toLowerCase());
+      if (!isPin) throw new WorkspaceMismatchError();
     }
 
     // Advisory only — never correctness-load-bearing (statelessness invariant).

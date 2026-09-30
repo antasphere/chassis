@@ -1,5 +1,5 @@
 import { Command, CommanderError } from 'commander';
-import { CliAuthError } from '@antasphere/cli-core';
+import { CliAuthError, CliConnectError } from '@antasphere/cli-core';
 import { PlatformApiError, type ChassisClient } from '@antasphere/chassis-sdk';
 import { CliApiRefusal, CliUsageError, setStdinApiKey, ttySafeIo, type CliIo } from './context.js';
 import type { Cli, CliDefinition, CliKit, RegisterTool } from './kit.js';
@@ -35,7 +35,10 @@ export function createProgram<TClient extends ChassisClient<string>>(
       .name(identity.bin)
       .description(description)
       .version(version)
-      .option('--api-url <url>', `instance base URL (or ${identity.envPrefix}_URL / profile baseUrl)`)
+      .option(
+        '--api-url <url>',
+        `instance base URL (or ${identity.envPrefix}_URL / the profile's; default: the cloud, ${identity.cloudUrl})`
+      )
       .option('--url <url>', 'alias of --api-url')
       .option('--api-key <key>', `API key (or ${identity.envPrefix}_API_KEY / profile apiKey)`)
       .option(
@@ -43,17 +46,21 @@ export function createProgram<TClient extends ChassisClient<string>>(
         'read the API key from the first line of stdin (keeps it out of argv)',
         false
       )
-      .option('--profile <name>', 'use this saved profile instead of the active one')
+      .option('--profile <name>', 'use this saved profile (an instance) instead of the active one')
+      .option(
+        '--org <id-or-name>',
+        `run in this Antasphere organization, by its id or name (or ${identity.envPrefix}_ORG; default: your default organization)`
+      )
       .option(
         '--workspace <id-or-name>',
-        `run in this workspace (or ${identity.envPrefix}_WORKSPACE / profile activeWorkspaceId; default: the server's)`
+        `run in this workspace of the instance, by its id or name (or ${identity.envPrefix}_WORKSPACE; default: the server's)`
       )
       .option('--json', 'machine-readable JSON output', false);
 
-    // Identity + profiles: auth login-request/login-complete, login, logout,
-    // whoami, verify, use, profiles, config show/clear.
+    // Identity + profiles: login, logout, whoami, verify, use, profiles,
+    // config show/clear.
     registerAuthCommands(kit, program, io);
-    // Which workspace the commands run in: workspaces, workspace use.
+    // Which workspace the commands run in: workspaces, workspace default.
     registerWorkspaceCommands(kit, program, io);
     // The subgroups of the workspace: projects *, projects members *.
     registerProjectCommands(kit, program, io);
@@ -110,6 +117,13 @@ export function createProgram<TClient extends ChassisClient<string>>(
         // --help / --version and usage errors already wrote their output.
         return e.exitCode;
       }
+      if (e instanceof CliConnectError && e.refusal) {
+        // The hub (or the instance's connect door) refused the PERSON, not
+        // the credential: the server's own sentence, as it is, and exit 3,
+        // the code the docs promise for a refusal. No hint: no key fixes it.
+        io.err.write(`Error: ${e.message}\n`);
+        return e.exitCode;
+      }
       if (e instanceof PlatformApiError || e instanceof CliAuthError) {
         // A refusal the workspace SELECTION caused reads as a bad key (401) or
         // a forbidden one (403) on the wire; say what it really was.
@@ -154,10 +168,11 @@ export function createProgram<TClient extends ChassisClient<string>>(
       }
       if (e instanceof CliUsageError) {
         // A refusal a command already worded keeps the one thing the command
-        // cannot know: the workspace a 404 was asked of.
+        // cannot know: the workspace a 404 was asked of. The thrower says the
+        // exit code (cli-core: 1 a usage or wire error, 3 a refusal).
         const hint = e instanceof CliApiRefusal && e.status === 404 ? workspaceNotFoundHint(io) : '';
         io.err.write(`Error: ${e.message}${hint}\n`);
-        return 1;
+        return e.exitCode;
       }
       io.err.write(`Error: ${e instanceof Error ? e.message : String(e)}\n`);
       return 1;

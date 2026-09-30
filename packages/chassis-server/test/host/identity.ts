@@ -15,6 +15,7 @@ export const THINGS_IDENTITY = {
   apiKeyPrefix: 'thg',
   scopes: { read: 'things:read', write: 'things:write', dataExport: 'things:export' },
   cliKeyScopesLabel: 'things:read+write',
+  cloud: { url: 'https://things.antasphere.test' },
   cli: { bin: 'things', envPrefix: 'THINGS', legacyConfigDir: 'things' },
   mcp: { serverName: 'things', toolPrefix: 'things_' },
   otelServiceName: 'things',

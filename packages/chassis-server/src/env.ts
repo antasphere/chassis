@@ -196,6 +196,8 @@ const chassisEnvShape = (version: string) => ({
   HUB_HINT_COOKIE_NAME: optionalString(z.string().min(1)),
   /** Domain the hint cookie lives on (the hub sets it, tools clear it — both sides must agree). Cloud-only; unset = the hub issuer host minus its first label (account.antasphere.com → antasphere.com). Never read when EDITION=oss. */
   HUB_HINT_COOKIE_DOMAIN: optionalString(z.string().min(1)),
+  /** The restricted bit on the tool itself (PRDCT-2947): `true` on the cloud edition makes this instance refuse to create an organization (`POST /workspaces` answers 403 `restricted_tool`, `/me.canCreateWorkspace` is false) and advertise `restricted: true` in discovery, so a tool that Antasphere opens to organizations one by one does not rest on the hub registry's flag alone. No effect on the self-hosted edition, where workspaces are local. */
+  TOOL_RESTRICTED: booleanish.default(false),
   /** R7 escape hatch (internal/federation.md): acknowledge an EDITION change on an already-set-up instance. Without it, boot refuses an EDITION that differs from the one stamped at setup — flipping editions under existing users/workspaces changes identity semantics and must be a conscious operator act. */
   EDITION_CHANGE_ALLOWED: booleanish.default(false),
   /** Reported version. Defaults to the code's own baked-in package version (PRDCT-1844) — the image knows its version intrinsically, CI injects nothing. The env var remains as a deliberate operator override only. */

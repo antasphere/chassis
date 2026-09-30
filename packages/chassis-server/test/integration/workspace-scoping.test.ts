@@ -103,6 +103,7 @@ describe('session resolution (X-Workspace-Id)', () => {
       name: 'Second Workspace',
       role: 'owner',
       hubOrigin: false,
+      centralAccountId: null,
       look: { theme: null, pattern: null, field: null, grain: null },
       suspended: false,
       default: false
@@ -137,6 +138,19 @@ describe('session resolution (X-Workspace-Id)', () => {
     const plain = await readJson(await me(bobCookie));
     expect(plain.activeWorkspaceId).toBe(w2);
     expect(plain.workspaces).toHaveLength(1);
+  });
+
+  it('a well-formed uuid that is no workspace id answers 401 exactly as before (the hub-org arm is inert on self-hosted, PRDCT-2947)', async () => {
+    // The selector also matches a workspace by the hub organization it
+    // projects (central_account_id), a column that is always NULL here: a
+    // uuid naming nothing is the same fail-closed 401 as an unknown id.
+    const res = await me(ownerCookie, '11111111-2222-4333-8444-555555555555');
+    expect(res.status).toBe(401);
+    const phantom = await me(ownerCookie, '00000000-0000-4000-8000-000000000000');
+    expect(phantom.status).toBe(401);
+    expect(await res.text()).toBe(await phantom.text());
+    // And the real ids still resolve, so the 401 is the selector's and not the session's.
+    expect((await readJson(await me(ownerCookie, w2))).activeWorkspaceId).toBe(w2);
   });
 });
 

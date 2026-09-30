@@ -21,6 +21,12 @@ export interface CliIdentity {
   keyPrefix: string;
   /** The scope a key needs for the full-workspace export, as `export --help` names it. */
   exportScope: string;
+  /**
+   * The tool's cloud home (`identity.cloud.url`): the last step of the URL
+   * resolution and the instance of the implicit `cloud` profile, so a clean
+   * machine with an `antasphere login` needs no flag (PRDCT-2947).
+   */
+  cloudUrl: string;
 }
 
 /**
@@ -36,6 +42,7 @@ export function cliIdentity(identity: ToolIdentity): CliIdentity {
     displayName: identity.displayName,
     envPrefix: identity.cli.envPrefix,
     keyPrefix: identity.apiKeyPrefix,
-    exportScope: identity.scopes.dataExport
+    exportScope: identity.scopes.dataExport,
+    cloudUrl: identity.cloud.url
   };
 }

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, or, sql } from 'drizzle-orm';
 import { user as userTable, workspaceMembers, workspaces, type Db } from '@antasphere/chassis-db';
 
 /**
@@ -10,7 +10,12 @@ import { user as userTable, workspaceMembers, workspaces, type Db } from '@antas
  *  - `requested` non-null (the X-Workspace-Id header, or an API key's pin):
  *    an ACTIVE membership of that workspace is required, else null — fail
  *    closed, so an unknown workspace and a workspace the user does not
- *    belong to are indistinguishable (no oracle).
+ *    belong to are indistinguishable (no oracle). The selector is the
+ *    workspace's LOCAL id, or (PRDCT-2947) the id of the hub organization
+ *    it projects (`workspaces.central_account_id`): a person names the
+ *    organization the hub's way (`--org <hub org id>`) and the tool maps
+ *    it here, in the one rule, so no credential path can fork on it. On
+ *    self-hosted the column is always empty and the second arm is inert.
  *  - `requested` null: the user's DEFAULT membership (`is_default`, at most
  *    one per user), else the deterministic fallback — the OLDEST active
  *    membership (created_at, then id). While no row carries `is_default`
@@ -78,7 +83,16 @@ export async function resolveMembership(
       and(
         eq(workspaceMembers.userId, userId),
         eq(workspaceMembers.isActive, true),
-        ...(requested ? [eq(workspaceMembers.workspaceId, requested)] : [])
+        ...(requested
+          ? [
+              or(
+                eq(workspaceMembers.workspaceId, requested),
+                // Case-blind like the uuid arm and the pin check (verifier
+                // round 1, F6): the column is text, the selector a uuid.
+                sql`lower(${workspaces.centralAccountId}) = lower(${requested})`
+              )
+            ]
+          : [])
       )
     )
     // Selector-less default: the default membership first, then the

@@ -20,6 +20,14 @@ export interface ToolIdentity<TScope extends string = string> {
   scopes: { read: TScope; write: TScope; dataExport: TScope };
   /** How the OpenAPI document names the CLI key's grant (`things:read+write`). A literal: a contraction, not a join. */
   cliKeyScopesLabel: string;
+  /**
+   * The tool's cloud home (PRDCT-2947): the instance Antasphere operates
+   * (`https://acme.antasphere.com`). The CLI resolves its URL there last
+   * (flag → env → profile → this), so `antasphere login` then `acme list`
+   * works on a clean machine; the implicit `cloud` profile lives at it. A
+   * self-hosted instance is named once, as a profile named for its host.
+   */
+  cloud: { url: string };
   cli: {
     /** The binary's name (`acme`). Must equal the `bin` key of the CLI's package.json. */
     bin: string;

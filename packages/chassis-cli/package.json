@@ -27,7 +27,7 @@
   "dependencies": {
     "@antasphere/chassis-contract": "workspace:*",
     "@antasphere/chassis-sdk": "workspace:*",
-    "@antasphere/cli-core": "^0.4.0",
+    "@antasphere/cli-core": "^0.5.0",
     "commander": "^12.1.0"
   },
   "devDependencies": {

@@ -28,7 +28,8 @@ export {
   ttySafeIo,
   type CliContext,
   type CliContextKit,
-  type CliIo
+  type CliIo,
+  type CredentialSource
 } from './context.js';
 export {
   findWorkspace,
@@ -38,6 +39,7 @@ export {
   type CliWorkspace,
   type MeResponse,
   type MeWorkspace,
+  type SelectionKind,
   type WorkspaceSelection,
   type WorkspaceSource
 } from './workspace.js';
