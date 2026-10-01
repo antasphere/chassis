@@ -131,7 +131,8 @@ export async function createRateLimiters<TBucket extends string = never>(
     cliConnect: make('cli-connect', Math.max(1, env.CLI_CONNECT_IP_LIMIT_PER_15_MIN ?? 300), 15 * 60),
     oauthRegister: make('oauth-dcr', 10, 60 * 60),
     oauthToken: make('oauth-token', 60, 60),
-    mcp: make('mcp', 120, 60),
+    // Per ADDRESS: an event's teams' agents share one venue address (2026-10-01: ten times 120).
+    mcp: make('mcp', 1200, 60),
     passwordReset: make('pw-reset', 5, 10 * 60),
     workspaceExport: make('ws-export', 5, 600),
     breakGlass: make('break-glass', 10, 60 * 60),

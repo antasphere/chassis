@@ -85,9 +85,9 @@ describe('/mcp rate-limit wall', () => {
     const first = await flood();
     expect(first.status).toBe(401);
 
-    // The mcp bucket is 120/min; hammer past it and assert a 429 appears.
+    // The mcp bucket is 1200/min (sized for an event's room); hammer past it and assert a 429 appears.
     let sawRateLimit = false;
-    for (let i = 0; i < 200 && !sawRateLimit; i++) {
+    for (let i = 0; i < 1300 && !sawRateLimit; i++) {
       const r = await flood();
       if (r.status === 429) sawRateLimit = true;
       else expect(r.status).toBe(401);

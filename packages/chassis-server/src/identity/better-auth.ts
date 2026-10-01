@@ -1082,6 +1082,19 @@ export function createAuth({
     advanced: {
       useSecureCookies: isHttps
     },
+    // The library's own limiter, on in production, keyed per client ADDRESS. Its defaults
+    // (100 requests per 10 s per path, and 3 per 10 s on every /sign-in/*) let a room behind one
+    // venue address sign in at about 18 people a minute and share one session-check budget
+    // (proven on the cloud instances, 2026-10-01: the fourth sign-in start in 10 s answered 429).
+    // Sized for an event: the general budget at ten times the default, the SSO start at 500.
+    // The per-person walls (login, otp, the API quota) stay what they are.
+    rateLimit: {
+      window: 10,
+      max: 1000,
+      customRules: {
+        '/sign-in/oauth2': { window: 10, max: 500 }
+      }
+    },
     // Trust the serving origin (works on localhost, previews, any domain)
     // plus the configured public origin behind a TLS-terminating proxy.
     // Serving origin + public origin, never the viewer origin (see trustedOriginsFor).
