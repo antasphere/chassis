@@ -9,6 +9,7 @@ import type { Logger } from '../logger.js';
 import type { Auth } from '../identity/better-auth.js';
 import type { AuditService } from '../audit/service.js';
 import { parseSuperadminEmails } from '../accounts/superadmin.js';
+import { PGBOSS_SCHEMA, PgBossTimers, type TimerJob, type Timers } from './timers.js';
 
 /**
  * pg-boss job runtime. Queue creation and worker registration follow
@@ -54,14 +55,21 @@ export const ORPHAN_USER_PURGE_QUEUE = 'orphan-user-purge';
  *
  * `schedule.enabled === false` UNSCHEDULES: the queue still exists, so the
  * schedule can be flipped later (the audit-purge pattern). A job with no
- * `schedule` is a queue and a poller only. The handler resolves whatever
+ * `schedule` is a queue and a poller only: the queue a ONE-OFF TIMER rides
+ * (`Timers.schedule`, `./timers.ts`), whose handler receives the payload the
+ * timer was scheduled with and the job's id and key. A run the cron fires
+ * carries no payload: `data` is null there. The handler resolves whatever
  * domain service it needs LAZILY, at run time: the jobs are created before
  * the services that need the storage driver.
+ *
+ * `handler` is a method signature on purpose: a `JobDeclaration<MyPayload>`
+ * then sits in the slot's `JobDeclaration[]` without a cast, and a handler
+ * that takes no arguments (every cron before the timers) still fits.
  */
-export interface JobDeclaration {
+export interface JobDeclaration<TData extends object = object> {
   queue: string;
   schedule?: { cron: string; enabled?: boolean };
-  handler: () => Promise<void>;
+  handler(data: TData | null, job: TimerJob): Promise<void>;
 }
 
 /**
@@ -107,6 +115,8 @@ async function withInstallLock(
 
 export interface Jobs {
   boss: PgBoss;
+  /** One-off timers on the tool's declared queues (`./timers.ts`). */
+  timers: Timers;
   stop: () => Promise<void>;
   /** The counters boot registers on the app's /metrics registry. */
   promMetrics: Counter<string>[];
@@ -122,6 +132,8 @@ export async function createJobs(
     | 'SUPERADMIN_EMAILS'
   >,
   db: Db,
+  /** The pool behind `db`: a keyed timer's replace runs on a client of its own (`./timers.ts`). */
+  pool: pg.Pool,
   logger: Logger,
   downstreamUsage: UsageDownstream,
   /** Orphan purge deletes through Better Auth's own internalAdapter (FK-safe cascade). */
@@ -144,7 +156,7 @@ export async function createJobs(
 
   const boss = new PgBoss({
     connectionString: env.DATABASE_URL,
-    schema: 'pgboss',
+    schema: PGBOSS_SCHEMA,
     // Completed jobs archive after an hour and the archive is dropped after a
     // week — the pgboss tables stay bounded on a busy instance.
     archiveCompletedAfterSeconds: 3600,
@@ -356,10 +368,18 @@ export async function createJobs(
     });
 
     // The tool's pollers, registered where they always were: after the
-    // chassis purges, before the orphan GC.
+    // chassis purges, before the orphan GC. One job per fetch (pg-boss's
+    // default batch), its payload and its key handed to the handler: a timer
+    // (`./timers.ts`) rides the same poller as a cron.
     for (const job of toolJobs) {
-      await boss.work(job.queue, async () => {
-        await job.handler();
+      await boss.work<object>(job.queue, { includeMetadata: true }, async (jobs) => {
+        for (const fetched of jobs) {
+          await job.handler(fetched.data ?? null, {
+            id: fetched.id,
+            queue: job.queue,
+            key: fetched.singletonKey ?? null
+          });
+        }
       });
     }
 
@@ -504,6 +524,7 @@ export async function createJobs(
 
   return {
     boss,
+    timers: new PgBossTimers(boss, pool, logger),
     stop: async () => {
       await boss.stop({ graceful: true, wait: true });
     },

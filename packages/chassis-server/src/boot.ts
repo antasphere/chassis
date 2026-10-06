@@ -654,6 +654,7 @@ export async function bootPlatform<
   const jobs = await createJobs(
     env,
     db.db,
+    db.pool,
     logger,
     overrides.usageDownstream ?? hubUsagePoster ?? new NoopUsageSink(),
     auth,
@@ -801,6 +802,7 @@ export async function bootPlatform<
     email,
     events,
     authSecret,
+    timers: jobs.timers,
     overrides: overrides.tool
   };
   const domain = tool.services(serviceCore);

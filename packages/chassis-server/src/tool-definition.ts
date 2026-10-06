@@ -22,6 +22,7 @@ import type { DemoSessionRefusedApiRoute } from './identity/demo-pass-rules.js';
 import type { HubSsoService } from './identity/hub-sso.js';
 import type { HubOrgCreator } from './identity/hub-user-client.js';
 import type { JobDeclaration, Jobs } from './jobs/pgboss.js';
+import type { Timers } from './jobs/timers.js';
 import type { Logger } from './logger.js';
 import type { MembershipRemovalHook } from './members/removal.js';
 import type { McpToolDefinition } from './mcp/server.js';
@@ -63,6 +64,8 @@ export interface ServiceCore<TEnvShape extends z.ZodRawShape, TEvents, TToolOver
   email: EmailDriver;
   events: EventBus<TEvents>;
   authSecret: string;
+  /** One-off timers on the queues the `jobs` slot declared (`jobs/timers.ts`): a service arms and withdraws them. */
+  timers: Timers;
   /** The tool's own test seams (`BootOverrides.tool`); undefined in production. */
   overrides: TToolOverrides | undefined;
 }
