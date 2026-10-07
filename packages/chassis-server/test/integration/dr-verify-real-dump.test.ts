@@ -1,13 +1,12 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { StartedPostgreSqlContainer } from '@testcontainers/postgresql';
-import { startPostgres } from './helpers.js';
+import { host, startPostgres } from './helpers.js';
 
 /**
  * PLT-12 against a REAL pg_dump.
@@ -24,8 +23,8 @@ import { startPostgres } from './helpers.js';
  * row counts that match reality, and the same dump truncated mid-COPY is
  * refused.
  */
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
-const drLib = join(repoRoot, 'scripts/lib/dr-lib.sh');
+// The host's own DR library: a tool's scripts/lib/dr-lib.sh, the chassis's fixture copy.
+const drLib = host.drLib;
 
 let container: StartedPostgreSqlContainer;
 let work: string;

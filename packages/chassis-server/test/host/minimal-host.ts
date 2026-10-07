@@ -1,3 +1,5 @@
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createPlatform } from '@antasphere/chassis-server';
 import type { ChassisTestHost } from '@antasphere/chassis-server/testing';
 import { THINGS_IDENTITY } from './identity.js';
@@ -19,11 +21,13 @@ import {
 export type HostBootResult = MinimalBootResult;
 export type HostBootOverrides = MinimalBootOverrides;
 
+const here = dirname(fileURLToPath(import.meta.url));
 const platform = createPlatform(minimalTool);
 
 export const host: ChassisTestHost<HostBootResult, HostBootOverrides> = {
   boot: (source, overrides) => platform.boot(source, overrides),
   migrationsDir: MIGRATIONS_FIXTURE,
+  drLib: join(here, 'dr-lib.sh'),
   identity: THINGS_IDENTITY,
   hubClientId: 'tool-things-cloud',
   scopes: THINGS_SCOPES,

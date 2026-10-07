@@ -71,6 +71,11 @@ export interface ChassisTestHost<TResult extends BootResultLike, TOverrides> {
    * `test/host/drizzle` (the chassis tables alone); a tool gives its `packages/db/drizzle`.
    */
   migrationsDir: string;
+  /**
+   * The host tool's disaster-recovery shell library (`scripts/lib/dr-lib.sh` in a
+   * tool): the suite's dump check sources it and runs its verifier on a real pg_dump.
+   */
+  drLib: string;
   /** The host tool's identity: where the suite reads the key prefix a minted key must carry. */
   identity: ToolIdentity;
   /** The host tool's OAuth client id at the hub: the cloud boots' `HUB_CLIENT_ID`, and the fake hub's. */
