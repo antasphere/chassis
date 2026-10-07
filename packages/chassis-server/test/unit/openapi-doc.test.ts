@@ -66,11 +66,10 @@ describe('registerOpenApiDoc', () => {
 describe('the API app does not register a per-request document generator', () => {
   it('never calls api.doc() — registerOpenApiDoc is the only registration', () => {
     // The routers live in two places since the chassis extraction: the generic
-    // ones here, the tool's in the app that composes it. Both are audited.
-    const apiDirs = [
-      join(import.meta.dirname, '../../../../apps/server/src/api'),
-      join(import.meta.dirname, '../../src/api')
-    ];
+    // ones here, the tool's in the app that composes it. This audits the
+    // generic ones; the tool audits its own in its own unit suite
+    // (apps/server/test/unit/api-registrations.test.ts in the tool template).
+    const apiDirs = [join(import.meta.dirname, '../../src/api')];
     const offenders: string[] = [];
     let registrations = 0;
     const files = apiDirs.flatMap((dir) => readdirSync(dir).map((file) => join(dir, file)));

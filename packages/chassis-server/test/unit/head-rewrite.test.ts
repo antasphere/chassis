@@ -49,11 +49,10 @@ describe('Hono HEAD handling (pinned)', () => {
 describe('no dead HEAD registrations under /api/v1', () => {
   it('has none', () => {
     // The routers live in two places since the chassis extraction: the generic
-    // ones here, the tool's in the app that composes it. Both are audited.
-    const apiDirs = [
-      join(import.meta.dirname, '../../../../apps/server/src/api'),
-      join(import.meta.dirname, '../../src/api')
-    ];
+    // ones here, the tool's in the app that composes it. This audits the
+    // generic ones; the tool audits its own in its own unit suite
+    // (apps/server/test/unit/api-registrations.test.ts in the tool template).
+    const apiDirs = [join(import.meta.dirname, '../../src/api')];
     const offenders: string[] = [];
     const files = apiDirs.flatMap((dir) => readdirSync(dir).map((file) => join(dir, file)));
     for (const file of files) {

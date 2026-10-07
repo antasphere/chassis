@@ -96,9 +96,9 @@ describe('compareWireSnapshots', () => {
   });
 });
 
-// The hub's file, found as the script finds it: from this package, five levels up is labs/products/antasphere/.
+// The hub's file, found as the script finds it: from this package, four levels up is labs/products/antasphere/.
 const PACKAGE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const SIBLING = path.resolve(PACKAGE_DIR, '../../../../../hub/packages/contract/wire/hub-tool-messages.json');
+const SIBLING = path.resolve(PACKAGE_DIR, '../../../../hub/packages/contract/wire/hub-tool-messages.json');
 const HUB_FILE = process.env.HUB_WIRE_SNAPSHOT ? path.resolve(process.env.HUB_WIRE_SNAPSHOT) : SIBLING;
 
 describe('the chassis’s copies against the hub’s wire snapshot', () => {

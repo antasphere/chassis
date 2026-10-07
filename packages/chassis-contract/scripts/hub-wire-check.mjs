@@ -11,9 +11,9 @@
 // The hub's file: `HUB_WIRE_SNAPSHOT` when set (the `hub-wire` CI job points
 // it at a sparse checkout of the hub's `dev`), else the hub checkout beside
 // this repository in the Antasphere workspace. This package sits at
-// labs/products/antasphere/tools/<tool>/<checkout>/packages/chassis-contract,
-// so five levels up (packages, <checkout>, <tool>, tools, antasphere) is
-// labs/products/antasphere/, where the hub lives as `hub/`.
+// labs/products/antasphere/tools/chassis/packages/chassis-contract, so four
+// levels up (packages, chassis, tools, antasphere) is labs/products/antasphere/,
+// where the hub lives as `hub/`.
 //
 // Needs the package built first (`pnpm --filter @antasphere/chassis-contract build`).
 // Exit 0: the copies agree. Exit 1: differences, each named by its path. Exit 2: no hub file.
@@ -22,7 +22,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const PACKAGE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const SIBLING = path.resolve(PACKAGE_DIR, '../../../../../hub/packages/contract/wire/hub-tool-messages.json');
+const SIBLING = path.resolve(PACKAGE_DIR, '../../../../hub/packages/contract/wire/hub-tool-messages.json');
 const file = process.env.HUB_WIRE_SNAPSHOT ? path.resolve(process.env.HUB_WIRE_SNAPSHOT) : SIBLING;
 
 if (!existsSync(file)) {

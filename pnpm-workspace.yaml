@@ -1,0 +1,17 @@
+packages:
+  - packages/*
+
+# The pins pnpm applies to the whole tree, carried from Slideless (ADR 001 for
+# the Better Auth ones). A consumer carries the same block: the chassis's
+# dependency graph must resolve the same way in the tool that installs it.
+overrides:
+  better-auth@1.6.22>@better-auth/core: '1.6.22'
+  '@better-auth/oauth-provider@1.6.22>@better-auth/core': '1.6.22'
+  better-call@1.3.7>@better-fetch/fetch: '1.3.1'
+  fast-uri@3: '>=3.1.5'
+  fast-uri@4: '>=4.1.4'
+  ip-address@10: '>=10.3.1'
+  nanoid@3: '>=3.3.18'
+  nodemailer@9: '>=10.0.6'
+  nanoid@5: '>=5.1.16'
+  postcss@8: '>=8.5.18'
