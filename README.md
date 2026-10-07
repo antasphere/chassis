@@ -3,13 +3,13 @@
 The generic half of every Antasphere tool, as five packages published privately under the
 `@antasphere` scope and installed by every tool at one pinned version:
 
-| Package                       | What it is                                                                                                   |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `@antasphere/chassis-db`      | The generic tables, the generated Better Auth schema, the migration runner                                    |
-| `@antasphere/chassis-contract`| The generic zod schemas and route contracts, the hub wire copies                                              |
-| `@antasphere/chassis-server`  | The generic server: identity, federation, middleware, routers, jobs, MCP kit; entry `createPlatform(tool)`    |
-| `@antasphere/chassis-sdk`     | The generic typed client (`ChassisClient`); a tool's client extends it                                       |
-| `@antasphere/chassis-cli`     | The generic CLI: profiles, context, safe writes, generic commands; entry `defineCli(definition)`              |
+| Package                        | What it is                                                                                                 |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| `@antasphere/chassis-db`       | The generic tables, the generated Better Auth schema, the migration runner                                 |
+| `@antasphere/chassis-contract` | The generic zod schemas and route contracts, the hub wire copies                                           |
+| `@antasphere/chassis-server`   | The generic server: identity, federation, middleware, routers, jobs, MCP kit; entry `createPlatform(tool)` |
+| `@antasphere/chassis-sdk`      | The generic typed client (`ChassisClient`); a tool's client extends it                                     |
+| `@antasphere/chassis-cli`      | The generic CLI: profiles, context, safe writes, generic commands; entry `defineCli(definition)`           |
 
 The five move in lockstep: one version number, one tag, one release. A tool pins that number in
 every package that depends on the chassis and checks it with `pnpm chassis:check`.
@@ -55,4 +55,4 @@ is a dependency", says how a tool installs, upgrades and contributes. In short:
   of the Dockerfile. It is never an ARG, an ENV or a layer.
 - Developing a chassis change against a tool: build the chassis, `pnpm link ../../chassis/packages/chassis-server`
   (and the siblings you touch) from the tool's root, work, then `git checkout package.json pnpm-lock.yaml
-  && pnpm install` before committing. `pnpm chassis:check` refuses a `link:` left behind.
+&& pnpm install` before committing. `pnpm chassis:check` refuses a `link:` left behind.

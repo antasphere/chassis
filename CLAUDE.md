@@ -10,15 +10,15 @@ inside this repository).
 
 ## Layout
 
-| Path                          | Role                                                                                                        |
-| ----------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `packages/chassis-db`         | The generic tables, the generated `auth-schema.ts`, the migration runner (`migrate.ts`, the advisory lock)   |
-| `packages/chassis-contract`   | The generic zod schemas + route contracts; `src/entitlements.ts` mirrors the hub's wire, `scripts/hub-wire-check.mjs` proves it |
-| `packages/chassis-server`     | The generic server: identity, federation, middleware, routers, jobs (pg-boss, the one-off timers), MCP kit; entry `createPlatform(tool)`; `test/integration` is the chassis suite every tool runs against its own host |
-| `packages/chassis-sdk`        | The generic typed client (`ChassisClient`)                                                                  |
-| `packages/chassis-cli`        | The generic CLI kit: profiles, context, `safe-write.ts`, generic commands; `test/suite` is the CLI suite every tool runs against its own kit |
-| `scripts/release.mjs`         | The release motion: `pnpm release patch|minor|major`, the lookalike-release guard                            |
-| `.github/workflows`           | `ci.yml` (gates, hub wire, integration), `release.yml` (publish on the tag by trusted publishing)            |
+| Path                        | Role                                                                                                                                                                                                                   |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/chassis-db`       | The generic tables, the generated `auth-schema.ts`, the migration runner (`migrate.ts`, the advisory lock)                                                                                                             |
+| `packages/chassis-contract` | The generic zod schemas + route contracts; `src/entitlements.ts` mirrors the hub's wire, `scripts/hub-wire-check.mjs` proves it                                                                                        |
+| `packages/chassis-server`   | The generic server: identity, federation, middleware, routers, jobs (pg-boss, the one-off timers), MCP kit; entry `createPlatform(tool)`; `test/integration` is the chassis suite every tool runs against its own host |
+| `packages/chassis-sdk`      | The generic typed client (`ChassisClient`)                                                                                                                                                                             |
+| `packages/chassis-cli`      | The generic CLI kit: profiles, context, `safe-write.ts`, generic commands; `test/suite` is the CLI suite every tool runs against its own kit                                                                           |
+| `scripts/release.mjs`       | The release motion: `pnpm release patch                                                                                                                                                                                | minor | major`, the lookalike-release guard |
+| `.github/workflows`         | `ci.yml` (gates, hub wire, integration), `release.yml` (publish on the tag by trusted publishing)                                                                                                                      |
 
 Each package ships `dist/`, `src/` and `test/` (chassis-db: `dist/` and `src/`). The consumers run
 `test/integration` and `test/suite` from the installed package against their own host, read
