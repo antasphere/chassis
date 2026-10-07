@@ -65,6 +65,12 @@ export type TestApp<TResult extends BootResultLike = BootResultLike> = TResult &
  */
 export interface ChassisTestHost<TResult extends BootResultLike, TOverrides> {
   boot: BootFn<TResult, TOverrides>;
+  /**
+   * The host tool's migration history, the folder its boot applies: the suite's
+   * migration checks run it a second time by hand. The chassis's own host gives
+   * `test/host/drizzle` (the chassis tables alone); a tool gives its `packages/db/drizzle`.
+   */
+  migrationsDir: string;
   /** The host tool's identity: where the suite reads the key prefix a minted key must carry. */
   identity: ToolIdentity;
   /** The host tool's OAuth client id at the hub: the cloud boots' `HUB_CLIENT_ID`, and the fake hub's. */

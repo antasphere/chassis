@@ -107,7 +107,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "lint": "eslint src test",
     "test": "vitest run --dir test/unit",
-    "test:integration": "vitest run --dir test/integration"
+    "test:integration": "vitest run --dir test/integration",
+    "db:generate": "drizzle-kit generate --config test/host/drizzle.config.ts --name chassis_baseline"
   },
   "dependencies": {
     "@antasphere/chassis-contract": "workspace:*",
@@ -151,6 +152,7 @@
     "@types/yazl": "^3.3.1",
     "adm-zip": "^0.6.1",
     "better-call": "1.1.8",
+    "drizzle-kit": "^0.31.10",
     "pino-pretty": "^13.0.0",
     "testcontainers": "^11.14.0",
     "vitest": "^3.2.0"

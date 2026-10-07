@@ -18,13 +18,12 @@ import { THINGS_COPY, THINGS_IDENTITY, THINGS_ROUTES_COPY } from '../host/identi
  * vocabulary. This is the proof that the composition has no hidden need of the
  * deck slots.
  *
- * The migrations are a FIXTURE read by path, not an import: the only
- * migration history that exists today is the tool's (`packages/db/drizzle`,
- * which also creates the deck tables — unused here). That is the honest state
- * of the repository until the template wave squashes a history of its own.
+ * The migrations are a FIXTURE read by path, not an import: the chassis's
+ * own history (`test/host/drizzle`, generated from the chassis schema by
+ * `pnpm db:generate` in this package), the chassis tables and nothing else.
  */
 const here = dirname(fileURLToPath(import.meta.url));
-const MIGRATIONS_FIXTURE = join(here, '../../../db/drizzle');
+const MIGRATIONS_FIXTURE = join(here, '../host/drizzle');
 
 const SETUP_TOKEN = 'empty-tool-setup-token';
 const OWNER = { email: 'owner@things.test', name: 'Things Owner', password: 'things-owner-password-1' };

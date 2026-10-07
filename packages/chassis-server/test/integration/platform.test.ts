@@ -5,8 +5,6 @@ import { eq } from 'drizzle-orm';
 import { runMigrations } from '@antasphere/chassis-db/migrate';
 import { workspaceMembers } from '@antasphere/chassis-db';
 import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   createDatabase,
   createTestApp,
@@ -26,12 +24,10 @@ const OWNER = {
 let container: StartedPostgreSqlContainer;
 let app: TestApp;
 
-const migrationsFolder = (() => {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const p = join(here, '../../../../packages/db/drizzle');
-  if (!existsSync(p)) throw new Error(`migrations not found at ${p}`);
-  return p;
-})();
+// The host's own history, the folder its boot applies (the chassis's fixture
+// here, the tool's packages/db/drizzle under the tool's host).
+const migrationsFolder = host.migrationsDir;
+if (!existsSync(migrationsFolder)) throw new Error(`migrations not found at ${migrationsFolder}`);
 
 beforeAll(async () => {
   container = await startPostgres();

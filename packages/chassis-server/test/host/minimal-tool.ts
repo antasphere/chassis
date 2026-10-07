@@ -20,12 +20,13 @@ import { THINGS_COPY, THINGS_IDENTITY, THINGS_ROUTES_COPY } from './identity.js'
  * app, no MCP tools.
  *
  * The migrations are a FIXTURE read by path, not an import (same stance as
- * `empty-tool.test.ts`): the only migration history that exists today is
- * the tool's (`packages/db/drizzle`, which also creates the deck tables,
- * unused here).
+ * `empty-tool.test.ts`): the chassis's own history, `test/host/drizzle`,
+ * generated from the chassis schema by `pnpm db:generate` in this package
+ * (the chassis tables and nothing else). A tool's history starts from the
+ * same tables and adds its own; the tool's host of this suite boots on it.
  */
 const here = dirname(fileURLToPath(import.meta.url));
-const MIGRATIONS_FIXTURE = join(here, '../../../db/drizzle');
+export const MIGRATIONS_FIXTURE = join(here, 'drizzle');
 
 export const THINGS_SCOPES = THINGS_IDENTITY.scopes;
 type ThingsScope = (typeof THINGS_SCOPES)[keyof typeof THINGS_SCOPES];
