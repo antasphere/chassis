@@ -1,6 +1,6 @@
 name: Release
 
-# Tokenless npm release of the five @antasphere/chassis-* packages via OIDC
+# Tokenless npm release of the five public @antasphere/chassis-* packages via OIDC
 # trusted publishing, on the push of a vX.Y.Z tag (`pnpm release
 # patch|minor|major --push` makes and pushes it). The chassis moves in
 # lockstep: every package carries the tag's version, and a consumer pins one
@@ -18,13 +18,12 @@ name: Release
 #
 # Bootstrap: trusted publishing can only be configured on a package that
 # already exists, so the very FIRST publish of each name is manual (`pnpm
-# publish -r --access restricted` from the repository root on a machine logged
+# publish -r --access public` from the repository root on a machine logged
 # in to npm). Trusted publishing is then configured on npmjs.com per package,
 # and every release after that is this workflow.
 #
-# No explicit --provenance flag: npm hard-rejects provenance generation for
-# private source repositories, and this repo is private today. With trusted
-# publishing npm attaches provenance automatically once a repo is public.
+# No explicit --provenance flag: with trusted publishing npm attaches the
+# provenance attestation itself, since this repository is public.
 
 on:
   push:
@@ -122,7 +121,7 @@ jobs:
             fi
             PACK_DIR="$(mktemp -d)"
             (cd "$DIR" && pnpm pack --pack-destination "$PACK_DIR" >/dev/null)
-            npm publish "$PACK_DIR"/*.tgz --access restricted
+            npm publish "$PACK_DIR"/*.tgz --access public
             PUBLISHED+=("${NAME}@${VERSION}")
           done
           {

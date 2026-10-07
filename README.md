@@ -1,6 +1,6 @@
 # The Antasphere chassis
 
-The generic half of every Antasphere tool, as five packages published privately under the
+The generic half of every Antasphere tool, as five packages published on npm under the
 `@antasphere` scope and installed by every tool at one pinned version:
 
 | Package                        | What it is                                                                                                 |
@@ -13,6 +13,12 @@ The generic half of every Antasphere tool, as five packages published privately 
 
 The five move in lockstep: one version number, one tag, one release. A tool pins that number in
 every package that depends on the chassis and checks it with `pnpm chassis:check`.
+
+> **License.** The Antasphere chassis is [fair-code](https://faircode.io), distributed under the
+> [Sustainable Use License](LICENSE): the source is open to read, and you may self-host what you
+> build on it, modify it and use it for your own internal business or personal purposes, free of
+> charge. You may not sell it or offer it to others as a paid or hosted service. It is
+> source-available, not open source. Copyright (c) 2026 Antasphere.
 
 Until 7 October 2026 these packages lived inside `antasphere/slideless` and were copied byte for byte
 into every tool. This repository is that code, extracted with its history (its first commit is
@@ -38,8 +44,8 @@ pnpm release patch|minor|major [--title "…"] --push
 
 On a clean `main`: bumps the root and the five packages together, commits
 `chore(release): chassis X.Y.Z`, makes the annotated tag `vX.Y.Z` and pushes both. The tag runs
-`release.yml`, which publishes the five packages to npm by trusted publishing (no token anywhere),
-skipping a version npm already has. The first publish of each name was manual; the trusted
+`release.yml`, which publishes the five packages to npm, public with provenance, by trusted publishing
+(no token anywhere), skipping a version npm already has. The first publish of each name was manual; the trusted
 publisher of each package names this repository and `release.yml`, so the file keeps its name.
 
 ## Consuming
@@ -50,9 +56,7 @@ is a dependency", says how a tool installs, upgrades and contributes. In short:
 - Every package that depends on the chassis declares the same exact version (`"1.2.0"`, never a range).
 - Upgrading is `pnpm up -r "@antasphere/chassis-*@1.2.0"`, then the gates; a chassis bump that changes
   the auth schema is answered by regenerating the tool's snapshot and writing its migration.
-- The registry token is a developer's `~/.npmrc` entry, a CI secret written to a temporary
-  userconfig for the install step only, and a BuildKit secret mounted for the one `pnpm install`
-  of the Dockerfile. It is never an ARG, an ENV or a layer.
+- The packages are public: no registry token on a developer's machine, in CI or in a Docker build.
 - Developing a chassis change against a tool: build the chassis, `pnpm link ../../chassis/packages/chassis-server`
   (and the siblings you touch) from the tool's root, work, then `git checkout package.json pnpm-lock.yaml
 && pnpm install` before committing. `pnpm chassis:check` refuses a `link:` left behind.

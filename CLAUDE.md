@@ -1,7 +1,7 @@
 # The Antasphere chassis (`antasphere/chassis`)
 
 The generic half of every Antasphere tool, five packages under `packages/chassis-*`, published
-privately as `@antasphere/chassis-{db,contract,server,sdk,cli}` at ONE version in lockstep. Every
+on npm, public, as `@antasphere/chassis-{db,contract,server,sdk,cli}` at ONE version in lockstep. Every
 tool (Slideless, the tool template and every tool instantiated from it) installs them at a pinned
 version and never edits them. The code is Slideless's chassis extracted with its history on
 7 October 2026 (PRDCT-3268); the invariants below are the ones it carried there, and the Slideless
@@ -78,8 +78,16 @@ into the tool's `package.json` and lockfile while you work, and `git checkout pa
 pnpm-lock.yaml && pnpm install` puts the registry version back before you commit. The tool's
 `pnpm chassis:check` refuses a `link:` that was left behind.
 
+## Public, source-available
+
+The repository and the packages are public under the Sustainable Use License (`LICENSE`, the same
+licence as Slideless, licensor Antasphere): say "source-available" or "fair-code", never "open
+source". Nothing here may carry a credential, a customer name or an internal hostname: the test
+fixtures spell fake values (`integration-test-…`, `pepper-secret-…`), and a sweep of the history
+(gitleaks) runs before a visibility change. Every package publishes with `access: public`.
+
 ## Secrets on this repository
 
 `FEDERATION_DRILL_APP_ID` / `FEDERATION_DRILL_APP_KEY` (the GitHub App that reads the hub, for `hub-wire`),
 `RELEASE_ENABLED=true` (the variable that arms `release.yml`'s publish job). The publish itself is
-tokenless (OIDC trusted publishing, configured on npmjs per package).
+tokenless (OIDC trusted publishing, configured on npmjs per package); no npm token lives anywhere.

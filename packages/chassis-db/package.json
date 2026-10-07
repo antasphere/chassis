@@ -1,7 +1,7 @@
 {
   "name": "@antasphere/chassis-db",
   "version": "1.0.0",
-  "license": "UNLICENSED",
+  "license": "SEE LICENSE IN LICENSE",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/antasphere/chassis.git",
@@ -9,11 +9,12 @@
   },
   "type": "module",
   "publishConfig": {
-    "access": "restricted"
+    "access": "public"
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "LICENSE"
   ],
   "exports": {
     ".": {
