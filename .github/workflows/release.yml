@@ -121,8 +121,17 @@ jobs:
             fi
             PACK_DIR="$(mktemp -d)"
             (cd "$DIR" && pnpm pack --pack-destination "$PACK_DIR" >/dev/null)
-            npm publish "$PACK_DIR"/*.tgz --access public
-            PUBLISHED+=("${NAME}@${VERSION}")
+            # The packument lags a publish by minutes, so right after a manual
+            # publish the view above still answers 404 and npm refuses the
+            # second publish by name: that refusal IS the skip, not a failure.
+            if npm publish "$PACK_DIR"/*.tgz --access public 2>&1 | tee "$PACK_DIR/publish.log"; then
+              PUBLISHED+=("${NAME}@${VERSION}")
+            elif grep -q "cannot publish over the previously published versions" "$PACK_DIR/publish.log"; then
+              echo "${NAME}@${VERSION} is already on npm (the packument lagged) — skipped"
+              SKIPPED+=("${NAME}@${VERSION}")
+            else
+              exit 1
+            fi
           done
           {
             echo "### chassis ${VERSION} on npm (trusted publishing)"
