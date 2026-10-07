@@ -57,16 +57,32 @@ jobs:
       # The version lives in the package.json files; the tag is a CHECK against
       # that source, never the source — a v-tag whose number disagrees fails
       # loudly here instead of publishing under another number than its name.
-      - name: The tag's version is the root package.json version
-        if: startsWith(github.ref, 'refs/tags/v')
+      # On a tag push the tag IS the ref; on a manual run the ref may be a branch,
+      # and the release still only publishes a version whose tag points at this
+      # very commit (never an untagged number from a branch with a bumped manifest).
+      - name: The version's tag points at this commit
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
           root="$(node -p "require('./package.json').version")"
-          if [ "$tag" != "$root" ]; then
-            echo "::error::tag v${tag} vs root package.json ${root} — they must agree; run \`pnpm release\` rather than tagging by hand"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "$tag" != "$root" ]; then
+              echo "::error::tag v${tag} vs root package.json ${root} — they must agree; run \`pnpm release\` rather than tagging by hand"
+              exit 1
+            fi
+          elif ! git tag --points-at HEAD | grep -qx "v${root}"; then
+            echo "::error::no tag v${root} points at ${GITHUB_SHA:0:7}: a manual run publishes a released commit only (pnpm release --push makes the tag)"
             exit 1
           fi
+
+  # A visible no-op while the first-publish gate is off: the job below is skipped
+  # silently by its `if`, so this one says so in the run's summary.
+  release-switch:
+    runs-on: ubuntu-latest
+    needs: [version-guard]
+    if: vars.RELEASE_ENABLED != 'true'
+    steps:
+      - run: echo "::warning::RELEASE_ENABLED is not 'true' on this repository, so nothing is published by this run (the publish job is skipped)."
 
   publish:
     runs-on: ubuntu-latest
