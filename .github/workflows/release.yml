@@ -1,0 +1,138 @@
+name: Release
+
+# Tokenless npm release of the five @antasphere/chassis-* packages via OIDC
+# trusted publishing, on the push of a vX.Y.Z tag (`pnpm release
+# patch|minor|major --push` makes and pushes it). The chassis moves in
+# lockstep: every package carries the tag's version, and a consumer pins one
+# number. A version npm already has (a re-run, a package that was published by
+# hand) is skipped with success, never re-published and never a failure. The
+# manual trigger publishes the version on the chosen ref (same checks, same
+# skip) for a re-run after an npm outage.
+#
+# There is no NPM_TOKEN anywhere — npm authenticates with a short-lived
+# credential minted from this workflow's OIDC identity. npm's trusted
+# publisher matches the workflow file that REQUESTS the OIDC token, and each
+# of the five packages is configured on npmjs.com with: org `antasphere`, repo
+# `chassis`, workflow `release.yml` — keep the filename, renaming it breaks
+# every publish.
+#
+# Bootstrap: trusted publishing can only be configured on a package that
+# already exists, so the very FIRST publish of each name is manual (`pnpm
+# publish -r --access restricted` from the repository root on a machine logged
+# in to npm). Trusted publishing is then configured on npmjs.com per package,
+# and every release after that is this workflow.
+#
+# No explicit --provenance flag: npm hard-rejects provenance generation for
+# private source repositories, and this repo is private today. With trusted
+# publishing npm attaches provenance automatically once a repo is public.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  id-token: write # the OIDC token npm exchanges for a publish credential
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # The version must have MOVED: a version that already carries a v-tag on
+  # another commit would publish nothing new (npm refuses a version twice) and
+  # the packages would quietly stay where they were. The guard asks ORIGIN for
+  # the tag (`git ls-remote`), through the token actions/checkout persists in
+  # the git config (its default, persist-credentials: true): switching that off
+  # turns the guard into a hard failure, not into a silent pass.
+  version-guard:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # the guard reads the remote's tags, nothing more
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: node scripts/release.mjs guard
+      # The version lives in the package.json files; the tag is a CHECK against
+      # that source, never the source — a v-tag whose number disagrees fails
+      # loudly here instead of publishing under another number than its name.
+      - name: The tag's version is the root package.json version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          root="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$root" ]; then
+            echo "::error::tag v${tag} vs root package.json ${root} — they must agree; run \`pnpm release\` rather than tagging by hand"
+            exit 1
+          fi
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: [version-guard]
+    # First-publish gate: set the repository variable RELEASE_ENABLED=true
+    # (Settings → Secrets and variables → Actions → Variables) to arm
+    # publishing, once the manual first publish and the trusted-publisher
+    # configuration above are done. Until then the version guard still runs on
+    # every tag.
+    if: vars.RELEASE_ENABLED == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4 # pnpm version from package.json#packageManager
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+      # Trusted publishing needs npm >= 11.5.1; the runner image may lag.
+      - run: npm install -g npm@latest
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm turbo lint typecheck test build
+      # Dependency order (contract, db, sdk, server, cli), so a package never
+      # lands on npm before a sibling it depends on.
+      #
+      # Each package is packed by pnpm and the tarball published by npm: pnpm
+      # pack rewrites the `workspace:*` ranges to the released version (npm
+      # publish from the directory would ship them as written, uninstallable),
+      # and npm publish is what performs the OIDC exchange.
+      - name: Publish the five packages
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          PUBLISHED=()
+          SKIPPED=()
+          for PKG in chassis-contract chassis-db chassis-sdk chassis-server chassis-cli; do
+            DIR="packages/$PKG"
+            NAME="$(node -p "require('./$DIR/package.json').name")"
+            PKG_VERSION="$(node -p "require('./$DIR/package.json').version")"
+            if [ "$PKG_VERSION" != "$VERSION" ]; then
+              echo "::error::$DIR is ${PKG_VERSION} but the chassis is ${VERSION} — one version for every package: run \`pnpm release\`, never bump a package alone"
+              exit 1
+            fi
+            # `npm view` prints the version when it exists and fails (E404) when
+            # it does not; anything else it prints is not a match, so an npm
+            # hiccup falls through to the publish, which then fails loudly.
+            FOUND="$(npm view "${NAME}@${VERSION}" version 2>/dev/null || true)"
+            if [ "$FOUND" = "$VERSION" ]; then
+              echo "${NAME}@${VERSION} is already on npm — skipped"
+              SKIPPED+=("${NAME}@${VERSION}")
+              continue
+            fi
+            PACK_DIR="$(mktemp -d)"
+            (cd "$DIR" && pnpm pack --pack-destination "$PACK_DIR" >/dev/null)
+            npm publish "$PACK_DIR"/*.tgz --access restricted
+            PUBLISHED+=("${NAME}@${VERSION}")
+          done
+          {
+            echo "### chassis ${VERSION} on npm (trusted publishing)"
+            echo
+            echo "Published:"
+            if [ ${#PUBLISHED[@]} -eq 0 ]; then echo "- nothing"; fi
+            for P in "${PUBLISHED[@]}"; do echo "- \`$P\`"; done
+            echo
+            echo "Skipped (already on npm):"
+            if [ ${#SKIPPED[@]} -eq 0 ]; then echo "- nothing"; fi
+            for S in "${SKIPPED[@]}"; do echo "- \`$S\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"

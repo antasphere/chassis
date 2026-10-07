@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    # The chassis has one branch, main.
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The six package.json files agree on one version (the chassis moves in lockstep).
+      # The tag guard itself runs in release.yml only: after a release, every later commit
+      # carries the released number until the next bump, which is what a guard here would refuse.
+      - name: One version for every package
+        run: |
+          node -e '
+            const read = (p) => require(`./${p}/package.json`).version;
+            const root = require("./package.json").version;
+            const off = ["packages/chassis-contract","packages/chassis-db","packages/chassis-sdk","packages/chassis-server","packages/chassis-cli"].filter((p) => read(p) !== root);
+            if (off.length) { console.error(`::error::${off.join(", ")} differ from the root version ${root}: run pnpm release, never bump a package alone`); process.exit(1); }
+            console.log(`one version for every package: ${root}`);
+          '
+      - run: pnpm turbo lint typecheck test build
+      - run: pnpm format:check
+
+  # The hub owns the wire (PRDCT-2677): the chassis contract carries copies of the
+  # hub's message schemas, and this job compares them with the hub's own snapshot
+  # on its dev branch, read through the App token the federation drill already
+  # uses. Locally the check resolves the hub checkout four levels up from
+  # packages/chassis-contract (labs/products/antasphere/hub in the workspace); set
+  # HUB_WIRE_SNAPSHOT to the hub's packages/contract/wire/hub-tool-messages.json
+  # to run it elsewhere, and never patch the copy. Until the two secrets
+  # FEDERATION_DRILL_APP_ID and FEDERATION_DRILL_APP_KEY are set on this repository,
+  # the job is red at the token step and says nothing about the code.
+  hub-wire:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/create-github-app-token@v1
+        id: hub-checkout
+        with:
+          app-id: ${{ secrets.FEDERATION_DRILL_APP_ID }}
+          private-key: ${{ secrets.FEDERATION_DRILL_APP_KEY }}
+          owner: antasphere
+          repositories: hub
+      - uses: actions/checkout@v4
+        with:
+          repository: antasphere/hub
+          ref: dev
+          token: ${{ steps.hub-checkout.outputs.token }}
+          path: .hub-wire
+          sparse-checkout: packages/contract/wire/hub-tool-messages.json
+          sparse-checkout-cone-mode: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @antasphere/chassis-contract build
+      - name: Compare the chassis's copies with the hub's wire snapshot
+        run: HUB_WIRE_SNAPSHOT=$GITHUB_WORKSPACE/.hub-wire/packages/contract/wire/hub-tool-messages.json pnpm --filter @antasphere/chassis-contract wire:check
+
+  # The chassis-server integration suite starts a real Postgres through
+  # testcontainers; Docker is on the ubuntu-latest runner, nothing to set up.
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm turbo build
+      - run: pnpm turbo test:integration
