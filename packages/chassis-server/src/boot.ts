@@ -597,7 +597,10 @@ export async function bootPlatform<
           timeoutMs: hubDials.orgsTimeoutMs,
           // A creation is one deliberate human act, not an identity-path
           // read: it rides the token-endpoint budget, not the tight one.
-          createTimeoutMs: hubDials.tokenTimeoutMs
+          createTimeoutMs: hubDials.tokenTimeoutMs,
+          // So is a login, and its pass is fail-closed (PRDCT-3322): the
+          // callback's /orgs read rides the same budget.
+          loginTimeoutMs: hubDials.tokenTimeoutMs
         })
       : undefined;
   const hubReconciler =

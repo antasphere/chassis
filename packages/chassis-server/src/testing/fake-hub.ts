@@ -190,6 +190,12 @@ export class FakeHub {
   // ── Failure injection ─────────────────────────────────────────────────
   /** GET /api/v1/orgs behavior. */
   orgsMode: 'ok' | 'http500' | 'network' = 'ok';
+  /**
+   * How many more /orgs answers `orgsMode` applies to before the hub answers
+   * `ok` again; null = every answer (the default). A transient outage: set
+   * the mode and the count, and the count comes down one per answer.
+   */
+  orgsFailuresLeft: number | null = null;
   /** GET /api/v1/teams behavior (`http404` = an older hub without the route). */
   teamsMode: 'ok' | 'http500' | 'network' | 'http404' = 'ok';
   /** Hold every /orgs answer this long (single-flight/race tests). */
@@ -877,11 +883,17 @@ export class FakeHub {
   private async handleOrgs(req: IncomingMessage, res: ServerResponse): Promise<void> {
     this.orgsRequests.push({ auth: req.headers.authorization ?? null });
     if (this.orgsDelayMs > 0) await new Promise((r) => setTimeout(r, this.orgsDelayMs));
-    if (this.orgsMode === 'network') {
+    // A bounded outage counts down to `ok`; an unbounded one never does.
+    let mode = this.orgsMode;
+    if (this.orgsFailuresLeft !== null) {
+      if (this.orgsFailuresLeft > 0) this.orgsFailuresLeft -= 1;
+      else mode = 'ok';
+    }
+    if (mode === 'network') {
       req.destroy(); // mid-request connection failure, no HTTP answer
       return;
     }
-    if (this.orgsMode === 'http500') return sendJson(res, 500, { error: { code: 'internal' } });
+    if (mode === 'http500') return sendJson(res, 500, { error: { code: 'internal' } });
     const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? '')?.[1] ?? null;
     const record = bearer ? this.accessTokens.get(bearer) : undefined;
     // The real hub's OauthJwtVerifier: JWT it minted, unexpired, aud pinned
