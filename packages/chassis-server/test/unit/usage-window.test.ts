@@ -6,12 +6,11 @@ import {
 } from '@antasphere/chassis-contract';
 
 /**
- * The pin of the hub's occurredAt window as the chassis copies it
+ * The pin of the hub's occurredAt window as the chassis reads it
  * (PRDCT-2644): the two bounds, their inclusive edges and the two messages
- * byte for byte. The agreement with the hub's own definitions is the wire
- * check's (PRDCT-2677): `pnpm --filter @antasphere/chassis-contract
- * wire:check`, the `hub-wire` CI job, whose snapshot carries the bounds and
- * the occurrence table on the hub's offsets.
+ * byte for byte. The definitions are the hub's own, imported from
+ * `@antasphere/contract` (PRDCT-3325), so this pins what a tool refuses
+ * before posting against what the hub refuses at ingest.
  */
 
 const DAY = 24 * 60 * 60 * 1000;

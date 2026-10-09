@@ -33,6 +33,5 @@ export * from './schemas/teams.js';
 export * from './schemas/demo-passes.js';
 export * from './seams.js';
 export * from './entitlements.js';
-export * from './wire.js';
 export * from './define.js';
 export type { ToolIdentity } from './identity.js';
