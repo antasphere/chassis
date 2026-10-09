@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { BILLING_PLANS, billingPlanSchema, type BillingPlan } from '@antasphere/contract';
 import type { HeaderReader, Principal } from './seams.js';
 
 /**
@@ -15,241 +16,53 @@ import type { HeaderReader, Principal } from './seams.js';
  * read the same declarations without pulling the server.
  */
 
-/**
- * The plan tiers, a CLOSED enum the hub owns and this contract mirrors so a
- * tool cannot invent one (§8b). `free` is the default with no subscription;
- * `pro` is the paid plan. "Enterprise" is not a tier but a per-account
- * override the hub serves.
- */
-export const ENTITLEMENT_TIERS = ['free', 'pro'] as const;
-export type EntitlementTier = (typeof ENTITLEMENT_TIERS)[number];
-export const entitlementTierSchema = z.enum(ENTITLEMENT_TIERS);
-/** The hub's name for the same closed enum (`BILLING_PLANS` in `@antasphere/contract`). */
-export const BILLING_PLANS = ENTITLEMENT_TIERS;
+// ── The hub's half: the messages the tool exchanges with the hub ──────────
+//
+// The hub owns these shapes and publishes them as `@antasphere/contract`
+// (the hub's own contract package, on npm at the hub's version); this file
+// re-exports them under the names the chassis has always used, so a tool
+// reads exactly what the hub wrote and a change at the hub reaches every
+// tool through one dependency bump (PRDCT-3325; before it, a hand copy checked
+// against the hub's wire snapshot). The chassis's OWN half — the
+// declaration layer below — stays here.
+export {
+  BILLING_PLANS,
+  USAGE_CHECK_REASONS,
+  USAGE_EVENT_MAX_FUTURE_MS,
+  USAGE_EVENT_MAX_PAST_MS,
+  USAGE_EVENTS_BATCH_MAX,
+  USAGE_REJECT_REASONS,
+  USAGE_ROUTE_ERRORS,
+  USAGE_WRITE_SCOPE,
+  usageCheckRequestSchema,
+  usageCheckSchema,
+  usageEventOccurrenceIssue,
+  usageEventResultSchema,
+  usageEventSchema,
+  usageEventsBatchSchema,
+  usageIngestResultSchema,
+  usageRejectReasonSchema
+} from '@antasphere/contract';
+export type {
+  UsageCheck,
+  UsageCheckReason,
+  UsageCheckRequest,
+  UsageEventResult,
+  UsageEventsBatch,
+  UsageIngestResult,
+  UsageRejectReason,
+  UsageRouteError
+} from '@antasphere/contract';
 
 /**
- * The one scope of the tool → hub machine channel (§6): a `client_credentials`
- * token on the registry client, reaching `/usage/*` and nothing else.
+ * The plan tiers, a CLOSED enum the hub owns (`BILLING_PLANS` in
+ * `@antasphere/contract`), under the chassis's own names (§8b): `free` is the
+ * default with no subscription; `pro` is the paid plan. "Enterprise" is not
+ * a tier but a per-account override the hub serves.
  */
-export const USAGE_WRITE_SCOPE = 'usage:write';
-
-/**
- * The error codes the three tool routes of the hub (`POST /usage/events`,
- * `GET /usage/entitlements`, `POST /usage/check`) answer with, and the status
- * each rides on: the hub's `USAGE_ROUTE_ERRORS` (PRDCT-2677).
- * `tool_credential_required`: the caller is not a registry tool's machine
- * credential. `unknown_account`: no organization holds the `accountRef` (the
- * check and the entitlements read; the ingest answers it per event instead).
- * `validation_error`: the body or the query does not parse. The chassis maps
- * the check's two (`check.ts`): a 404 `unknown_account` and a 400 are the
- * hub's judgement, allowed and logged, never an outage.
- */
-export const USAGE_ROUTE_ERRORS = {
-  tool_credential_required: 401,
-  unknown_account: 404,
-  validation_error: 400
-} as const;
-export type UsageRouteError = keyof typeof USAGE_ROUTE_ERRORS;
-
-/**
- * The wire shape of one usage event as the hub ingests it: the hub's
- * `usageEventSchema` (`packages/contract/src/schemas/billing.ts` of the hub,
- * PRDCT-2625), copied here and checked against the hub's wire snapshot
- * (`wire.ts`, `pnpm --filter @antasphere/chassis-contract wire:check`, the
- * `hub-wire` CI job; PRDCT-2677), so the fake hub of the test kit refuses
- * exactly what the real hub refuses (PRDCT-2629). `userId` is the HUB user
- * (the SSO `sub`), never the tool's local id, and null when the actor is a
- * resource owner the tool could not name; `accountRef` is the hub
- * organization id (a uuid) the tool carries as its workspace's central
- * account id. `toolSlug` is accepted by the hub only when it equals the
- * calling token's registry slug — the chassis NEVER sends it: the token is
- * the only authority on the tool's name, the body never names the tool
- * (PRDCT-2629; `UsageEvent` in seams.ts has no such field).
- */
-export const usageEventSchema = z
-  .object({
-    id: z.string().regex(/^[0-9A-HJKMNP-TV-Z]{26}$/, 'a ULID'),
-    actionKey: z.string().min(1).max(120).optional(),
-    meter: z.string().min(1).max(120).optional(),
-    quantity: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-    unit: z.string().min(1).max(40),
-    occurredAt: z.iso.datetime({ offset: true }),
-    workspaceId: z.string().min(1).max(128),
-    accountRef: z.uuid(),
-    userId: z.string().min(1).max(128).nullable().optional(),
-    via: z.enum(['session', 'api_key', 'oauth']),
-    resourceType: z.string().min(1).max(80).nullable().optional(),
-    resourceId: z.string().min(1).max(256).nullable().optional(),
-    toolSlug: z.string().min(1).max(64).optional(),
-    source: z.object({
-      instanceId: z.string().min(1).max(128),
-      edition: z.string().min(1).max(32),
-      version: z.string().min(1).max(64)
-    })
-  })
-  .refine((e) => e.actionKey !== undefined || e.meter !== undefined, {
-    message: 'actionKey (or its legacy alias meter) is required',
-    path: ['actionKey']
-  });
-
-/** The batch cap of `POST /usage/events` (the hub's `USAGE_EVENTS_BATCH_MAX`): at most this many events per post. */
-export const USAGE_EVENTS_BATCH_MAX = 500;
-
-/**
- * The body of `POST /usage/events` as the hub parses it (its
- * `usageEventsBatchSchema`): one to `USAGE_EVENTS_BATCH_MAX` elements, each
- * judged on its own against `usageEventSchema` afterwards.
- */
-export const usageEventsBatchSchema = z.object({
-  events: z.array(z.unknown()).min(1).max(USAGE_EVENTS_BATCH_MAX)
-});
-export type UsageEventsBatch = z.infer<typeof usageEventsBatchSchema>;
-
-/**
- * Why the hub did not accept an event (its `USAGE_REJECT_REASONS`, a closed
- * list): `unknown_account`, `unknown_user`, `tool_mismatch`, and
- * `invalid_event` (the element does not parse, its `occurredAt` falls outside
- * the window, or its price exceeds `Number.MAX_SAFE_INTEGER`; `details` names
- * the field).
- */
-export const USAGE_REJECT_REASONS = [
-  'unknown_account',
-  'unknown_user',
-  'tool_mismatch',
-  'invalid_event'
-] as const;
-export const usageRejectReasonSchema = z.enum(USAGE_REJECT_REASONS);
-export type UsageRejectReason = z.infer<typeof usageRejectReasonSchema>;
-
-/**
- * One element's answer. Since phase 2 an `accepted` result carries the
- * `credits` the hub debited for it (0 when the action has no price).
- */
-export const usageEventResultSchema = z.object({
-  id: z.string().nullable(),
-  status: z.enum(['accepted', 'duplicate', 'rejected']),
-  reason: usageRejectReasonSchema.optional(),
-  details: z.unknown().optional(),
-  credits: z.number().int().optional()
-});
-export type UsageEventResult = z.infer<typeof usageEventResultSchema>;
-
-/**
- * The hub's answer to `POST /usage/events`: one result per element, in the
- * batch's order, and the three counts (always sent).
- */
-export const usageIngestResultSchema = z.object({
-  results: z.array(usageEventResultSchema),
-  accepted: z.number().int(),
-  duplicate: z.number().int(),
-  rejected: z.number().int()
-});
-export type UsageIngestResult = z.infer<typeof usageIngestResultSchema>;
-
-// ── The hub's window on an event's date (PRDCT-2630 at the hub, PRDCT-2644 here) ──
-
-/**
- * The window an event's `occurredAt` must fall in, measured against the
- * moment the hub receives it: the hub's `USAGE_EVENT_MAX_PAST_MS` and
- * `USAGE_EVENT_MAX_FUTURE_MS` (`packages/contract/src/schemas/billing.ts`
- * of the hub), same names and values, checked against the hub's wire
- * snapshot (`wire.ts`, `wire:check`, the `hub-wire` CI job; PRDCT-2677). Backward, seven days:
- * the queue's retry budget is about eight and a half hours, so an outage of
- * a night is covered many times over, and a week also covers an operator
- * re-driving held jobs by hand. Forward, five minutes: the skew every JWT
- * verifier already tolerates; anything further is a clock that is wrong.
- * Outside the window the hub answers `rejected(invalid_event)` naming
- * `occurredAt` and never clamps, so the poster refuses BEFORE posting: an
- * event the hub would refuse on its date is held where it was made, never
- * counted as a rejection at the hub (PRDCT-2644).
- */
-export const USAGE_EVENT_MAX_PAST_MS = 7 * 24 * 60 * 60 * 1000;
-export const USAGE_EVENT_MAX_FUTURE_MS = 5 * 60 * 1000;
-
-/**
- * Why an event's `occurredAt` is refused against the receipt time, or null
- * when it falls inside the window (both bounds INCLUSIVE). The hub's
- * `usageEventOccurrenceIssue`, copied (the wire snapshot's occurrence table
- * checks it on the hub's offsets): the one comparison both
- * halves run, the hub at ingest against its own clock, the chassis before
- * posting against its best estimate of the receipt (its own clock), so the
- * two never disagree on the sign or the edge.
- */
-export function usageEventOccurrenceIssue(
-  occurredAt: Date,
-  receivedAt: Date
-): { path: 'occurredAt'; message: string } | null {
-  const delta = occurredAt.getTime() - receivedAt.getTime();
-  if (delta < -USAGE_EVENT_MAX_PAST_MS) {
-    return {
-      path: 'occurredAt',
-      message: `more than ${USAGE_EVENT_MAX_PAST_MS / 86_400_000} days before the hub received the event`
-    };
-  }
-  if (delta > USAGE_EVENT_MAX_FUTURE_MS) {
-    return {
-      path: 'occurredAt',
-      message: `more than ${USAGE_EVENT_MAX_FUTURE_MS / 60_000} minutes after the hub received the event`
-    };
-  }
-  return null;
-}
-
-// ── POST /usage/check: the price and the balance before an action (§5, §7 step 3) ──
-
-/**
- * The request of `POST /usage/check` (the hub's `UsageCheckRequest`,
- * PRDCT-2663): the paying account, the action key and the quantity of THIS
- * request. `unit` is accepted and ignored by the hub, which prices by its
- * own row; it is sent so the answer's unit can be compared and a mismatch
- * logged.
- */
-export const usageCheckRequestSchema = z.object({
-  accountRef: z.uuid(),
-  actionKey: z.string().min(1).max(120),
-  quantity: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-  unit: z.string().min(1).max(40).optional()
-});
-export type UsageCheckRequest = z.infer<typeof usageCheckRequestSchema>;
-
-/**
- * The three reasons a check refuses (`null` when allowed), the hub's
- * `USAGE_CHECK_REASONS`: `account_suspended` (checked first, whatever the
- * price), `unpriceable` (the price of this quantity exceeds
- * `Number.MAX_SAFE_INTEGER`: the hub clamps `credits` to that bound, and the
- * ingest would reject the same event on its `quantity`) and
- * `insufficient_credits` (`balance < credits`). Each is a refusal, never an
- * outage (PRDCT-2677).
- */
-export const USAGE_CHECK_REASONS = ['insufficient_credits', 'account_suspended', 'unpriceable'] as const;
-export type UsageCheckReason = (typeof USAGE_CHECK_REASONS)[number];
-
-/**
- * The hub's answer to `POST /usage/check` (its `UsageCheck`, PRDCT-2663),
- * checked against the hub's wire snapshot (PRDCT-2677): advisory, no side effect. `credits` is the price of
- * this quantity from the price book row effective now (0 and `priced:
- * false` when the tool has no row for the action: views are never priced,
- * an unknown key is not a refusal); `balance` the account's; `allowed` is
- * `balance >= credits` unless the organization is suspended, which refuses
- * whatever the price. `topUpUrl` is always present: the hub's billing page
- * for that organization, what a `402 entitlement_denied` carries straight
- * off the answer. No lower bound on `quantity` or `credits`, as at the hub: a
- * copy stricter than the hub reads a valid answer as an outage.
- */
-export const usageCheckSchema = z.object({
-  accountRef: z.uuid(),
-  actionKey: z.string(),
-  quantity: z.number().int(),
-  allowed: z.boolean(),
-  credits: z.number().int(),
-  balance: z.number().int(),
-  unit: z.string().nullable(),
-  priced: z.boolean(),
-  plan: entitlementTierSchema,
-  reason: z.enum(USAGE_CHECK_REASONS).nullable(),
-  topUpUrl: z.string()
-});
-export type UsageCheck = z.infer<typeof usageCheckSchema>;
+export const ENTITLEMENT_TIERS = BILLING_PLANS;
+export type EntitlementTier = BillingPlan;
+export const entitlementTierSchema = billingPlanSchema;
 
 /** The wire code of a credit refusal (§7 step 4), and its `details`. */
 export const ENTITLEMENT_DENIED = 'entitlement_denied';
@@ -492,7 +305,7 @@ export type ToolEntitlements = z.infer<typeof toolEntitlementsSchema>;
 
 /**
  * The hub's answer to `GET /usage/entitlements?accountRef=` (§5): the hub's
- * `usageEntitlementsSchema` (PRDCT-2636), checked against the hub's wire
+ * `usageEntitlementsSchema` (PRDCT-2636), the hub's own shape in
  * snapshot (PRDCT-2677). The account's
  * plan, resolved from the tier's defaults and the account's overrides; in
  * phase 1 `limits` and `features` are empty and the tool's own declared

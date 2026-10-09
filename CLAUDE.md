@@ -13,12 +13,12 @@ inside this repository).
 | Path                        | Role                                                                                                                                                                                                                   |
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `packages/chassis-db`       | The generic tables, the generated `auth-schema.ts`, the migration runner (`migrate.ts`, the advisory lock)                                                                                                             |
-| `packages/chassis-contract` | The generic zod schemas + route contracts; `src/entitlements.ts` mirrors the hub's wire, `scripts/hub-wire-check.mjs` proves it                                                                                        |
+| `packages/chassis-contract` | The generic zod schemas + route contracts; `src/entitlements.ts` re-exports the hub's message shapes from `@antasphere/contract`                                                                                       |
 | `packages/chassis-server`   | The generic server: identity, federation, middleware, routers, jobs (pg-boss, the one-off timers), MCP kit; entry `createPlatform(tool)`; `test/integration` is the chassis suite every tool runs against its own host |
 | `packages/chassis-sdk`      | The generic typed client (`ChassisClient`)                                                                                                                                                                             |
 | `packages/chassis-cli`      | The generic CLI kit: profiles, context, `safe-write.ts`, generic commands; `test/suite` is the CLI suite every tool runs against its own kit                                                                           |
 | `scripts/release.mjs`       | The release motion: `pnpm release patch                                                                                                                                                                                | minor | major`, the lookalike-release guard |
-| `.github/workflows`         | `ci.yml` (gates, hub wire, integration), `release.yml` (publish on the tag by trusted publishing)                                                                                                                      |
+| `.github/workflows`         | `ci.yml` (gates, integration), `release.yml` (publish on the tag by trusted publishing)                                                                                                                                |
 
 Each package ships `dist/`, `src/` and `test/` (chassis-db: `dist/` and `src/`). The consumers run
 `test/integration` and `test/suite` from the installed package against their own host, read
@@ -37,10 +37,13 @@ so the sources are part of the published surface, not an accident of packaging.
   `chassis-cli/test/suite`) import their host from `@chassis-test/host` / `@chassis-cli-test/host`: a new
   suite file that needs something the host does not give declares it on the host type
   (`src/testing`), never reaches around it.
-- **The hub owns the wire (PRDCT-2677).** `chassis-contract/src/entitlements.ts` copies the hub's message
-  schemas; `pnpm wire:check` compares them with the hub's snapshot (`HUB_WIRE_SNAPSHOT`, else the hub
-  checkout four levels up, `labs/products/antasphere/hub`). The hub changes first, the check goes red,
-  the chassis follows; never patch the copy to make the check pass.
+- **The hub owns the wire, and publishes it (PRDCT-2677, PRDCT-3325).** The messages a tool exchanges
+  with the hub (the usage event, the batch, the ingest result, the check's request and answer, the
+  closed lists of reasons and error codes, the batch cap, the occurrence window) are defined once in
+  the hub's `packages/contract`, public on npm as `@antasphere/contract` at the hub's version.
+  `chassis-contract` depends on it and `src/entitlements.ts` re-exports those shapes under the
+  chassis's names; nothing here redefines one. The hub changes first, rolls to prod (which publishes
+  the package), and the chassis bumps the dependency; never patch a shape here to match the hub.
 - **Fail-closed scope allowlist** (`chassis-server/src/middleware/scopes.ts`), **closed sign-up needs three
   switches**, **migrations under a session-scoped advisory lock on a dedicated client**, **the auth
   schema drift guard** (a Better Auth change that alters the schema regenerates `chassis-db/src/auth-schema.ts`
@@ -57,7 +60,6 @@ so the sources are part of the published surface, not an accident of packaging.
 pnpm turbo lint typecheck test build --force   # a proof runs with --force: read the Cached line
 pnpm format:check
 pnpm turbo test:integration --force            # testcontainers; one Postgres per run
-pnpm wire:check                                # after pnpm --filter @antasphere/chassis-contract build
 ```
 
 The chassis packages are consumed through `dist`: rebuild before believing a test that should have
@@ -65,7 +67,7 @@ gone red after a source edit.
 
 ## A change, end to end
 
-1. A pull request here, on `main`, with its test; CI green (`checks`, `hub-wire`, `integration`).
+1. A pull request here, on `main`, with its test; CI green (`checks`, `integration`).
 2. `pnpm release patch|minor|major --title "…" --push` on a clean `main`: the bump commit, the tag, the
    publish by `release.yml`.
 3. One version bump per consumer: `pnpm up -r "@antasphere/chassis-*@X.Y.Z"`, the tool's gates, its
@@ -88,6 +90,5 @@ fixtures spell fake values (`integration-test-…`, `pepper-secret-…`), and a 
 
 ## Secrets on this repository
 
-`FEDERATION_DRILL_APP_ID` / `FEDERATION_DRILL_APP_KEY` (the GitHub App that reads the hub, for `hub-wire`),
 `RELEASE_ENABLED=true` (the variable that arms `release.yml`'s publish job). The publish itself is
 tokenless (OIDC trusted publishing, configured on npmjs per package); no npm token lives anywhere.

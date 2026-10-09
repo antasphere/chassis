@@ -15,7 +15,6 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "test:integration": "turbo run test:integration",
-    "wire:check": "pnpm --filter @antasphere/chassis-contract wire:check",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "release": "node scripts/release.mjs"

@@ -69,6 +69,9 @@ importers:
 
   packages/chassis-contract:
     dependencies:
+      '@antasphere/contract':
+        specifier: ^0.16.3
+        version: 0.16.3(hono@4.12.27)
       '@hono/zod-openapi':
         specifier: ^1.4.0
         version: 1.4.0(hono@4.12.27)(zod@4.4.3)
@@ -246,6 +249,10 @@ packages:
 
   '@antasphere/cli-core@0.5.0':
     resolution: {integrity: sha512-aV0/rttHWVMIgaNVk20T6tONNlNQQG2kY+fiGkUt7DxA8q4X1YWx8EqYzp2I1vkUerMW74C5n/wbAkes1kO2fw==}
+    engines: {node: '>=22'}
+
+  '@antasphere/contract@0.16.3':
+    resolution: {integrity: sha512-G5Z266BlUgbtfTXJUw7f90XF2Ec/TM+WaMA1ujhgUMAmxr42A4Ol47ofeDWRxtA6gr/FDb7XfrSBMHocrH5T0w==}
     engines: {node: '>=22'}
 
   '@asteasolutions/zod-to-openapi@8.5.0':
@@ -3455,6 +3462,13 @@ packages:
 snapshots:
 
   '@antasphere/cli-core@0.5.0': {}
+
+  '@antasphere/contract@0.16.3(hono@4.12.27)':
+    dependencies:
+      '@hono/zod-openapi': 1.4.0(hono@4.12.27)(zod@4.4.3)
+      zod: 4.4.3
+    transitivePeerDependencies:
+      - hono
 
   '@asteasolutions/zod-to-openapi@8.5.0(zod@4.4.3)':
     dependencies:

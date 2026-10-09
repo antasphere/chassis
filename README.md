@@ -6,7 +6,7 @@ The generic half of every Antasphere tool, as five packages published on npm und
 | Package                        | What it is                                                                                                 |
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------- |
 | `@antasphere/chassis-db`       | The generic tables, the generated Better Auth schema, the migration runner                                 |
-| `@antasphere/chassis-contract` | The generic zod schemas and route contracts, the hub wire copies                                           |
+| `@antasphere/chassis-contract` | The generic zod schemas and route contracts; the hub's message shapes come from `@antasphere/contract`     |
 | `@antasphere/chassis-server`   | The generic server: identity, federation, middleware, routers, jobs, MCP kit; entry `createPlatform(tool)` |
 | `@antasphere/chassis-sdk`      | The generic typed client (`ChassisClient`); a tool's client extends it                                     |
 | `@antasphere/chassis-cli`      | The generic CLI: profiles, context, safe writes, generic commands; entry `defineCli(definition)`           |
@@ -31,10 +31,9 @@ pnpm install
 pnpm turbo lint typecheck test build       # the gates
 pnpm format:check
 pnpm turbo test:integration                # the chassis-server suite on a real Postgres (testcontainers)
-pnpm wire:check                            # the hub wire copies against the hub checkout beside this repository
 ```
 
-A change here is one pull request on `main`, gated by CI (`checks`, `hub-wire`, `integration`).
+A change here is one pull request on `main`, gated by CI (`checks`, `integration`).
 
 ## Releasing
 
