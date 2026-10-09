@@ -35,6 +35,7 @@ const ORG_RACE = '11111111-aaaa-4bbb-8ccc-000000000003';
 const ORG_LEFT = '11111111-aaaa-4bbb-8ccc-000000000004';
 const ORG_RIGHT = '11111111-aaaa-4bbb-8ccc-000000000005';
 const ORG_DARK = '11111111-aaaa-4bbb-8ccc-000000000006';
+const ORG_DUSK = '11111111-aaaa-4bbb-8ccc-000000000008';
 const ORG_WEIRD = '11111111-aaaa-4bbb-8ccc-000000000007';
 
 const json = (body: unknown) => ({
@@ -467,6 +468,65 @@ describe('cloud edition: the SSO entrance', () => {
         hub.orgsMode = 'ok';
       }
     });
+
+    // PRDCT-3322: a first login is the read a hub that is waking up answers
+    // late or not at all once; the pass is retried ONCE, and a definitive
+    // answer is never retried.
+    const dusk: HubUserFixture = {
+      sub: 'hub-dusk',
+      email: 'dusk@dark.test',
+      workspaceId: ORG_DUSK,
+      role: 'owner',
+      workspaceName: 'Dusk Org'
+    };
+
+    it('ONE transient /orgs failure at the callback is retried, and the login lands', async () => {
+      hub.orgsMode = 'network';
+      hub.orgsFailuresLeft = 1;
+      const before = hub.orgsRequests.length;
+      try {
+        const cookie = await ssoLogin(app, dusk);
+        const me = await readJson(await app.app.request('/api/v1/me', { headers: { cookie } }));
+        expect(me.workspaces.map((w: { name: string }) => w.name)).toContain('Dusk Org');
+      } finally {
+        hub.orgsMode = 'ok';
+        hub.orgsFailuresLeft = null;
+      }
+      // The failed read and the retry: two /orgs calls for the one login.
+      expect(hub.orgsRequests.length - before).toBe(2);
+    });
+
+    it('TWO failures in a row still fail the login closed: one retry, never a loop', async () => {
+      hub.orgsMode = 'http500';
+      hub.orgsFailuresLeft = 2;
+      const before = hub.orgsRequests.length;
+      try {
+        const res = await ssoDance(app, dusk);
+        await expectFailedLogin(app, res, 'error=sso_projection_failed');
+      } finally {
+        hub.orgsMode = 'ok';
+        hub.orgsFailuresLeft = null;
+      }
+      expect(hub.orgsRequests.length - before).toBe(2);
+    });
+
+    it('an /orgs answer slower than the identity-path budget still lands a login, on the login budget', async () => {
+      // The default dials: the identity path waits 1.5 s on /orgs, the login
+      // path waits the token budget (5 s). An answer in between fails a
+      // cached read open (the gate's windowed verdict) and used to fail a
+      // login CLOSED — the one case this budget exists for.
+      hub.orgsDelayMs = 1_900;
+      const before = hub.orgsRequests.length;
+      try {
+        const cookie = await ssoLogin(app, dusk);
+        const me = await readJson(await app.app.request('/api/v1/me', { headers: { cookie } }));
+        expect(me.workspaces.map((w: { name: string }) => w.name)).toContain('Dusk Org');
+      } finally {
+        hub.orgsDelayMs = 0;
+      }
+      // Answered on the first read: no retry was needed.
+      expect(hub.orgsRequests.length - before).toBe(1);
+    }, 20_000);
   });
 
   describe('the access token is a bearer, not an identity: wrong shapes self-heal via refresh', () => {

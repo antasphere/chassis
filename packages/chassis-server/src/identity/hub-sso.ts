@@ -152,6 +152,14 @@ interface LoginScope {
 const loginScope = new AsyncLocalStorage<LoginScope>();
 
 /**
+ * The pause before the ONE retry of a login reconcile pass that did not
+ * answer (PRDCT-3322): long enough for a hub that was waking up to be awake,
+ * short enough that the person at the callback never notices. A constant,
+ * not a dial — the retry is part of what "fail-closed" costs, not a knob.
+ */
+export const LOGIN_RECONCILE_RETRY_DELAY_MS = 300;
+
+/**
  * The scopes the tool requests at hub sign-in — the ONE statement of the
  * list (the provider entry below spreads it; tests import it).
  *
@@ -364,9 +372,14 @@ export class HubSsoService {
    *     path (fail the login, corrupt nothing);
    *  3. the FAIL-CLOSED login reconcile: one forced pass reading the user's
    *     org list from the hub with the callback access token — reconcile IS
-   *     the projection now. A pass that does not definitively succeed
-   *     throws `sso_projection_failed` (session revoked, error redirect):
-   *     a cloud login without its projection must not exist.
+   *     the projection now. A pass that did not ANSWER (`inconclusive`: a
+   *     timeout, a network failure, a 5xx; `error`: the pass itself threw)
+   *     is run ONCE more after a short pause (PRDCT-3322): the hub committed
+   *     nothing on such an answer, and a first login is exactly the read a
+   *     hub that is waking up answers late. A definitive refusal
+   *     (`no_link`, `grant_dead`) is never retried. A pass that still does
+   *     not succeed throws `sso_projection_failed` (session revoked, error
+   *     redirect): a cloud login without its projection must not exist.
    *
    * Throws HubSsoLoginError; the caller revokes the just-minted session and
    * redirects. Any other throw is mapped to the generic failure code there.
@@ -379,10 +392,19 @@ export class HubSsoService {
       // must fail the login closed, never mint an unprojected session.
       throw new HubSsoLoginError('sso_projection_failed', 'no login reconciler bound (boot wiring bug)');
     }
-    const outcome = await this.reconciler.forceReconcile(localUserId, {
+    const login: LoginAccessToken = {
       accessToken: assertion.accessToken,
       expiresAt: assertion.accessTokenExpiresAt
-    });
+    };
+    let outcome = await this.reconciler.forceReconcile(localUserId, login);
+    if (outcome === 'inconclusive' || outcome === 'error') {
+      this.opts.logger.warn(
+        { localUserId, outcome },
+        'hub SSO: the login reconcile pass did not answer — one retry before failing the login closed'
+      );
+      await new Promise((resolve) => setTimeout(resolve, LOGIN_RECONCILE_RETRY_DELAY_MS));
+      outcome = await this.reconciler.forceReconcile(localUserId, login);
+    }
     if (outcome !== 'ok') {
       throw new HubSsoLoginError('sso_projection_failed', `login reconcile pass failed (${outcome})`);
     }

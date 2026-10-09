@@ -246,6 +246,18 @@ export interface HubUserClientOptions {
    * rather than the tight reconcile one. Defaults to `timeoutMs`.
    */
   createTimeoutMs?: number | undefined;
+  /**
+   * GET /orgs fetch timeout on the LOGIN path (`orgs()` called with the
+   * callback's access token, PRDCT-3322). A login is the same kind of act
+   * as a creation: one deliberate human step, awaited once, and FAIL-CLOSED
+   * — a pass that does not answer in time revokes the session the person
+   * just earned and sends them back to the login page with an error. The
+   * tight identity-path budget exists so a cached request never waits on
+   * the hub; a first login has no cache to protect, and a hub that is
+   * waking up (a throttled instance, a cold connection) answers a first
+   * login late more often than any other read. Defaults to `timeoutMs`.
+   */
+  loginTimeoutMs?: number | undefined;
   /** Test seam. */
   fetchImpl?: typeof fetch;
 }
@@ -270,6 +282,9 @@ export class HubUserClient {
    */
   async orgs(localUserId: string, login?: LoginAccessToken): Promise<HubOrgsResult> {
     let token: string;
+    // The login read rides the login budget (see `loginTimeoutMs`); every
+    // between-logins read keeps the tight identity-path one.
+    const timeoutMs = login ? (this.opts.loginTimeoutMs ?? this.opts.timeoutMs) : this.opts.timeoutMs;
     if (login) {
       this.opts.grant.prime(localUserId, login.accessToken, login.expiresAt);
       token = login.accessToken;
@@ -279,7 +294,7 @@ export class HubUserClient {
       token = access.accessToken;
     }
 
-    let res = await this.get(token);
+    let res = await this.get(token, timeoutMs);
     if (res.kind === 'error') return { kind: 'inconclusive' };
     if (res.response.status === 401 || res.response.status === 403) {
       // The hub refused the token (expired mid-window, or a pre-flip row's
@@ -288,7 +303,7 @@ export class HubUserClient {
       this.opts.grant.invalidateAccess(localUserId);
       const refreshed: GrantAccess = await this.opts.grant.refresh(localUserId);
       if (refreshed.kind !== 'ok') return { kind: refreshed.kind };
-      res = await this.get(refreshed.accessToken);
+      res = await this.get(refreshed.accessToken, timeoutMs);
       if (res.kind === 'error') return { kind: 'inconclusive' };
       if (res.response.status === 401 || res.response.status === 403) {
         this.opts.logger.error(
@@ -539,11 +554,14 @@ export class HubUserClient {
     }
   }
 
-  private async get(token: string): Promise<{ kind: 'ok'; response: Response } | { kind: 'error' }> {
+  private async get(
+    token: string,
+    timeoutMs: number
+  ): Promise<{ kind: 'ok'; response: Response } | { kind: 'error' }> {
     try {
       const response = await this.fetchImpl(`${this.base}/api/v1/orgs`, {
         headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
-        signal: AbortSignal.timeout(this.opts.timeoutMs)
+        signal: AbortSignal.timeout(timeoutMs)
       });
       return { kind: 'ok', response };
     } catch (err) {
