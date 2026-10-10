@@ -1,7 +1,7 @@
 {
   "name": "chassis",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "license": "SEE LICENSE IN LICENSE",
   "description": "The Antasphere tool chassis: the generic server, database, contract, client and CLI packages every Antasphere tool is built on, published on npm as @antasphere/chassis-*",
   "type": "module",
