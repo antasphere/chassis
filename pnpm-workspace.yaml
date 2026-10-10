@@ -5,6 +5,8 @@ packages:
 # the Better Auth ones). A consumer carries the same block: the chassis's
 # dependency graph must resolve the same way in the tool that installs it.
 overrides:
+  # CVE-2026-90711 (proxy-addr < 2.0.8, CRITICAL): reached through the MCP SDK's express; 2026-10-10.
+  'proxy-addr@2': '>=2.0.8'
   better-auth@1.6.22>@better-auth/core: '1.6.22'
   '@better-auth/oauth-provider@1.6.22>@better-auth/core': '1.6.22'
   better-call@1.3.7>@better-fetch/fetch: '1.3.1'
