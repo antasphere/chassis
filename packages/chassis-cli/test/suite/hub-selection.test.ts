@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { HUB_TOOL, loadConfig as loadCoreConfig, saveConfig as saveCoreConfig } from '@antasphere/cli-core';
+import { readFileSync } from 'node:fs';
+import {
+  configPath as coreConfigPath,
+  HUB_TOOL,
+  loadConfig as loadCoreConfig,
+  saveConfig as saveCoreConfig
+} from '@antasphere/cli-core';
 import { routedHarness, tempConfigEnv, type Route } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
 import {
@@ -426,6 +432,96 @@ describe('a hub profile without its address is healed by the first fresh exchang
     const next = routedHarness([cloudInstanceRoute, ...exchangeRoutes([key('again')]), meRoute()], env);
     expect(await run(['whoami'], next.io)).toBe(0);
     expect(trace(next)).toEqual([`GET http://tool/api/v1/me Bearer ${minted}`]);
+  });
+  it('the address changed at the hub under a live cached key: the recovery mints once and heals, the next run is served from the cache with no DELETE (verifier round 2, F1)', async () => {
+    const env = await tempConfigEnv();
+    saveCoreConfig(env, HUB_TOOL, {
+      activeProfile: 'default',
+      profiles: { default: { apiKey: HUB_KEY, baseUrl: HUB, email: 'ada@x.co' } }
+    });
+    const live = key('live');
+    saveConfig(env, {
+      activeProfile: 'work',
+      profiles: {
+        work: { baseUrl: 'http://tool', connectKeys: { default: { apiKey: live, email: 'ada@x.co' } } }
+      }
+    });
+    const minted = key('new');
+    const me: Route = {
+      method: 'GET',
+      path: /\/api\/v1\/me$/,
+      reply: ({ headers }) =>
+        headers.get('authorization') === `Bearer ${minted}`
+          ? { body: meBody() }
+          : { status: 401, body: { error: { code: 'invalid_api_key', message: 'API key not recognized' } } }
+    };
+    const routes = [
+      revokeRoute,
+      me,
+      ...answeringAs([cloudInstanceRoute, ...exchangeRoutes([minted])], 'ada@new.co')
+    ];
+
+    const a = routedHarness(routes, env);
+    expect(await run(['whoami'], a.io)).toBe(0);
+    expect(trace(a)).toEqual([
+      `GET http://tool/api/v1/me Bearer ${live}`,
+      'GET http://tool/api/v1/instance -',
+      `POST ${HUB}/api/v1/sso/tool-token Bearer ${HUB_KEY}`,
+      'POST http://tool/api/v1/sso/cli-connect -',
+      `GET http://tool/api/v1/me Bearer ${minted}`
+    ]);
+    expect(a.err()).toContain('The cached key was refused; signed in again through Antasphere.\n');
+    expect(a.err()).toContain(
+      "The Antasphere login's address is now ada@new.co, replaced from ada@x.co (the hub's own answer).\n"
+    );
+    expect(a.err()).not.toContain('is retired');
+    expect(loadCoreConfig(env, HUB_TOOL).profiles.default?.email).toBe('ada@new.co');
+
+    const b = routedHarness(routes, env);
+    expect(await run(['whoami'], b.io)).toBe(0);
+    expect(trace(b)).toEqual([`GET http://tool/api/v1/me Bearer ${minted}`]);
+    expect(b.wire.some((c) => c.method === 'DELETE')).toBe(false);
+    expect(b.err()).toBe('');
+  });
+
+  it('a stored address in another case is the same address: one fresh exchange writes nothing, says nothing, and the next run is served (verifier round 2, F2)', async () => {
+    const env = await tempConfigEnv();
+    saveCoreConfig(env, HUB_TOOL, {
+      activeProfile: 'default',
+      profiles: { default: { apiKey: HUB_KEY, baseUrl: HUB, email: 'ADA@X.CO' } }
+    });
+    const hubFile = coreConfigPath(env, HUB_TOOL)!;
+    const before = readFileSync(hubFile, 'utf8');
+    const minted = key('new');
+    const h = routedHarness([cloudInstanceRoute, ...exchangeRoutes([minted]), meRoute()], env);
+    expect(await run(['whoami', '--api-url', 'http://tool'], h.io)).toBe(0);
+    expect(h.wire.filter((c) => c.path.endsWith('/sso/cli-connect'))).toHaveLength(1);
+    expect(readFileSync(hubFile, 'utf8')).toBe(before);
+    expect(h.err()).not.toContain("The Antasphere login's address is now");
+
+    const next = routedHarness([cloudInstanceRoute, ...exchangeRoutes([key('again')]), meRoute()], env);
+    expect(await run(['whoami'], next.io)).toBe(0);
+    expect(trace(next)).toEqual([`GET http://tool/api/v1/me Bearer ${minted}`]);
+    expect(next.err()).toBe('');
+  });
+
+  it('a blank answered address is never written: the hub profile unchanged, no line, the entry stored as cli-core stores it (verifier round 2, F3)', async () => {
+    const env = await tempConfigEnv();
+    saveCoreConfig(env, HUB_TOOL, {
+      activeProfile: 'default',
+      profiles: { default: { apiKey: HUB_KEY, baseUrl: HUB, email: 'ada@x.co' } }
+    });
+    const hubFile = coreConfigPath(env, HUB_TOOL)!;
+    const before = readFileSync(hubFile, 'utf8');
+    const minted = key('new');
+    const h = routedHarness(
+      [meRoute(), ...answeringAs([cloudInstanceRoute, ...exchangeRoutes([minted])], '')],
+      env
+    );
+    expect(await run(['whoami', '--api-url', 'http://tool'], h.io)).toBe(0);
+    expect(readFileSync(hubFile, 'utf8')).toBe(before);
+    expect(h.err()).not.toContain("The Antasphere login's address is now");
+    expect(loadConfig(env).profiles.tool?.connectKeys?.default).toMatchObject({ apiKey: minted, email: '' });
   });
 });
 

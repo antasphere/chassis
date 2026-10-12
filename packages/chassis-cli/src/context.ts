@@ -424,6 +424,9 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
       }
       const outcome = await refreshConnectKey(connectOptions(ctx));
       if (outcome.outcome === 'not_cloud') return res;
+      // A fresh mint like any other: the hub profile is healed here too, or
+      // the next run would retire the key just minted (verifier round 2, F1).
+      healHubAddress(ctx, outcome);
       ctx.apiKey = outcome.key;
       ctx.credentialSource = 'hub-exchange';
       ctx.io.err.write('The cached key was refused; signed in again through Antasphere.\n');
@@ -526,35 +529,43 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
     overrides: Partial<ConnectOnDemandOptions> = {}
   ): Promise<ConnectOnDemandOutcome> {
     const outcome = await connectOnDemand({ ...connectOptions(ctx), ...overrides });
+    healHubAddress(ctx, outcome);
+    return outcome;
+  }
+
+  /**
+   * The hub profile healed with the address the hub answered, after a fresh
+   * exchange: when it carries none or a blank one (an older login, a
+   * hand-edited file), or one the hub no longer answers (the account changed
+   * its address at the hub). Without it the slot would be refused and a key
+   * re-minted and revoked on every run, since a key is served only to the
+   * address that minted it. The answer is the key owner's own current
+   * address, so no other person's address can be written. That profile
+   * only, nothing else of the hub's file moves. A replaced address is said
+   * on stderr; an absent one is filled in silently. Called after every
+   * fresh exchange the kit runs: `connect` and the stranded-key recovery.
+   */
+  function healHubAddress(ctx: CliContext<TClient>, outcome: ConnectOnDemandOutcome): void {
     // `!outcome.cached`: a served key implies a hub address already equal to
     // the entry's, so only a fresh exchange can have anything to heal; the
     // guard states that intent.
-    if (outcome.outcome === 'connected' && !outcome.cached && outcome.result) {
-      // The hub profile is healed with the address the hub answered when it
-      // carries none or a blank one (an older login, a hand-edited file), or
-      // one the hub no longer answers (the account changed its address at
-      // the hub): without it the slot would be refused and a key re-minted
-      // and revoked on every run, since a key is served only to the address
-      // that minted it. The answer is the key owner's own current address,
-      // so no other person's address can be written. That profile only,
-      // nothing else of the hub's file moves. A replaced address is said on
-      // stderr; an absent one is filled in silently.
-      const answered = outcome.result.user.email;
-      const hub = selectHubProfile(ctx.io.env, { cloudUrl: DEFAULT_HUB_URL });
-      const hubConfig = loadCoreConfig(ctx.io.env, HUB_TOOL);
-      const stored = hub.name ? hubConfig.profiles[hub.name] : undefined;
-      const had = firstSet(stored?.email);
-      if (hub.name && stored && had?.toLowerCase() !== answered.trim().toLowerCase()) {
-        hubConfig.profiles[hub.name] = { ...stored, email: answered };
-        saveCoreConfig(ctx.io.env, HUB_TOOL, hubConfig);
-        if (had) {
-          ctx.io.err.write(
-            `The Antasphere login's address is now ${answered}, replaced from ${had} (the hub's own answer).\n`
-          );
-        }
-      }
+    if (outcome.outcome !== 'connected' || outcome.cached || !outcome.result) return;
+    // A chassis tool never answers a blank address; a foreign one must not
+    // blank the profile.
+    const answered = firstSet(outcome.result.user.email);
+    if (!answered) return;
+    const hub = selectHubProfile(ctx.io.env, { cloudUrl: DEFAULT_HUB_URL });
+    const hubConfig = loadCoreConfig(ctx.io.env, HUB_TOOL);
+    const stored = hub.name ? hubConfig.profiles[hub.name] : undefined;
+    const had = firstSet(stored?.email);
+    if (!hub.name || !stored || had?.toLowerCase() === answered.toLowerCase()) return;
+    hubConfig.profiles[hub.name] = { ...stored, email: answered };
+    saveCoreConfig(ctx.io.env, HUB_TOOL, hubConfig);
+    if (had) {
+      ctx.io.err.write(
+        `The Antasphere login's address is now ${answered}, replaced from ${had} (the hub's own answer).\n`
+      );
     }
-    return outcome;
   }
 
   async function connectForKey(ctx: CliContext<TClient>): Promise<string> {
