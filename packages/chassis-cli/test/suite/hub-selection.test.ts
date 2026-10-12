@@ -25,6 +25,7 @@ import {
  */
 
 const { loadConfig, saveConfig } = cli;
+const { bin, displayName } = cli.identity;
 const DEFAULT_HUB_URL = 'https://account.antasphere.com';
 const CLOUD_HUB_KEY = 'ant_cloudk12_secretsecretsecret1234';
 
@@ -41,6 +42,20 @@ function seedTwoHubs(env: Record<string, string>): void {
 
 const trace = (h: ReturnType<typeof routedHarness>) =>
   h.wire.map((c) => `${c.method} ${c.origin}${c.path} ${c.auth ?? '-'}`);
+
+/** The same routes, every answer that names a user naming `email` instead. */
+function answeringAs(routes: Route[], email: string, name = 'Ada'): Route[] {
+  return routes.map((r) => ({
+    ...r,
+    reply: (call: Parameters<Route['reply']>[0]) => {
+      const answer = r.reply(call);
+      const body = answer.body as Record<string, unknown> | undefined;
+      return body && 'user' in body
+        ? { ...answer, body: { ...body, user: { ...(body.user as object), email, name } } }
+        : answer;
+    }
+  }));
+}
 
 const revokeRoute: Route = {
   method: 'DELETE',
@@ -201,6 +216,57 @@ describe('a hub profile with no baseUrl is at the default hub (verifier round 1,
       profiles: { default: { apiKey: HUB_KEY, email: 'ada@x.co' } }
     });
   });
+
+  it('login finds that stored login: no email code is asked, the exchange runs at the default hub with its key', async () => {
+    const env = await legacyEnv();
+    const minted = key('new');
+    const h = routedHarness(
+      [cloudInstanceRoute, ...otpRoutes(key('otp')), ...exchangeRoutes([minted]), meRoute()],
+      env
+    );
+    const asked: string[] = [];
+    h.io.prompt = async (q) => {
+      asked.push(q);
+      return '';
+    };
+    expect(await run(['login', '--api-url', 'http://tool'], h.io)).toBe(0);
+    expect(asked).toEqual([]);
+    expect(h.wire.some((c) => c.path === '/api/v1/cli/auth/request')).toBe(false);
+    expect(h.wire.filter((c) => c.path.endsWith('/sso/tool-token'))).toEqual([
+      expect.objectContaining({ origin: new URL(DEFAULT_HUB_URL).origin, auth: `Bearer ${HUB_KEY}` })
+    ]);
+    expect(Object.keys(loadConfig(env).profiles.tool?.connectKeys ?? {})).toEqual(['default']);
+  });
+
+  it('logout --all revokes that login at the default hub and forgets it', async () => {
+    const env = await legacyEnv();
+    const toolKey = key('cached');
+    saveConfig(env, {
+      activeProfile: 'work',
+      profiles: {
+        work: { baseUrl: 'http://tool', connectKeys: { default: { apiKey: toolKey, email: 'ada@x.co' } } }
+      }
+    });
+    const h = routedHarness([revokeRoute], env);
+    expect(await run(['logout', '--all'], h.io)).toBe(0);
+    expect(trace(h)).toEqual([
+      `DELETE http://tool/api/v1/cli/auth/key Bearer ${toolKey}`,
+      `DELETE ${new URL(DEFAULT_HUB_URL).origin}/api/v1/cli/auth/key Bearer ${HUB_KEY}`
+    ]);
+    expect(h.out()).toContain('The Antasphere login ada@x.co is revoked and forgotten.');
+    expect(loadCoreConfig(env, HUB_TOOL).profiles).toEqual({});
+  });
+
+  it('plain logout with no profile of the tool names the two commands that end that login, nothing sent', async () => {
+    const env = await legacyEnv();
+    const h = routedHarness([revokeRoute], env);
+    expect(await run(['logout'], h.io)).toBe(1);
+    expect(h.err()).toBe(
+      `Error: Nothing of ${displayName}'s to sign out of on this machine. The Antasphere login ada@x.co ` +
+        `stays for the whole tool family: \`${bin} logout --all\` or \`antasphere logout\` ends it.\n`
+    );
+    expect(h.wire).toEqual([]);
+  });
 });
 
 describe('logout --all ends the hub login ANTASPHERE_URL names', () => {
@@ -273,6 +339,8 @@ describe('a hub profile without its address is healed by the first fresh exchang
     const h = routedHarness([cloudInstanceRoute, ...exchangeRoutes([minted]), meRoute()], env);
     expect(await run(['login', '--api-url', 'http://tool'], h.io)).toBe(0);
     expect(h.wire.filter((c) => c.path.endsWith('/sso/cli-connect'))).toHaveLength(1);
+    // An absent address is filled in silently.
+    expect(h.err()).not.toContain("The Antasphere login's address is now");
     expect(loadCoreConfig(env, HUB_TOOL)).toEqual({
       activeProfile: 'cloud',
       profiles: {
@@ -285,5 +353,140 @@ describe('a hub profile without its address is healed by the first fresh exchang
     expect(await run(['whoami'], next.io)).toBe(0);
     expect(trace(next)).toEqual([`GET http://tool/api/v1/me Bearer ${minted}`]);
     expect(next.err()).toBe('');
+  });
+
+  it("a stale address (the account changed it at the hub): one mint, the profile at the hub's answer, said on stderr, the next run served from the cache with no DELETE", async () => {
+    const env = await tempConfigEnv();
+    saveCoreConfig(env, HUB_TOOL, {
+      activeProfile: 'default',
+      profiles: { default: { apiKey: HUB_KEY, baseUrl: HUB, email: 'ada@x.co' } }
+    });
+    const minted = key('new');
+    const routes = answeringAs([cloudInstanceRoute, ...exchangeRoutes([minted]), meRoute()], 'ada@new.co');
+    const h = routedHarness(routes, env);
+    expect(await run(['whoami', '--api-url', 'http://tool'], h.io)).toBe(0);
+    expect(h.wire.filter((c) => c.path.endsWith('/sso/cli-connect'))).toHaveLength(1);
+    expect(h.err()).toContain(
+      "The Antasphere login's address is now ada@new.co, replaced from ada@x.co (the hub's own answer).\n"
+    );
+    expect(loadCoreConfig(env, HUB_TOOL)).toEqual({
+      activeProfile: 'default',
+      profiles: { default: { apiKey: HUB_KEY, baseUrl: HUB, email: 'ada@new.co' } }
+    });
+    expect(loadConfig(env).profiles.tool?.connectKeys?.default).toMatchObject({
+      apiKey: minted,
+      email: 'ada@new.co'
+    });
+
+    for (let i = 0; i < 2; i++) {
+      const next = routedHarness(
+        answeringAs([cloudInstanceRoute, ...exchangeRoutes([key('again')]), meRoute()], 'ada@new.co'),
+        env
+      );
+      expect(await run(['whoami'], next.io)).toBe(0);
+      expect(trace(next)).toEqual([`GET http://tool/api/v1/me Bearer ${minted}`]);
+      expect(next.err()).toBe('');
+    }
+  });
+
+  it('a blank address is healed like an absent one, silently, and no sentence carries the blank', async () => {
+    const env = await tempConfigEnv();
+    saveCoreConfig(env, HUB_TOOL, {
+      activeProfile: 'default',
+      profiles: { default: { apiKey: HUB_KEY, baseUrl: HUB, email: '  ' } }
+    });
+    const old = key('old');
+    saveConfig(env, {
+      activeProfile: 'work',
+      profiles: {
+        work: { baseUrl: 'http://tool', connectKeys: { default: { apiKey: old, email: 'ada@x.co' } } }
+      }
+    });
+    const minted = key('new');
+    const h = routedHarness([revokeRoute, cloudInstanceRoute, ...exchangeRoutes([minted]), meRoute()], env);
+    expect(await run(['whoami'], h.io)).toBe(0);
+    expect(trace(h)).toEqual([
+      `DELETE http://tool/api/v1/cli/auth/key Bearer ${old}`,
+      'GET http://tool/api/v1/instance -',
+      `POST ${HUB}/api/v1/sso/tool-token Bearer ${HUB_KEY}`,
+      'POST http://tool/api/v1/sso/cli-connect -',
+      `GET http://tool/api/v1/me Bearer ${minted}`
+    ]);
+    expect(h.err()).toContain(
+      `The ${displayName} key cached for ada@x.co is retired: the Antasphere login carries no address to match it with.\n`
+    );
+    expect(h.err()).not.toMatch(/ {2}/);
+    expect(h.err()).not.toContain("The Antasphere login's address is now");
+    expect(loadCoreConfig(env, HUB_TOOL).profiles.default).toEqual({
+      apiKey: HUB_KEY,
+      baseUrl: HUB,
+      email: 'ada@x.co'
+    });
+
+    const next = routedHarness([cloudInstanceRoute, ...exchangeRoutes([key('again')]), meRoute()], env);
+    expect(await run(['whoami'], next.io)).toBe(0);
+    expect(trace(next)).toEqual([`GET http://tool/api/v1/me Bearer ${minted}`]);
+  });
+});
+
+describe('login --email on a stored login with no address is a switch (verifier round 1, F2)', () => {
+  it.each([
+    ['absent', {}],
+    ['blank', { email: '  ' }]
+  ] as const)(
+    "a hub key with its address %s and --email bob: bob signs in afresh, the exchange runs with bob's key, the profile and the output name bob",
+    async (_label, address) => {
+      const ADA_KEY = 'ant_adakey12_secretsecretsecret1234';
+      const BOB_KEY = 'ant_bobkey12_secretsecretsecret1234';
+      const env = await tempConfigEnv();
+      saveCoreConfig(env, HUB_TOOL, {
+        activeProfile: 'default',
+        profiles: { default: { apiKey: ADA_KEY, baseUrl: HUB, ...address } }
+      });
+      const minted = key('bob');
+      const h = routedHarness(
+        answeringAs(
+          [cloudInstanceRoute, ...otpRoutes(BOB_KEY, ORG), ...exchangeRoutes([minted]), meRoute()],
+          'bob@x.co',
+          'Bob'
+        ),
+        env
+      );
+      h.io.prompt = async () => '123456';
+      expect(await run(['login', '--api-url', 'http://tool', '--email', 'bob@x.co'], h.io)).toBe(0);
+      expect(h.wire.filter((c) => c.path === '/api/v1/cli/auth/request')).toEqual([
+        expect.objectContaining({ origin: HUB, body: { email: 'bob@x.co' } })
+      ]);
+      expect(h.wire.filter((c) => c.path.endsWith('/sso/tool-token'))).toEqual([
+        expect.objectContaining({ origin: HUB, auth: `Bearer ${BOB_KEY}` })
+      ]);
+      expect(h.wire.some((c) => c.auth === `Bearer ${ADA_KEY}`)).toBe(false);
+      expect(h.err()).toContain('Signing in as bob@x.co: the stored Antasphere login carries no address.\n');
+      expect(h.err()).not.toMatch(/ {2}/);
+      expect(loadCoreConfig(env, HUB_TOOL).profiles.default).toMatchObject({
+        apiKey: BOB_KEY,
+        baseUrl: HUB,
+        email: 'bob@x.co'
+      });
+      expect(h.out()).toContain('Signed in as Bob <bob@x.co>');
+      expect(h.out()).not.toContain('ada@x.co');
+    }
+  );
+});
+
+describe('profiles names why another hub login is not the one in use (verifier round 1, F6)', () => {
+  it('under ANTASPHERE_URL a slot of another hub login reads "not the one ANTASPHERE_URL names"', async () => {
+    const env: Record<string, string> = { ...(await tempConfigEnv()), ANTASPHERE_URL: HUB };
+    seedTwoHubs(env);
+    saveConfig(env, {
+      activeProfile: 'tool',
+      profiles: {
+        tool: { baseUrl: 'http://tool', connectKeys: { cloud: { apiKey: key('cloud'), email: 'ada@x.co' } } }
+      }
+    });
+    const h = routedHarness([], env);
+    expect(await run(['profiles'], h.io)).toBe(0);
+    expect(h.out()).toContain('via Antasphere (login "cloud", not the one ANTASPHERE_URL names)');
+    expect(h.out()).not.toContain('not the active one');
   });
 });

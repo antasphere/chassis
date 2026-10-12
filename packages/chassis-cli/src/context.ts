@@ -6,6 +6,7 @@ import {
   CliAuthClient,
   CliUsageError,
   connectOnDemand,
+  firstSet,
   HUB_TOOL,
   loadConfig as loadCoreConfig,
   printJson as corePrintJson,
@@ -325,7 +326,9 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
       // `cachedConnectKey`): another account's key is the other person's
       // credential (PRDCT-3032), and a missing address on either side, the
       // entry's or the hub profile's, is unknown, so nothing is served
-      // (PRDCT-3046); connectForKey retires the entry.
+      // (PRDCT-3046); connectForKey retires the entry. This read repeats
+      // cli-core's own (connectOnDemand step 0) on purpose: the credential
+      // source and the recovering fetch are decided here.
       const hub = selectHubProfile(io.env, { cloudUrl: DEFAULT_HUB_URL });
       if (hub.name) apiKey = cachedConnectKey(profile, hub.name, hub.profile?.email);
       if (apiKey) credentialSource = 'hub-cache';
@@ -523,18 +526,32 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
     overrides: Partial<ConnectOnDemandOptions> = {}
   ): Promise<ConnectOnDemandOutcome> {
     const outcome = await connectOnDemand({ ...connectOptions(ctx), ...overrides });
+    // `!outcome.cached`: a served key implies a hub address already equal to
+    // the entry's, so only a fresh exchange can have anything to heal; the
+    // guard states that intent.
     if (outcome.outcome === 'connected' && !outcome.cached && outcome.result) {
-      // The hub profile is healed with the address the hub answered, when
-      // it carries none (an older login, a hand-edited file): without it a
-      // hub profile edited without its address would re-mint a key on
-      // every run, since a key is served only to the address that minted
-      // it. That profile only, nothing else of the hub's file moves.
+      // The hub profile is healed with the address the hub answered when it
+      // carries none or a blank one (an older login, a hand-edited file), or
+      // one the hub no longer answers (the account changed its address at
+      // the hub): without it the slot would be refused and a key re-minted
+      // and revoked on every run, since a key is served only to the address
+      // that minted it. The answer is the key owner's own current address,
+      // so no other person's address can be written. That profile only,
+      // nothing else of the hub's file moves. A replaced address is said on
+      // stderr; an absent one is filled in silently.
+      const answered = outcome.result.user.email;
       const hub = selectHubProfile(ctx.io.env, { cloudUrl: DEFAULT_HUB_URL });
       const hubConfig = loadCoreConfig(ctx.io.env, HUB_TOOL);
       const stored = hub.name ? hubConfig.profiles[hub.name] : undefined;
-      if (hub.name && stored && !stored.email?.trim()) {
-        hubConfig.profiles[hub.name] = { ...stored, email: outcome.result.user.email };
+      const had = firstSet(stored?.email);
+      if (hub.name && stored && had?.toLowerCase() !== answered.trim().toLowerCase()) {
+        hubConfig.profiles[hub.name] = { ...stored, email: answered };
         saveCoreConfig(ctx.io.env, HUB_TOOL, hubConfig);
+        if (had) {
+          ctx.io.err.write(
+            `The Antasphere login's address is now ${answered}, replaced from ${had} (the hub's own answer).\n`
+          );
+        }
       }
     }
     return outcome;
@@ -553,10 +570,12 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
       const profile = loadConfig(io.env).profiles[ctx.profileName];
       const stale = profile?.connectKeys?.[hub.name];
       if (stale && !cachedConnectKey(profile, hub.name, hub.profile?.email)) {
+        // A blank address is no address: it never reaches a sentence.
+        const hubEmail = firstSet(hub.profile?.email);
         io.err.write(
-          `The ${identity.displayName} key cached for ${stale.email ?? 'an unknown login'} is retired: ` +
-            (hub.profile?.email
-              ? `the Antasphere login is now ${hub.profile.email}.\n`
+          `The ${identity.displayName} key cached for ${firstSet(stale.email) ?? 'an unknown login'} is retired: ` +
+            (hubEmail
+              ? `the Antasphere login is now ${hubEmail}.\n`
               : 'the Antasphere login carries no address to match it with.\n')
         );
         const auth = new CliAuthClient({

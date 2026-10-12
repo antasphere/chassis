@@ -287,13 +287,22 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
         // stores it, so every other tool CLI is signed in too. `--email`
         // naming ANOTHER account than the stored login signs that account in
         // afresh, replacing the stored login (PRDCT-3032): the person who
-        // signed in with the wrong address switches from here.
+        // signed in with the wrong address switches from here. A stored key
+        // with no usable address (absent or blank) is someone unknown, so
+        // `--email` on it signs in afresh too (verifier round 1, F2).
         let hub = selectHubProfile(io.env, { cloudUrl: DEFAULT_HUB_URL });
-        const stored = hub.profile?.apiKey ? hub.profile.email : undefined;
+        const hasKey = Boolean(hub.profile?.apiKey);
+        const stored = hasKey ? firstSet(hub.profile?.email) : undefined;
         const switching =
-          Boolean(stored) && opts.email !== undefined && opts.email.toLowerCase() !== stored!.toLowerCase();
+          hasKey &&
+          opts.email !== undefined &&
+          (stored === undefined || opts.email.toLowerCase() !== stored.toLowerCase());
         if (switching) {
-          io.err.write(`Replacing the Antasphere login ${stored} with ${opts.email}.\n`);
+          io.err.write(
+            stored
+              ? `Replacing the Antasphere login ${stored} with ${opts.email}.\n`
+              : `Signing in as ${opts.email}: the stored Antasphere login carries no address.\n`
+          );
         }
         if (!hub.profile?.apiKey || switching) await hubLogin(opts);
         // A login is an explicit re-sign-in (verifier round 1, F3): the key
@@ -379,7 +388,7 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
     // the tool kit's `profileUrl`, whose fallback is the tool's cloud host: a
     // hub profile with no baseUrl would send the hub key there.
     const auth = new CliAuthClient({
-      baseUrl: firstSet(hub.profile.baseUrl, DEFAULT_HUB_URL) ?? DEFAULT_HUB_URL,
+      baseUrl: hub.profile.baseUrl?.trim() || DEFAULT_HUB_URL,
       ...(io.fetch ? { fetch: io.fetch } : {})
     });
     let revoked = false;
@@ -619,8 +628,12 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
         const entry = hub.name ? p.connectKeys?.[hub.name] : undefined;
         if (entry) return { kind: 'hub', text: `via Antasphere${entry.email ? ` (${entry.email})` : ''}` };
         const others = Object.keys(p.connectKeys ?? {});
+        // The hub profile is the one ANTASPHERE_URL names when it is set, else the active one.
+        const chosen = firstSet(io.env[HUB_URL_ENV])
+          ? 'not the one ANTASPHERE_URL names'
+          : 'not the active one';
         if (others.length > 0)
-          return { kind: 'hub', text: `via Antasphere (login "${others.join('", "')}", not the active one)` };
+          return { kind: 'hub', text: `via Antasphere (login "${others.join('", "')}", ${chosen})` };
         return { kind: 'none', text: '(not signed in)' };
       };
       if (globals.json) {
