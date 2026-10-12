@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { parseApiKeyPeppers } from './apikeys/peppers.js';
 import { parseSuperadminEmails } from './accounts/superadmin.js';
 import { isDemoSignInHost, parseDemoEmailDomains, parseDemoHosts } from './identity/demo-pass-rules.js';
+import { loadCliPackage } from './cli-package/index.js';
 
 /**
  * The single entry point for configuration. Every env var the app reads is
@@ -198,6 +199,19 @@ const chassisEnvShape = (version: string) => ({
   HUB_HINT_COOKIE_DOMAIN: optionalString(z.string().min(1)),
   /** The restricted bit on the tool itself (PRDCT-2947): `true` on the cloud edition makes this instance refuse to create an organization (`POST /workspaces` answers 403 `restricted_tool`, `/me.canCreateWorkspace` is false) and advertise `restricted: true` in discovery, so a tool that Antasphere opens to organizations one by one does not rest on the hub registry's flag alone. No effect on the self-hosted edition, where workspaces are local. */
   TOOL_RESTRICTED: booleanish.default(false),
+  /** The tool's own CLI package as the release packed it (PRDCT-3312): a folder holding `package.tgz` (the output of `pnpm pack` of `packages/cli`) beside a copy of that package's `package.json`. The image sets it. Cloud edition: the instance serves the tarball on `POST /cli/package` to a member the hub lets into the tool, and discovery carries `cli { name, version }` so the `team` command knows what it installs and whether to update. Unset = the instance serves no CLI: discovery carries no `cli` and the route answers 404 `cli_not_packaged`. A set value whose folder does not hold both files, or whose `package.json` has no string `name` and `version`, refuses the boot with the path and what is missing: a misconfiguration is proven at the image, never discovered by a person's install. */
+  CLI_PACKAGE_DIR: optionalString(
+    z
+      .string()
+      .min(1)
+      .superRefine((dir, ctx) => {
+        try {
+          loadCliPackage(dir);
+        } catch (err) {
+          ctx.addIssue({ code: 'custom', message: err instanceof Error ? err.message : String(err) });
+        }
+      })
+  ),
   /** R7 escape hatch (internal/federation.md): acknowledge an EDITION change on an already-set-up instance. Without it, boot refuses an EDITION that differs from the one stamped at setup — flipping editions under existing users/workspaces changes identity semantics and must be a conscious operator act. */
   EDITION_CHANGE_ALLOWED: booleanish.default(false),
   /** Reported version. Defaults to the code's own baked-in package version (PRDCT-1844) — the image knows its version intrinsically, CI injects nothing. The env var remains as a deliberate operator override only. */

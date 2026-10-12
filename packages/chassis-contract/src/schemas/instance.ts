@@ -59,6 +59,14 @@ export const instanceInfoSchema = z.object({
    */
   restricted: z.boolean().optional(),
   /**
+   * The tool's own CLI package (cloud edition, PRDCT-3312): present only when
+   * the instance was released with it (`CLI_PACKAGE_DIR`), naming the npm
+   * package `POST /cli/package` serves and its version. The `team` command
+   * reads it to know what it installs and whether to update. ABSENT
+   * otherwise, so older discovery bytes are unchanged.
+   */
+  cli: z.object({ name: z.string(), version: z.string() }).optional(),
+  /**
    * What this version of the tool declares for the billing rail (its priced
    * actions with their default credits, its limits and features per tier):
    * the hub seeds its price book and its plan entitlements from it, staff
