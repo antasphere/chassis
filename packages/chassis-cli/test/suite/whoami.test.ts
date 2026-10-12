@@ -95,7 +95,12 @@ describe('whoami', () => {
     seedHubLogin(env);
     saveConfig(env, {
       activeProfile: 'work',
-      profiles: { work: { baseUrl: 'http://tool', connectKeys: { default: { apiKey: key('cached') } } } }
+      profiles: {
+        work: {
+          baseUrl: 'http://tool',
+          connectKeys: { default: { apiKey: key('cached'), email: 'ada@x.co' } }
+        }
+      }
     });
     const h = routedHarness([meRoute()], env);
     expect(await run(['whoami'], h.io)).toBe(0);
@@ -133,7 +138,12 @@ describe('whoami', () => {
     seedHubLogin(env);
     saveConfig(env, {
       activeProfile: 'work',
-      profiles: { work: { baseUrl: 'http://tool', connectKeys: { default: { apiKey: key('cached') } } } }
+      profiles: {
+        work: {
+          baseUrl: 'http://tool',
+          connectKeys: { default: { apiKey: key('cached'), email: 'ada@x.co' } }
+        }
+      }
     });
     const h = routedHarness([meRoute()], env);
     expect(await run(['whoami', '--json', '--workspace', 'w1'], h.io)).toBe(0);

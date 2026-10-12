@@ -1,24 +1,29 @@
 import { PlatformApiError, type ChassisClient, type ClientOptions } from '@antasphere/chassis-sdk';
 import type { Command } from 'commander';
 import {
-  activeHubProfile,
+  cachedConnectKey,
   CLOUD_PROFILE,
   CliAuthClient,
   CliUsageError,
   connectOnDemand,
-  lookupConnectKey,
+  firstSet,
+  HUB_TOOL,
+  loadConfig as loadCoreConfig,
   printJson as corePrintJson,
   refreshConnectKey,
   resolveApiKey,
   resolveBaseUrl,
   sameInstance,
+  saveConfig as saveCoreConfig,
+  selectHubProfile,
   selectProfile,
   type CliIo as CoreCliIo,
   type ConnectOnDemandOptions,
+  type ConnectOnDemandOutcome,
   type ProfileSource
 } from '@antasphere/cli-core';
 import type { CliConfig, CliConfigStore, CliProfile } from './config.js';
-import type { CliIdentity } from './identity.js';
+import { DEFAULT_HUB_URL, type CliIdentity } from './identity.js';
 import {
   isWorkspaceId,
   matchWorkspace,
@@ -216,6 +221,15 @@ export interface CliContextKit<TClient extends ChassisClient<string>> {
   profileUrl(profile: CliProfile | undefined): string;
   /** The `connectOnDemand` options of one context (the tool, the instance, the profile, the wire). */
   connectOptions(ctx: CliContext<TClient>): ConnectOnDemandOptions;
+  /**
+   * The hub exchange of one context: cli-core `connectOnDemand` with
+   * `connectOptions(ctx)` and `overrides`, and, after a fresh exchange, the
+   * hub profile healed with the address the hub answered when it has none.
+   */
+  connect(
+    ctx: CliContext<TClient>,
+    overrides?: Partial<ConnectOnDemandOptions>
+  ): Promise<ConnectOnDemandOutcome>;
 }
 
 /**
@@ -305,15 +319,18 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
             ? 'profile'
             : 'none';
     if (!apiKey && sameProfileInstance) {
-      // No direct key: the connect cache's slot is the ACTIVE hub profile
-      // (what `antasphere login` stored) — org-independent by design. A key
-      // cached for ANOTHER account than the login now stored on that slot
-      // (`antasphere login --email other` since) is never served: it is the
-      // other person's credential (PRDCT-3032); connectForKey retires it.
-      const hub = activeHubProfile(io.env);
-      if (hub.name && !cachedForAnotherAccount(profile, hub.name, hub.profile?.email)) {
-        apiKey = lookupConnectKey(profile, hub.name);
-      }
+      // No direct key: the connect cache's slot is the hub profile of this
+      // run (the one ANTASPHERE_URL names, else the active one: what
+      // `antasphere login` stored), org-independent by design. A key is
+      // served only to the address that minted it (cli-core
+      // `cachedConnectKey`): another account's key is the other person's
+      // credential (PRDCT-3032), and a missing address on either side, the
+      // entry's or the hub profile's, is unknown, so nothing is served
+      // (PRDCT-3046); connectForKey retires the entry. This read repeats
+      // cli-core's own (connectOnDemand step 0) on purpose: the credential
+      // source and the recovering fetch are decided here.
+      const hub = selectHubProfile(io.env, { cloudUrl: DEFAULT_HUB_URL });
+      if (hub.name) apiKey = cachedConnectKey(profile, hub.name, hub.profile?.email);
       if (apiKey) credentialSource = 'hub-cache';
     }
     const fetchImpl = io.fetch ?? globalThis.fetch.bind(globalThis);
@@ -344,21 +361,6 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
     return ctx;
   }
 
-  /**
-   * The cached connect key on `slot` was minted for another Antasphere
-   * account than the one whose login the slot now holds. Both addresses must
-   * be known: a cache entry or a hub profile without one is trusted as before.
-   */
-  function cachedForAnotherAccount(
-    profile: CliProfile | undefined,
-    slot: string,
-    hubEmail: string | undefined
-  ): boolean {
-    const cached = profile?.connectKeys?.[slot]?.email;
-    if (!cached || !hubEmail) return false;
-    return cached.toLowerCase() !== hubEmail.toLowerCase();
-  }
-
   const NO_KEY_MESSAGE =
     `An API key is required. Sign in (\`${identity.bin} login\`), pass --api-key, or set ` +
     `${identity.envPrefix}_API_KEY.`;
@@ -376,6 +378,10 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
       toolBaseUrl: ctx.baseUrl,
       // A profile with no baseUrl of its own is at the cloud URL (cli-core 0.5.0).
       cloudUrl: identity.cloudUrl,
+      // The same for a hub profile (cli-core 0.6.0, verifier round 1, F4):
+      // one with no baseUrl is at the default hub, so ANTASPHERE_URL naming
+      // that hub finds it, and the slot it names is the one this kit reads.
+      hubCloudUrl: DEFAULT_HUB_URL,
       profileName: ctx.profileName ?? CLOUD_PROFILE,
       env: io.env,
       // Thread the injected fetch so the probe + exchange stay on the test
@@ -418,9 +424,14 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
       }
       const outcome = await refreshConnectKey(connectOptions(ctx));
       if (outcome.outcome === 'not_cloud') return res;
+      // The cause before its consequence (verifier round 3, F1): the sign-in
+      // is said first, then what the fresh mint healed.
+      ctx.io.err.write('The cached key was refused; signed in again through Antasphere.\n');
+      // A fresh mint like any other: the hub profile is healed here too, or
+      // the next run would retire the key just minted (verifier round 2, F1).
+      healHubAddress(ctx, outcome);
       ctx.apiKey = outcome.key;
       ctx.credentialSource = 'hub-exchange';
-      ctx.io.err.write('The cached key was refused; signed in again through Antasphere.\n');
       const headers = new Headers(init?.headers);
       headers.set('authorization', `Bearer ${outcome.key}`);
       return base(input, { ...init, headers });
@@ -515,32 +526,80 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
     return ` (looked in the ${noun} "${selection.value}", selected by ${describeSelection(selection)})`;
   }
 
+  async function connect(
+    ctx: CliContext<TClient>,
+    overrides: Partial<ConnectOnDemandOptions> = {}
+  ): Promise<ConnectOnDemandOutcome> {
+    const outcome = await connectOnDemand({ ...connectOptions(ctx), ...overrides });
+    healHubAddress(ctx, outcome);
+    return outcome;
+  }
+
+  /**
+   * The hub profile healed with the address the hub answered, after a fresh
+   * exchange: when it carries none or a blank one (an older login, a
+   * hand-edited file), or one the hub no longer answers (the account changed
+   * its address at the hub). Without it the slot would be refused and a key
+   * re-minted and revoked on every run, since a key is served only to the
+   * address that minted it. The answer is the key owner's own current
+   * address, so no other person's address can be written. That profile
+   * only, nothing else of the hub's file moves. A replaced address is said
+   * on stderr; an absent one is filled in silently. Called after every
+   * fresh exchange the kit runs: `connect` and the stranded-key recovery.
+   */
+  function healHubAddress(ctx: CliContext<TClient>, outcome: ConnectOnDemandOutcome): void {
+    // `!outcome.cached`: a served key implies a hub address already equal to
+    // the entry's, so only a fresh exchange can have anything to heal; the
+    // guard states that intent.
+    if (outcome.outcome !== 'connected' || outcome.cached || !outcome.result) return;
+    // A chassis tool never answers a blank address; a foreign one must not
+    // blank the profile.
+    const answered = firstSet(outcome.result.user.email);
+    if (!answered) return;
+    const hub = selectHubProfile(ctx.io.env, { cloudUrl: DEFAULT_HUB_URL });
+    const hubConfig = loadCoreConfig(ctx.io.env, HUB_TOOL);
+    const stored = hub.name ? hubConfig.profiles[hub.name] : undefined;
+    const had = firstSet(stored?.email);
+    if (!hub.name || !stored || had?.toLowerCase() === answered.toLowerCase()) return;
+    hubConfig.profiles[hub.name] = { ...stored, email: answered };
+    saveCoreConfig(ctx.io.env, HUB_TOOL, hubConfig);
+    if (had) {
+      ctx.io.err.write(
+        `The Antasphere login's address is now ${answered}, replaced from ${had} (the hub's own answer).\n`
+      );
+    }
+  }
+
   async function connectForKey(ctx: CliContext<TClient>): Promise<string> {
     const { io } = ctx;
-    // The cached key of another account (the hub login on the slot changed)
-    // is revoked on its instance and forgotten before the exchange runs for
-    // the account now signed in (PRDCT-3032). Best effort: a dead key
-    // answers 401 and is forgotten all the same.
-    const hub = activeHubProfile(io.env);
+    // An entry on the slot the cache refuses to serve (another account's
+    // key, the hub login on the slot having changed, PRDCT-3032; or a key
+    // whose address, or the hub profile's, is missing, PRDCT-3046) is
+    // revoked on its instance and forgotten before the exchange runs for the
+    // account now signed in, so the fresh mint never strands it live. Best
+    // effort: a dead key answers 401 and is forgotten all the same.
+    const hub = selectHubProfile(io.env, { cloudUrl: DEFAULT_HUB_URL });
     if (ctx.profileName && hub.name) {
       const profile = loadConfig(io.env).profiles[ctx.profileName];
-      if (cachedForAnotherAccount(profile, hub.name, hub.profile?.email)) {
-        const stale = profile?.connectKeys?.[hub.name];
-        if (stale) {
-          io.err.write(
-            `The ${identity.displayName} key cached for ${stale.email ?? 'another Antasphere login'} is retired: ` +
-              `the Antasphere login is now ${hub.profile?.email ?? 'another account'}.\n`
-          );
-          const auth = new CliAuthClient({
-            baseUrl: profileUrl(profile),
-            ...(io.fetch ? { fetch: io.fetch } : {})
-          });
-          await auth.revoke(stale.apiKey).catch(() => undefined);
-          removeConnectKey(io.env, ctx.profileName, hub.name);
-        }
+      const stale = profile?.connectKeys?.[hub.name];
+      if (stale && !cachedConnectKey(profile, hub.name, hub.profile?.email)) {
+        // A blank address is no address: it never reaches a sentence.
+        const hubEmail = firstSet(hub.profile?.email);
+        io.err.write(
+          `The ${identity.displayName} key cached for ${firstSet(stale.email) ?? 'an unknown login'} is retired: ` +
+            (hubEmail
+              ? `the Antasphere login is now ${hubEmail}.\n`
+              : 'the Antasphere login carries no address to match it with.\n')
+        );
+        const auth = new CliAuthClient({
+          baseUrl: profileUrl(profile),
+          ...(io.fetch ? { fetch: io.fetch } : {})
+        });
+        await auth.revoke(stale.apiKey).catch(() => undefined);
+        removeConnectKey(io.env, ctx.profileName, hub.name);
       }
     }
-    const outcome = await connectOnDemand(connectOptions(ctx));
+    const outcome = await connect(ctx);
     if (outcome.outcome === 'not_cloud') {
       // Self-hosted / unreachable: the classic error, byte-identical.
       throw new CliUsageError(NO_KEY_MESSAGE);
@@ -566,7 +625,8 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
     explainWorkspaceRefusal,
     workspaceNotFoundHint,
     profileUrl,
-    connectOptions
+    connectOptions,
+    connect
   };
 }
 
