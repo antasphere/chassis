@@ -1,4 +1,4 @@
-import { createReadStream } from 'node:fs';
+import { createReadStream, statSync, type Stats } from 'node:fs';
 import { Readable } from 'node:stream';
 import type { OpenAPIHono } from '@hono/zod-openapi';
 import { lt, sql } from 'drizzle-orm';
@@ -96,15 +96,29 @@ export function registerCliPackageRoutes(api: OpenAPIHono, deps: CliPackageRoute
     }
 
     // 3. Released without its CLI package: say so, with a sentence the
-    // `team` command can print as it is.
-    if (cliPackage === null) {
-      return c.json(
+    // `team` command can print as it is. The boot's read names what the
+    // image packed; the file is statted again HERE, after the burn, so a
+    // folder changed under a running instance answers the same 404 instead
+    // of a 200 whose body and length disagree.
+    const notPackaged = () =>
+      c.json(
         err(
           'cli_not_packaged',
           'This instance was released without its CLI package, so it has none to serve'
         ),
         404
       );
+    if (cliPackage === null) return notPackaged();
+    let stat: Stats;
+    try {
+      stat = statSync(cliPackage.path);
+    } catch (cause) {
+      logger.error({ err: cause, path: cliPackage.path }, 'cli package: the tarball read at boot is gone');
+      return notPackaged();
+    }
+    if (!stat.isFile()) {
+      logger.error({ path: cliPackage.path }, 'cli package: the tarball read at boot is no longer a file');
+      return notPackaged();
     }
 
     // 4. Stream the tarball. The bytes are the release's, never a person's,
@@ -127,7 +141,9 @@ export function registerCliPackageRoutes(api: OpenAPIHono, deps: CliPackageRoute
     return c.body(web, 200, {
       'content-type': 'application/gzip',
       'content-disposition': `attachment; filename="${cliPackage.filename}"`,
-      'content-length': String(cliPackage.sizeBytes),
+      // The size statted now, never the boot's: the header and the bytes agree.
+      'content-length': String(stat.size),
+      // Also set on every response by the global security-headers middleware.
       'x-content-type-options': 'nosniff',
       'cache-control': 'no-store'
     });

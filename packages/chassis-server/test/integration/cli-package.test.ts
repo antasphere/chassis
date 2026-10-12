@@ -184,6 +184,20 @@ describe('cloud edition, released with its CLI package', () => {
     }
   });
 
+  it('a replay and a bad token answer the very same error body: no oracle between them', async () => {
+    const { token } = await hub.signConnectToken(person(), RESOURCE);
+    expect((await download(app, { token })).status).toBe(200);
+    const replay = await download(app, { token });
+    const bad = await download(app, { token: 'garbage' });
+    expect(replay.status).toBe(401);
+    expect(bad.status).toBe(401);
+    const replayBody = await readJson(replay);
+    expect(replayBody).toEqual({
+      error: { code: 'invalid_token', message: 'The exchange token is invalid, expired, or already used' }
+    });
+    expect(await readJson(bad)).toEqual(replayBody);
+  });
+
   it('a body without a token or with an empty one is 400 validation_error; no body at all is 400 invalid_json', async () => {
     await expectError(await download(app, {}), 400, 'validation_error');
     await expectError(await download(app, { token: '' }), 400, 'validation_error');
@@ -237,6 +251,104 @@ describe('cloud edition, released without its CLI package', () => {
     expect('cli' in instance).toBe(false);
     const { token } = await hub.signConnectToken(person(), RESOURCE);
     await expectError(await download(app, { token }), 404, 'cli_not_packaged');
+  });
+
+  it('the token is burned before the 404: twice is 404 then 401, and /sso/cli-connect then refuses it', async () => {
+    const { token, hubRefreshToken } = await hub.signConnectToken(person(), RESOURCE);
+    await expectError(await download(app, { token }), 404, 'cli_not_packaged');
+    await expectError(await download(app, { token }), 401, 'invalid_token');
+    await expectError(
+      await app.app.request('/api/v1/sso/cli-connect', sso.json({ token, hubRefreshToken })),
+      401,
+      'invalid_token'
+    );
+  });
+
+  it('an unverified token learns nothing of the release: garbage and another purpose are 401, never 404', async () => {
+    const other = (await hub.signConnectToken(person(), RESOURCE, { purpose: 'other' })).token;
+    for (const token of ['garbage', other]) {
+      await expectError(await download(app, { token }), 401, 'invalid_token');
+    }
+  });
+});
+
+describe('the tarball, statted when it is served', () => {
+  let app: TestApp;
+  let dir = '';
+
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'cli-package-live-'));
+    await writeFile(join(dir, 'package.json'), JSON.stringify(PACKAGE));
+    await writeFile(join(dir, 'package.tgz'), tarball);
+    app = await createTestApp(
+      await createDatabase(container, 'cli_package_live'),
+      cloudEnv({ CLI_PACKAGE_DIR: dir })
+    );
+    await setUp(app, 'Live tarball');
+  });
+
+  afterAll(async () => {
+    await app.stop();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('a tarball gone since the boot is 404 cli_not_packaged; a bigger one is served whole, with its own length', async () => {
+    await rm(join(dir, 'package.tgz'));
+    const gone = await hub.signConnectToken(person(), RESOURCE);
+    await expectError(await download(app, { token: gone.token }), 404, 'cli_not_packaged');
+
+    const bigger = randomBytes(4096);
+    await writeFile(join(dir, 'package.tgz'), bigger);
+    const { token } = await hub.signConnectToken(person(), RESOURCE);
+    const res = await download(app, { token });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-length')).toBe('4096');
+    expect(Buffer.from(await res.arrayBuffer()).equals(bigger)).toBe(true);
+    // Discovery still names what the image packed.
+    expect((await readJson(await app.app.request('/api/v1/instance'))).cli).toEqual(PACKAGE);
+  });
+});
+
+describe('the rate wall (CLI_CONNECT_IP_LIMIT_PER_15_MIN)', () => {
+  let app: TestApp;
+
+  beforeAll(async () => {
+    app = await createTestApp(
+      await createDatabase(container, 'cli_package_wall'),
+      cloudEnv({ CLI_PACKAGE_DIR: fixtureDir, CLI_CONNECT_IP_LIMIT_PER_15_MIN: '2' })
+    );
+    await setUp(app, 'Wall');
+  });
+
+  afterAll(async () => {
+    await app.stop();
+  });
+
+  const from = (ip: string) => ({ 'x-forwarded-for': ip });
+
+  it('the third presentation from one address is 429, and the token it carried still downloads from another', async () => {
+    for (let i = 0; i < 2; i++) {
+      await expectError(await download(app, { token: 'garbage' }, from('10.91.0.1')), 401, 'invalid_token');
+    }
+    const { token } = await hub.signConnectToken(person(), RESOURCE);
+    expect((await download(app, { token }, from('10.91.0.1'))).status).toBe(429);
+    const elsewhere = await download(app, { token }, from('10.91.0.2'));
+    expect(elsewhere.status).toBe(200);
+    expect(Buffer.from(await elsewhere.arrayBuffer()).equals(tarball)).toBe(true);
+  });
+
+  it('the bucket is the one /sso/cli-connect spends: two connects, then the download is 429', async () => {
+    const connect = (token: string) =>
+      app.app.request('/api/v1/sso/cli-connect', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...from('10.91.0.3') },
+        body: JSON.stringify({ token })
+      });
+    for (let i = 0; i < 2; i++) {
+      await expectError(await connect('x'.repeat(24)), 401, 'invalid_token');
+    }
+    const { token } = await hub.signConnectToken(person(), RESOURCE);
+    expect((await download(app, { token }, from('10.91.0.3'))).status).toBe(429);
   });
 });
 

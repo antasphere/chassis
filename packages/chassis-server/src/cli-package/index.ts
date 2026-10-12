@@ -23,7 +23,7 @@ export interface CliPackage {
   version: string;
   /** The tarball's path (the configured folder joined with `package.tgz`), what the route streams. */
   path: string;
-  /** The tarball's size, the response's `content-length`. */
+  /** The tarball's size when the boot read it (the route stats the file again when it serves). */
   sizeBytes: number;
   /** npm's own pack name for the pair, the attachment's filename. */
   filename: string;
