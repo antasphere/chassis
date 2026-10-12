@@ -489,7 +489,9 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
     const minted = key('tool');
     saveConfig(env, {
       activeProfile: 'tool',
-      profiles: { tool: { baseUrl: 'http://tool', connectKeys: { default: { apiKey: live } } } }
+      profiles: {
+        tool: { baseUrl: 'http://tool', connectKeys: { default: { apiKey: live, email: 'ada@x.co' } } }
+      }
     });
     const h = routedHarness(
       [

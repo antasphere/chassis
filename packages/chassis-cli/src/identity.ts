@@ -1,6 +1,15 @@
 import type { ToolIdentity } from '@antasphere/chassis-contract';
 
 /**
+ * The Antasphere hub every tool signs in through, when nothing names another
+ * (`ANTASPHERE_URL`, a hub profile's own `baseUrl`): the instance of the
+ * implicit `cloud` hub profile, and the cloud URL the hub profile is selected
+ * with (cli-core `selectHubProfile`, `hubCloudUrl`), so that a hub profile
+ * with no `baseUrl` of its own is at this hub, as the account CLI reads it.
+ */
+export const DEFAULT_HUB_URL = 'https://account.antasphere.com';
+
+/**
  * What a tool is called, in every place the generic CLI spells it. ONE object,
  * passed by the tool to `defineCli` (index.ts): the chassis holds no product
  * literal of its own, so each field below is read where the literal used to

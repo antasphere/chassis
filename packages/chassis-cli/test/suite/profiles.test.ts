@@ -220,7 +220,12 @@ describe('which profile a command runs on', () => {
     seedHubLogin(env);
     saveConfig(env, {
       activeProfile: 'work',
-      profiles: { work: { baseUrl: 'http://tool', connectKeys: { default: { apiKey: key('cached') } } } }
+      profiles: {
+        work: {
+          baseUrl: 'http://tool',
+          connectKeys: { default: { apiKey: key('cached'), email: 'ada@x.co' } }
+        }
+      }
     });
     const h = routedHarness([ossInstanceRoute, filesRoute], env);
     expect(await run(['files', 'list', '--profile', 'work', '--api-url', 'http://other'], h.io)).toBe(1);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { HUB_TOOL, saveConfig as saveCoreConfig } from '@antasphere/cli-core';
+import { HUB_TOOL, loadConfig as loadCoreConfig, saveConfig as saveCoreConfig } from '@antasphere/cli-core';
 import { routedHarness, tempConfigEnv, type Route } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
 import {
@@ -45,7 +45,9 @@ async function cachedEnv(): Promise<Record<string, string>> {
   seedHubLogin(env);
   saveConfig(env, {
     activeProfile: 'work',
-    profiles: { work: { baseUrl: 'http://tool', connectKeys: { default: { apiKey: OLD } } } }
+    profiles: {
+      work: { baseUrl: 'http://tool', connectKeys: { default: { apiKey: OLD, email: 'ada@x.co' } } }
+    }
   });
   return env;
 }
@@ -319,19 +321,52 @@ describe('a cached key of another Antasphere account (PRDCT-3032)', () => {
     expect(JSON.stringify(loadConfig(env))).not.toContain(OLD);
   });
 
-  it('a cache entry with no email, or a hub login with none, is trusted as before', async () => {
-    for (const [cached, hubEmail] of [
-      [{ apiKey: OLD }, 'bob@x.co'],
-      [{ apiKey: OLD, email: 'ada@x.co' }, undefined]
-    ] as const) {
+  it.each([
+    [
+      'a cache entry with no address',
+      { apiKey: OLD },
+      'bob@x.co',
+      'cached for an unknown login is retired: the Antasphere login is now bob@x.co.\n'
+    ],
+    [
+      'a hub login with no address',
+      { apiKey: OLD, email: 'ada@x.co' },
+      undefined,
+      'cached for ada@x.co is retired: the Antasphere login carries no address to match it with.\n'
+    ]
+  ] as const)(
+    '%s is never served: the key is retired and revoked, the exchange mints anew, the hub profile carries the address after (verifier round 1, F1 and F5)',
+    async (_label, cached, hubEmail, retired) => {
       const env = await switchedEnv(cached, hubEmail);
       const h = routedHarness(routesFor([OLD, NEW]), env);
       expect(await run(['whoami'], h.io)).toBe(0);
-      expect(trace(h)).toEqual([`GET http://tool/api/v1/me Bearer ${OLD}`]);
-      expect(h.err()).not.toContain('is retired');
-      expect(loadConfig(env).profiles.work?.connectKeys?.default?.apiKey).toBe(OLD);
+      expect(trace(h)).toEqual([
+        `DELETE http://tool/api/v1/cli/auth/key Bearer ${OLD}`,
+        'GET http://tool/api/v1/instance -',
+        `POST ${HUB}/api/v1/sso/tool-token Bearer ${BOB_HUB_KEY}`,
+        'POST http://tool/api/v1/sso/cli-connect -',
+        `GET http://tool/api/v1/me Bearer ${NEW}`
+      ]);
+      expect(h.wire.filter((c) => c.auth === `Bearer ${OLD}`).map((c) => c.method)).toEqual(['DELETE']);
+      expect(h.err()).toContain(`The ${displayName} key ${retired}`);
+      const work = loadConfig(env).profiles.work;
+      expect(Object.keys(work?.connectKeys ?? {})).toEqual(['default']);
+      expect(work?.connectKeys?.default).toMatchObject({ apiKey: NEW, email: 'bob@x.co' });
+      expect(JSON.stringify(loadConfig(env))).not.toContain(OLD);
+      // The hub profile is healed with the address the exchange answered
+      // (when it had none), and nothing else of it moves.
+      expect(loadCoreConfig(env, HUB_TOOL)).toEqual({
+        activeProfile: 'default',
+        profiles: { default: { apiKey: BOB_HUB_KEY, baseUrl: HUB, email: 'bob@x.co' } }
+      });
+
+      // The next command is served from the cache: zero hub calls.
+      const next = routedHarness(routesFor([NEW]), env);
+      expect(await run(['whoami'], next.io)).toBe(0);
+      expect(trace(next)).toEqual([`GET http://tool/api/v1/me Bearer ${NEW}`]);
+      expect(next.err()).toBe('');
     }
-  });
+  );
 
   it('the same account in another case is the same account: the cached key is served (verifier M3)', async () => {
     const env = await switchedEnv({ apiKey: OLD, email: 'ada@x.co' }, 'ADA@X.CO');
