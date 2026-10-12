@@ -55,8 +55,8 @@ importers:
         specifier: workspace:*
         version: link:../chassis-sdk
       '@antasphere/cli-core':
-        specifier: ^0.5.0
-        version: 0.5.0
+        specifier: ^0.6.0
+        version: 0.6.0
       commander:
         specifier: ^12.1.0
         version: 12.1.0
@@ -248,8 +248,8 @@ importers:
 
 packages:
 
-  '@antasphere/cli-core@0.5.0':
-    resolution: {integrity: sha512-aV0/rttHWVMIgaNVk20T6tONNlNQQG2kY+fiGkUt7DxA8q4X1YWx8EqYzp2I1vkUerMW74C5n/wbAkes1kO2fw==}
+  '@antasphere/cli-core@0.6.0':
+    resolution: {integrity: sha512-Jvkuyx6aClF+riQSd0qxnsoDc8k3J2UjmCHl8y6cbtvtV9uImPt+aEUAQZVViyVVRPcRXOHlNSCJLNlLNLaAMw==}
     engines: {node: '>=22'}
 
   '@antasphere/contract@0.16.3':
@@ -3462,7 +3462,7 @@ packages:
 
 snapshots:
 
-  '@antasphere/cli-core@0.5.0': {}
+  '@antasphere/cli-core@0.6.0': {}
 
   '@antasphere/contract@0.16.3(hono@4.12.27)':
     dependencies:
