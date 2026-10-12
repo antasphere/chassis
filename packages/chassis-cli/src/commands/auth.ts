@@ -5,6 +5,7 @@ import {
   CliAuthError,
   CliUsageError as CoreUsageError,
   CLOUD_PROFILE,
+  firstSet,
   HUB_TOOL,
   loadConfig as loadCoreConfig,
   normalizeUrl,
@@ -374,8 +375,11 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
   async function hubLogout(): Promise<{ email: string | undefined; revoked: boolean } | null> {
     const hub = selectHubProfile(io.env, { cloudUrl: DEFAULT_HUB_URL });
     if (!hub.name || !hub.profile?.apiKey) return null;
+    // Revoked at the HUB's own URL: the profile's, else the default hub. Never
+    // the tool kit's `profileUrl`, whose fallback is the tool's cloud host: a
+    // hub profile with no baseUrl would send the hub key there.
     const auth = new CliAuthClient({
-      baseUrl: profileUrl(hub.profile),
+      baseUrl: firstSet(hub.profile.baseUrl, DEFAULT_HUB_URL) ?? DEFAULT_HUB_URL,
       ...(io.fetch ? { fetch: io.fetch } : {})
     });
     let revoked = false;

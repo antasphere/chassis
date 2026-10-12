@@ -214,6 +214,35 @@ describe('logout --all ends the hub login ANTASPHERE_URL names', () => {
   });
 });
 
+describe('logout --all revokes the hub key at the hub', () => {
+  it('a hub profile with no baseUrl: the hub key is revoked at the default hub, and no request carrying it reaches the tool', async () => {
+    const env = await tempConfigEnv();
+    saveCoreConfig(env, HUB_TOOL, {
+      activeProfile: 'default',
+      profiles: { default: { apiKey: HUB_KEY, email: 'ada@x.co' } }
+    });
+    const toolKey = key('cached');
+    saveConfig(env, {
+      activeProfile: 'work',
+      profiles: {
+        work: { baseUrl: 'http://tool', connectKeys: { default: { apiKey: toolKey, email: 'ada@x.co' } } }
+      }
+    });
+    const h = routedHarness([revokeRoute], env);
+    expect(await run(['logout', '--all'], h.io)).toBe(0);
+    expect(trace(h)).toEqual([
+      `DELETE http://tool/api/v1/cli/auth/key Bearer ${toolKey}`,
+      `DELETE ${new URL(DEFAULT_HUB_URL).origin}/api/v1/cli/auth/key Bearer ${HUB_KEY}`
+    ]);
+    expect(h.wire.filter((c) => c.auth === `Bearer ${HUB_KEY}`).map((c) => c.origin)).toEqual([
+      new URL(DEFAULT_HUB_URL).origin
+    ]);
+    expect(h.wire.some((c) => c.origin !== 'http://tool' && c.auth === `Bearer ${toolKey}`)).toBe(false);
+    expect(h.wire.some((c) => c.origin === new URL(cli.identity.cloudUrl).origin)).toBe(false);
+    expect(loadCoreConfig(env, HUB_TOOL).profiles).toEqual({});
+  });
+});
+
 describe('a hub profile without its address is healed by the first fresh exchange', () => {
   it('login on a hub profile with no email: one exchange, the address the hub answered written onto that profile only, the next command served from the cache', async () => {
     const env: Record<string, string> = { ...(await tempConfigEnv()), ANTASPHERE_URL: HUB };
