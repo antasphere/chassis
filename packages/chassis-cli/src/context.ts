@@ -424,12 +424,14 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
       }
       const outcome = await refreshConnectKey(connectOptions(ctx));
       if (outcome.outcome === 'not_cloud') return res;
+      // The cause before its consequence (verifier round 3, F1): the sign-in
+      // is said first, then what the fresh mint healed.
+      ctx.io.err.write('The cached key was refused; signed in again through Antasphere.\n');
       // A fresh mint like any other: the hub profile is healed here too, or
       // the next run would retire the key just minted (verifier round 2, F1).
       healHubAddress(ctx, outcome);
       ctx.apiKey = outcome.key;
       ctx.credentialSource = 'hub-exchange';
-      ctx.io.err.write('The cached key was refused; signed in again through Antasphere.\n');
       const headers = new Headers(init?.headers);
       headers.set('authorization', `Bearer ${outcome.key}`);
       return base(input, { ...init, headers });
