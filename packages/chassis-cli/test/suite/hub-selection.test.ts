@@ -8,6 +8,7 @@ import {
   HUB,
   HUB_KEY,
   key,
+  meBody,
   meRoute,
   ORG,
   otpRoutes
@@ -147,39 +148,54 @@ describe('a hub profile with no baseUrl is at the default hub (verifier round 1,
     });
   });
 
-  it('a 401 on that cached key evicts it from the slot it was read from (the seam is given the same hub cloud URL)', async () => {
+  it('a 401 on that cached key: evicted from the slot it was read from, a fresh exchange at the default hub, the replay with the new key under the same slot', async () => {
     const env = await legacyEnv();
     const cached = key('cached');
+    const minted = key('new');
     saveConfig(env, {
       activeProfile: 'work',
       profiles: {
         work: { baseUrl: 'http://tool', connectKeys: { default: { apiKey: cached, email: 'ada@x.co' } } }
       }
     });
-    const refused: Route = {
+    const me: Route = {
       method: 'GET',
       path: /\/api\/v1\/me$/,
-      reply: () => ({
-        status: 401,
-        body: { error: { code: 'invalid_api_key', message: 'API key not recognized' } }
-      })
+      reply: ({ headers }) =>
+        headers.get('authorization') === `Bearer ${minted}`
+          ? { body: meBody() }
+          : { status: 401, body: { error: { code: 'invalid_api_key', message: 'API key not recognized' } } }
     };
-    const h = routedHarness([cloudInstanceRoute, ...exchangeRoutes([key('new')]), refused], env);
-    expect(await run(['whoami'], h.io)).toBe(1);
+    const h = routedHarness([cloudInstanceRoute, ...exchangeRoutes([minted]), me], env);
+    expect(await run(['whoami'], h.io)).toBe(0);
     expect(trace(h)).toEqual([
       `GET http://tool/api/v1/me Bearer ${cached}`,
-      'GET http://tool/api/v1/instance -'
+      'GET http://tool/api/v1/instance -',
+      `POST ${new URL(DEFAULT_HUB_URL).origin}/api/v1/sso/tool-token Bearer ${HUB_KEY}`,
+      'POST http://tool/api/v1/sso/cli-connect -',
+      `GET http://tool/api/v1/me Bearer ${minted}`
     ]);
-    expect(loadConfig(env).profiles.work?.connectKeys ?? {}).toEqual({});
+    const connectKeys = loadConfig(env).profiles.work?.connectKeys ?? {};
+    expect(Object.keys(connectKeys)).toEqual(['default']);
+    expect(connectKeys.default).toMatchObject({ apiKey: minted, email: 'ada@x.co' });
+    expect(JSON.stringify(loadConfig(env))).not.toContain(cached);
   });
 
-  it('without a cached key the profile is found, but cli-core 0.6.0 takes the hub URL from its own baseUrl only: the login is demanded, no hub is called', async () => {
+  it('without a cached key it exchanges at the default hub with its own key, and the connect key lands under its slot', async () => {
     const env = await legacyEnv();
-    const h = routedHarness([cloudInstanceRoute, ...exchangeRoutes([key('new')]), meRoute()], env);
-    expect(await run(['whoami', '--api-url', 'http://tool'], h.io)).toBe(1);
-    expect(trace(h)).toEqual(['GET http://tool/api/v1/instance -']);
-    expect(h.err()).toContain('signs in through Antasphere');
-    expect(loadConfig(env).profiles.tool?.connectKeys).toBeUndefined();
+    const minted = key('new');
+    const h = routedHarness([cloudInstanceRoute, ...exchangeRoutes([minted]), meRoute()], env);
+    expect(await run(['whoami', '--api-url', 'http://tool'], h.io)).toBe(0);
+    expect(trace(h)).toEqual([
+      'GET http://tool/api/v1/instance -',
+      `POST ${new URL(DEFAULT_HUB_URL).origin}/api/v1/sso/tool-token Bearer ${HUB_KEY}`,
+      'POST http://tool/api/v1/sso/cli-connect -',
+      `GET http://tool/api/v1/me Bearer ${minted}`
+    ]);
+    const connectKeys = loadConfig(env).profiles.tool?.connectKeys ?? {};
+    expect(Object.keys(connectKeys)).toEqual(['default']);
+    expect(connectKeys.default).toMatchObject({ apiKey: minted, email: 'ada@x.co' });
+    // The profile carried its address: nothing of the hub's file moves.
     expect(loadCoreConfig(env, HUB_TOOL)).toEqual({
       activeProfile: 'default',
       profiles: { default: { apiKey: HUB_KEY, email: 'ada@x.co' } }
