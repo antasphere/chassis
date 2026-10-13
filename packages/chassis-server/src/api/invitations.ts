@@ -380,6 +380,12 @@ export function registerInvitationRoutes(api: OpenAPIHono, deps: InvitationRoute
       invitationId: invitation.id,
       userId
     });
+    // The person is a member now (the webhooks' `member.joined` rides the bus).
+    registry.events.emit('member.joined', {
+      workspaceId: invitation.workspaceId,
+      userId,
+      role: invitation.role
+    });
     // Public endpoint: no principal in context, write the audit row directly.
     await audit.write({
       workspaceId: invitation.workspaceId,

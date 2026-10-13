@@ -222,7 +222,7 @@ describe(`${bin} webhooks`, () => {
     expect(h.out()).toMatch(/^TYPE\s+SUBJECTS\s+DESCRIPTION/);
     expect(h.out()).toMatch(/webhook\.ping\s+-\s+A test delivery\./);
     expect(h.out()).toMatch(/thing\.created\s+thing\s+A thing was created\./);
-    expect(h.out()).toMatch(/thing\s+data\.thingId\s+A thing of the workspace, by id/);
+    expect(h.out()).toMatch(/thing\s+subjects\.thingId\s+A thing of the workspace, by id/);
   });
 
   it('events --json is the catalog verbatim', async () => {

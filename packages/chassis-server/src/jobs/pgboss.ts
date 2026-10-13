@@ -78,6 +78,15 @@ export interface JobDeclaration<TData extends object = object> {
    * it must be declared BEFORE the queue that names it.
    */
   options?: QueueOptions;
+  /**
+   * How many pollers this replica runs on the queue (default 1). pg-boss's
+   * worker is a serial loop, one job at a time; a queue whose handler waits
+   * on the outside (a webhook delivery, up to its timeout) declares more, so
+   * one silent receiver never holds every other job of the instance behind
+   * it (verifier round 1, MJ1). Each poller fetches with SKIP LOCKED, so the
+   * pollers never share a job.
+   */
+  concurrency?: number;
   handler(data: TData | null, job: TimerJob): Promise<void>;
 }
 
@@ -406,15 +415,18 @@ export async function createJobs(
     // default batch), its payload and its key handed to the handler: a timer
     // (`./timers.ts`) rides the same poller as a cron.
     for (const job of toolJobs) {
-      await boss.work<object>(job.queue, { includeMetadata: true }, async (jobs) => {
-        for (const fetched of jobs) {
-          await job.handler(fetched.data ?? null, {
-            id: fetched.id,
-            queue: job.queue,
-            key: fetched.singletonKey ?? null
-          });
-        }
-      });
+      const pollers = Math.max(1, Math.floor(job.concurrency ?? 1));
+      for (let i = 0; i < pollers; i++) {
+        await boss.work<object>(job.queue, { includeMetadata: true }, async (jobs) => {
+          for (const fetched of jobs) {
+            await job.handler(fetched.data ?? null, {
+              id: fetched.id,
+              queue: job.queue,
+              key: fetched.singletonKey ?? null
+            });
+          }
+        });
+      }
     }
 
     // Orphaned-user GC: setup-race losers, fail-closed SSO login strands

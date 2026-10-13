@@ -711,7 +711,7 @@ const webhookErrors = {
 };
 const urlRefused400 = jsonBody(
   apiErrorSchema,
-  'Validation error, or url_refused: the address is not one this instance may deliver to (a private network, a port, the scheme)'
+  'Validation error, url_refused (the address is not one this instance may deliver to: a private network, a port, the scheme), unknown_event (a type or family the catalog does not declare) or unknown_subject (a filter key the catalog does not declare)'
 );
 
 export const webhooksListRoute = createRoute({

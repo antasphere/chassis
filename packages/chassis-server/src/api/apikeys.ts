@@ -6,6 +6,7 @@ import { sql } from 'drizzle-orm';
 import type { ApiKeyService } from '../apikeys/service.js';
 import { cursorRowId, keysetBefore, pageOf } from '../pagination.js';
 import { requireAuth } from '../middleware/auth-context.js';
+import type { EventBus } from '../platform/events.js';
 
 const err = (code: string, message: string) => ({ error: { code, message } });
 
@@ -34,7 +35,9 @@ export function registerApiKeyRoutes(
   api: OpenAPIHono,
   db: Db,
   service: ApiKeyService,
-  routes: Pick<ScopeRoutes, 'apiKeysListRoute' | 'apiKeyCreateRoute' | 'apiKeyRevokeRoute'>
+  routes: Pick<ScopeRoutes, 'apiKeysListRoute' | 'apiKeyCreateRoute' | 'apiKeyRevokeRoute'>,
+  /** The bus, for `apikey.created` and `apikey.revoked` after the write (the webhooks bridge them). */
+  events?: EventBus
 ): void {
   const { apiKeysListRoute, apiKeyCreateRoute, apiKeyRevokeRoute } = routes;
   api.use('/api-keys', requireAuth());
@@ -109,6 +112,10 @@ export function registerApiKeyRoutes(
       expiresAt
     });
     const [row] = await db.select().from(apiKeys).where(eq(apiKeys.id, minted.id)).limit(1);
+    events?.emit('apikey.created', {
+      workspaceId: body.workspaceId ?? principal.workspaceId,
+      apiKeyId: minted.id
+    });
     c.set('audit', {
       action: 'apikey.create',
       resourceType: 'api_key',
@@ -141,6 +148,10 @@ export function registerApiKeyRoutes(
         .where(eq(apiKeys.id, key.id));
     }
     const [updated] = await db.select().from(apiKeys).where(eq(apiKeys.id, key.id)).limit(1);
+    events?.emit('apikey.revoked', {
+      workspaceId: key.workspaceId ?? principal.workspaceId,
+      apiKeyId: key.id
+    });
     c.set('audit', { action: 'apikey.revoke', resourceType: 'api_key', resourceId: key.id });
     return c.json(toWire(updated!), 200);
   });

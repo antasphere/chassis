@@ -6,6 +6,7 @@ import {
   user as userTable,
   webhookDeliveries,
   webhookEndpoints,
+  workspaceMembers,
   workspaces,
   type Db,
   type DbConn,
@@ -57,8 +58,9 @@ import { sendInTx } from './tx-send.js';
  * guarded fetch. A 2xx is `delivered`; anything else fails the job, which
  * pg-boss retries on the queue's budget (ten retries from thirty seconds,
  * about eight and a half hours), then moves to `webhook-deliveries-held`:
- * the row is marked `held`, logged, counted, and re-driven every hour until
- * the receiver takes it or the endpoint is disabled. A streak of
+ * the row is marked `held`, logged, counted, and queued again an hour later
+ * with the whole budget once more, round after round, until the receiver
+ * takes it or the endpoint is disabled. A streak of
  * `disableAfterFailures` failures spanning `disableAfterMs` switches the
  * endpoint off and mails its creator once.
  *
@@ -164,7 +166,7 @@ export interface WebhookServiceDeps {
 
 export class WebhookRefusedError extends Error {
   constructor(
-    readonly code: 'url_refused' | 'not_found',
+    readonly code: 'url_refused' | 'not_found' | 'unknown_event' | 'unknown_subject',
     message: string
   ) {
     super(message);
@@ -257,7 +259,18 @@ export class WebhookService implements WebhookEmitter {
         );
         return null;
       }
-      subjects[key] = typeof value === 'string' ? value : [...value];
+      const declaredSubject = this.deps.catalog.subjects[key];
+      if (declaredSubject?.list === true) {
+        subjects[key] = typeof value === 'string' ? [value] : [...value];
+      } else if (typeof value === 'string') {
+        subjects[key] = value;
+      } else {
+        this.deps.logger.error(
+          { type: event.type, subject: key },
+          'webhooks: an emit gave a list for a subject declared as one id — skipped'
+        );
+        return null;
+      }
     }
     const boss = this.requireBoss();
     const job: WebhookEventJob = {
@@ -432,18 +445,39 @@ export class WebhookService implements WebhookEmitter {
     }
     const attempt = delivery.attempt + 1;
     const body = JSON.stringify({ ...delivery.payload, attempt });
-    const secrets = [this.box.open(endpoint.secret)];
-    if (
-      endpoint.previousSecret &&
-      endpoint.previousSecretExpiresAt &&
-      endpoint.previousSecretExpiresAt > now
-    ) {
-      secrets.push(this.box.open(endpoint.previousSecret));
+    // The secret is opened INSIDE the attempt's own handling: a row whose
+    // secret cannot be opened (a rotated auth secret, a damaged row) ends the
+    // delivery as failed `secret_unreadable`, visible on the page, never a
+    // throw that loops through the retries with nothing recorded (verifier
+    // round 1, MN3).
+    let headers: Record<string, string>;
+    try {
+      const secrets = [this.box.open(endpoint.secret)];
+      if (
+        endpoint.previousSecret &&
+        endpoint.previousSecretExpiresAt &&
+        endpoint.previousSecretExpiresAt > now
+      ) {
+        secrets.push(this.box.open(endpoint.previousSecret));
+      }
+      headers = {
+        ...webhookHeaders(secrets, delivery.eventId, Math.floor(now.getTime() / 1000), body),
+        'user-agent': `${this.deps.identity.slug}-webhooks/${this.deps.version}`
+      };
+    } catch (e) {
+      this.deliveries.inc({ outcome: 'refused' });
+      this.deps.logger.error(
+        { err: e, endpointId: endpoint.id, deliveryId: delivery.id },
+        'webhooks: the endpoint’s secret cannot be opened — the delivery is failed, not retried'
+      );
+      return this.finish(delivery, {
+        status: 'failed',
+        attempt,
+        lastError: 'secret_unreadable',
+        lastStatusCode: null,
+        now
+      });
     }
-    const headers = {
-      ...webhookHeaders(secrets, delivery.eventId, Math.floor(now.getTime() / 1000), body),
-      'user-agent': `${this.deps.identity.slug}-webhooks/${this.deps.version}`
-    };
     let statusCode: number | null = null;
     let error: string | null = null;
     try {
@@ -483,22 +517,37 @@ export class WebhookService implements WebhookEmitter {
       });
     }
     this.deliveries.inc({ outcome: 'failed' });
-    const streak = endpoint.consecutiveFailures + 1;
-    const firstFailureAt = endpoint.firstFailureAt ?? now;
-    const disable =
-      streak >= this.dials.disableAfterFailures &&
-      now.getTime() - firstFailureAt.getTime() >= this.dials.disableAfterMs;
-    await this.deps.db
+    // The streak is counted IN the statement (never read then written):
+    // replicas failing the same endpoint at once each add their one, and the
+    // switch-off below is a second conditional statement only one of them
+    // wins (verifier round 1, MN5).
+    const [counted] = await this.deps.db
       .update(webhookEndpoints)
       .set({
-        consecutiveFailures: streak,
-        firstFailureAt,
+        consecutiveFailures: sql`${webhookEndpoints.consecutiveFailures} + 1`,
+        firstFailureAt: sql`COALESCE(${webhookEndpoints.firstFailureAt}, ${now})`,
         lastDeliveryAt: now,
         lastDeliveryStatus: 'failed',
-        updatedAt: now,
-        ...(disable ? { enabled: false, disabledAt: now, disabledReason: 'delivery_failures' } : {})
+        updatedAt: now
       })
-      .where(eq(webhookEndpoints.id, endpoint.id));
+      .where(eq(webhookEndpoints.id, endpoint.id))
+      .returning({
+        streak: webhookEndpoints.consecutiveFailures,
+        firstFailureAt: webhookEndpoints.firstFailureAt
+      });
+    const streak = counted?.streak ?? endpoint.consecutiveFailures + 1;
+    const firstFailureAt = counted?.firstFailureAt ?? now;
+    let disable =
+      streak >= this.dials.disableAfterFailures &&
+      now.getTime() - firstFailureAt.getTime() >= this.dials.disableAfterMs;
+    if (disable) {
+      const [won] = await this.deps.db
+        .update(webhookEndpoints)
+        .set({ enabled: false, disabledAt: now, disabledReason: 'delivery_failures', updatedAt: now })
+        .where(and(eq(webhookEndpoints.id, endpoint.id), eq(webhookEndpoints.enabled, true)))
+        .returning({ id: webhookEndpoints.id });
+      disable = won !== undefined;
+    }
     if (disable) {
       this.invalidateListeners(endpoint.workspaceId);
       this.disabled.inc();
@@ -593,9 +642,20 @@ export class WebhookService implements WebhookEmitter {
 
   private async mailDisabled(endpoint: WebhookEndpointRow, streak: number, since: Date): Promise<void> {
     if (!endpoint.createdBy || !this.deps.email.delivers) return;
+    // Only a person still an ACTIVE member of the workspace is told: a
+    // creator who left takes no workspace name and no link with them
+    // (verifier round 1, MN4).
     const [creator] = await this.deps.db
       .select({ email: userTable.email, name: userTable.name })
       .from(userTable)
+      .innerJoin(
+        workspaceMembers,
+        and(
+          eq(workspaceMembers.userId, userTable.id),
+          eq(workspaceMembers.workspaceId, endpoint.workspaceId),
+          eq(workspaceMembers.isActive, true)
+        )
+      )
       .where(eq(userTable.id, endpoint.createdBy))
       .limit(1);
     if (!creator) return;
@@ -651,12 +711,46 @@ export class WebhookService implements WebhookEmitter {
     }
   }
 
+  /**
+   * The subscription is checked against the catalog at registration
+   * (verifier round 1, MN1): an exact type must be declared, a family must
+   * have at least one declared type, `*` is always right; every filter key
+   * must be a declared subject. A typo would otherwise subscribe to nothing,
+   * silently.
+   */
+  checkSubscription(
+    events: readonly string[] | undefined,
+    filters: Record<string, string[]> | undefined
+  ): void {
+    const known = this.deps.catalog.events;
+    const families = new Set([...known.keys()].map((t) => t.slice(0, t.indexOf('.'))));
+    for (const pattern of events ?? []) {
+      if (pattern === '*') continue;
+      if (pattern.endsWith('.*')) {
+        if (!families.has(pattern.slice(0, -2))) {
+          throw new WebhookRefusedError(
+            'unknown_event',
+            `"${pattern}" matches no event family of this instance`
+          );
+        }
+      } else if (!known.has(pattern)) {
+        throw new WebhookRefusedError('unknown_event', `"${pattern}" is not an event type of this instance`);
+      }
+    }
+    for (const key of Object.keys(filters ?? {})) {
+      if (!(key in this.deps.catalog.subjects)) {
+        throw new WebhookRefusedError('unknown_subject', `"${key}" is not a subject of this instance`);
+      }
+    }
+  }
+
   async create(
     workspaceId: string,
     createdBy: string,
     input: WebhookEndpointCreate
   ): Promise<{ endpoint: WebhookEndpoint; secret: string }> {
     this.checkUrl(input.url);
+    this.checkSubscription(input.events, input.filters);
     const secret = generateWebhookSecret();
     const [row] = await this.deps.db
       .insert(webhookEndpoints)
@@ -728,6 +822,7 @@ export class WebhookService implements WebhookEmitter {
     patch: WebhookEndpointUpdate
   ): Promise<WebhookEndpoint | null> {
     if (patch.url !== undefined) this.checkUrl(patch.url);
+    this.checkSubscription(patch.events, patch.filters);
     const now = this.now();
     const reEnabled = patch.enabled === true;
     const [row] = await this.deps.db

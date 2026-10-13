@@ -222,6 +222,40 @@ describe('safePost against a loopback receiver', () => {
     expect(seen.slice(before).map((s) => s.url)).toEqual(['/redirect']);
   });
 
+  it('the REAL transport (no seam) answers a 302 as its status and never requests the Location (verifier round 1, G2)', async () => {
+    // A second loopback server is the Location's target: it must see nothing.
+    const targetSeen: string[] = [];
+    const target = http.createServer((req, res) => {
+      targetSeen.push(req.url ?? '');
+      res.writeHead(200);
+      res.end('followed');
+    });
+    await new Promise<void>((resolve) => target.listen(0, '127.0.0.1', resolve));
+    const targetUrl = `http://127.0.0.1:${(target.address() as AddressInfo).port}/target`;
+    const redirector = http.createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(302, { location: targetUrl });
+        res.end('moved');
+      });
+    });
+    await new Promise<void>((resolve) => redirector.listen(0, '127.0.0.1', resolve));
+    const redirectorUrl = `http://127.0.0.1:${(redirector.address() as AddressInfo).port}/redirect`;
+    try {
+      // OPEN lifts the address rule and the port rule: the ephemeral ports are reached directly.
+      const result = await safePost(redirectorUrl, {}, 'x', OPEN, { timeoutMs: 2000 });
+      expect(result.status).toBe(302);
+      expect(result.bodyText).toBe('moved');
+      await new Promise((r) => setTimeout(r, 100));
+      expect(targetSeen).toEqual([]);
+    } finally {
+      for (const s of [redirector, target]) {
+        s.closeAllConnections();
+        await new Promise<void>((resolve) => s.close(() => resolve()));
+      }
+    }
+  });
+
   it('a receiver that never answers: the timeout rejects with an abort error', async () => {
     const started = Date.now();
     const err = await safePost('http://receiver.test/silent', {}, 'x', OPEN, {

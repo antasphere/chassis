@@ -197,7 +197,9 @@ export type WebhookTestResult = z.infer<typeof webhookTestResultSchema>;
 export const webhookCatalogSubjectSchema = z.object({
   key: z.string(),
   field: z.string(),
-  description: z.string()
+  description: z.string(),
+  /** The value under `field` is always a list of ids (`projectIds`); else always one id. */
+  list: z.boolean()
 });
 export type WebhookCatalogSubject = z.infer<typeof webhookCatalogSubjectSchema>;
 

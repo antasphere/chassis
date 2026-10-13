@@ -36,6 +36,7 @@ export function webhookJobs(
     },
     {
       queue: WEBHOOK_EVENTS_QUEUE,
+      concurrency: 2,
       handler: async (data) => {
         const job = data as WebhookEventJob | null;
         if (!job?.id) return;
@@ -51,6 +52,9 @@ export function webhookJobs(
         retryBackoff: true,
         deadLetter: WEBHOOK_DELIVERIES_HELD_QUEUE
       },
+      // Eight deliveries in flight per replica: a receiver that answers
+      // nothing holds one slot for its timeout, not the instance.
+      concurrency: 8,
       handler: async (data) => {
         const job = data as WebhookDeliveryJob | null;
         if (!job?.deliveryId) return;

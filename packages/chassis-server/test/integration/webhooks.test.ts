@@ -1,6 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { and, eq } from 'drizzle-orm';
 import { webhookDeliveries, webhookEndpoints, workspaceMembers } from '@antasphere/chassis-db';
@@ -79,6 +80,12 @@ let base = '';
 const received: Received[] = [];
 /** What the receiver answers per path; 200 for any path not listed. */
 const statusFor = new Map<string, number>();
+/** Paths the receiver never answers (the response held open until the sender's timeout). */
+const silentPaths = new Set<string>();
+/** The responses held open now, and the most ever held open at once, per silent path. */
+const openNow = new Map<string, number>();
+const openMax = new Map<string, number>();
+const heldOpen: http.ServerResponse[] = [];
 
 const requestsTo = (path: string) => received.filter((r) => r.url === path);
 const requestsWithId = (id: string) => received.filter((r) => r.headers['webhook-id'] === id);
@@ -256,8 +263,17 @@ describe.skipIf(!host.webhooks)('outbound webhooks (PRDCT-3482)', () => {
       req.setEncoding('utf8');
       req.on('data', (chunk: string) => (body += chunk));
       req.on('end', () => {
-        received.push({ method: req.method ?? '', url: req.url ?? '', headers: req.headers, body });
-        res.statusCode = statusFor.get(req.url ?? '') ?? 200;
+        const url = req.url ?? '';
+        received.push({ method: req.method ?? '', url, headers: req.headers, body });
+        if (silentPaths.has(url)) {
+          heldOpen.push(res);
+          const now = (openNow.get(url) ?? 0) + 1;
+          openNow.set(url, now);
+          openMax.set(url, Math.max(openMax.get(url) ?? 0, now));
+          res.on('close', () => openNow.set(url, (openNow.get(url) ?? 1) - 1));
+          return;
+        }
+        res.statusCode = statusFor.get(url) ?? 200;
         res.end('ok');
       });
     });
@@ -292,6 +308,8 @@ describe.skipIf(!host.webhooks)('outbound webhooks (PRDCT-3482)', () => {
     await closed?.stop();
     await app?.stop();
     await container?.stop();
+    for (const res of heldOpen) res.destroy();
+    server?.closeAllConnections();
     await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
   });
 
@@ -304,8 +322,9 @@ describe.skipIf(!host.webhooks)('outbound webhooks (PRDCT-3482)', () => {
       const catalog = await readJson(res);
       expect(catalog.subjects).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ key: 'thing', field: 'thingId' }),
-          expect.objectContaining({ key: 'project', field: 'projectId' })
+          expect.objectContaining({ key: 'thing', field: 'thingId', list: false }),
+          // The minimal tool re-declares the chassis's project subject as a list (MN2).
+          expect.objectContaining({ key: 'project', field: 'projectIds', list: true })
         ])
       );
       const byType = new Map<
@@ -372,6 +391,43 @@ describe.skipIf(!host.webhooks)('outbound webhooks (PRDCT-3482)', () => {
         'not_found'
       );
     });
+
+    it('18. the subscription is checked against the catalog, on create and on update: an unknown type or family 400 unknown_event, an unknown filter key 400 unknown_subject (MN1)', async () => {
+      const url = `${base}/hook-mn1`;
+      const never = { thing: ['t-mn1-never'] };
+      const post = (body: Record<string, unknown>) =>
+        send('POST', '/webhooks', actors.admin!, { url, ...body });
+      await expectError(await post({ events: ['thing.nonexistent'] }), 400, 'unknown_event');
+      await expectError(await post({ events: ['nothing.*'] }), 400, 'unknown_event');
+      await expectError(
+        await post({ events: ['thing.created'], filters: { bogus: ['x'] } }),
+        400,
+        'unknown_subject'
+      );
+      const stored = async () =>
+        (await app.db.db.select().from(webhookEndpoints).where(eq(webhookEndpoints.url, url))).length;
+      expect(await stored()).toBe(0);
+
+      const accepted: Created[] = [];
+      for (const events of [['*'], ['thing.*'], ['webhook.ping']]) {
+        accepted.push(await createEndpoint(actors.admin!, { url, events, filters: never }));
+      }
+      expect(await stored()).toBe(3);
+
+      const id = accepted[0]!.id;
+      const patch = (body: Record<string, unknown>) => send('PATCH', `/webhooks/${id}`, actors.admin!, body);
+      await expectError(await patch({ events: ['thing.nonexistent'] }), 400, 'unknown_event');
+      await expectError(await patch({ events: ['nothing.*'] }), 400, 'unknown_event');
+      await expectError(await patch({ filters: { bogus: ['x'] } }), 400, 'unknown_subject');
+      expect(await endpointRow(id)).toMatchObject({ events: ['*'], filters: never });
+      for (const events of [['thing.*'], ['webhook.ping'], ['*']]) {
+        const ok = await patch({ events });
+        expect(ok.status).toBe(200);
+        expect(await readJson(ok)).toMatchObject({ events });
+      }
+      for (const e of accepted)
+        expect((await send('DELETE', `/webhooks/${e.id}`, actors.admin!)).status).toBe(200);
+    });
   });
 
   // ── Emit and deliver ─────────────────────────────────────────────────────────
@@ -408,7 +464,7 @@ describe.skipIf(!host.webhooks)('outbound webhooks (PRDCT-3482)', () => {
         type: 'thing.created',
         occurredAt: expect.any(String),
         workspaceId,
-        subjects: { thingId: 't1', projectId: ['p1', 'p2'] },
+        subjects: { thingId: 't1', projectIds: ['p1', 'p2'] },
         data: { thingId: 't1', name: 'One' },
         attempt: 1
       });
@@ -434,7 +490,7 @@ describe.skipIf(!host.webhooks)('outbound webhooks (PRDCT-3482)', () => {
         eventId: firstEventId,
         eventType: 'thing.created',
         status: 'delivered',
-        payload: { id: firstEventId, subjects: { thingId: 't1', projectId: ['p1', 'p2'] } }
+        payload: { id: firstEventId, subjects: { thingId: 't1', projectIds: ['p1', 'p2'] } }
       });
       const one = await send('GET', `/webhooks/${hookA.id}/deliveries/${firstDeliveryId}`, actors.admin!);
       expect(one.status).toBe(200);
@@ -528,6 +584,177 @@ describe.skipIf(!host.webhooks)('outbound webhooks (PRDCT-3482)', () => {
       const deleted = await witnessed(emitDeleted('t-p19'));
       expect(await deliveryFor(hookP.id, deleted)).toBeUndefined();
       expect(requestsTo('/hook-p')).toHaveLength(1);
+    });
+
+    it('19. filters on two keys are ANDed: the thing AND the project must both match (G1)', async () => {
+      const hookAnd = await createEndpoint(actors.admin!, {
+        url: `${base}/hook-and`,
+        events: ['thing.created'],
+        filters: { thing: ['t-and-a'], project: ['p-and-a'] }
+      });
+      const both = await witnessed(emitCreated('t-and-a', ['p-and-a']));
+      await waitFor('hook-and to receive t-and-a in p-and-a', () => hitsAt('/hook-and', both).length > 0);
+      const otherProject = await witnessed(emitCreated('t-and-a', ['p-and-b']));
+      expect(await deliveryFor(hookAnd.id, otherProject)).toBeUndefined();
+      const otherThing = await witnessed(emitCreated('t-and-b', ['p-and-a']));
+      expect(await deliveryFor(hookAnd.id, otherThing)).toBeUndefined();
+      expect(requestsTo('/hook-and')).toHaveLength(1);
+    });
+
+    it('20. an emit whose data breaks the declared schema answers null, writes no job and no row, and logs the error (G4)', async () => {
+      const errors = vi.spyOn(app.logger, 'error');
+      try {
+        const jobsBefore = await eventJobs();
+        const rowsBefore = (await deliveriesOf(hookA.id)).length;
+        const id = await app.webhooks.emit(app.db.db, {
+          workspaceId,
+          type: 'thing.created',
+          subjects: { thing: 't-bad-data', project: 'p0' },
+          data: { thingId: 1 }
+        });
+        expect(id).toBeNull();
+        expect(await eventJobs()).toBe(jobsBefore);
+        expect(errors).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'thing.created' }),
+          expect.stringMatching(/outside its declared schema/)
+        );
+        await settle(1500);
+        expect(await deliveriesOf(hookA.id)).toHaveLength(rowsBefore);
+        expect(received.filter((r) => r.body.includes('t-bad-data'))).toEqual([]);
+      } finally {
+        errors.mockRestore();
+      }
+    });
+
+    it('21. a list subject is ALWAYS a list in the envelope, one id included; a list given to a one-id subject is refused (MN2)', async () => {
+      const single = await witnessed(emitCreated('t-list', 'p-one'));
+      const [one] = await waitFor('hook-a to receive the one-project emit', () => {
+        const hits = hitsAt('/hook-a', single);
+        return hits.length > 0 ? hits : undefined;
+      });
+      expect(JSON.parse(one!.body).subjects).toEqual({ thingId: 't-list', projectIds: ['p-one'] });
+      const several = await witnessed(emitCreated('t-list', ['p1', 'p2']));
+      const [two] = await waitFor('hook-a to receive the two-project emit', () => {
+        const hits = hitsAt('/hook-a', several);
+        return hits.length > 0 ? hits : undefined;
+      });
+      expect(JSON.parse(two!.body).subjects).toEqual({ thingId: 't-list', projectIds: ['p1', 'p2'] });
+
+      const errors = vi.spyOn(app.logger, 'error');
+      try {
+        const jobsBefore = await eventJobs();
+        expect(
+          await app.webhooks.emit(app.db.db, {
+            workspaceId,
+            type: 'thing.deleted',
+            subjects: { thing: ['t-x', 't-y'] },
+            data: { thingId: 't-x' }
+          })
+        ).toBeNull();
+        expect(await eventJobs()).toBe(jobsBefore);
+        expect(errors).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'thing.deleted', subject: 'thing' }),
+          expect.stringMatching(/a list for a subject declared as one id/)
+        );
+      } finally {
+        errors.mockRestore();
+      }
+
+      const catalog = await readJson(await send('GET', '/webhooks/events', actors.member!));
+      const subjects = new Map<string, { list: boolean }>(
+        catalog.subjects.map((s: { key: string; list: boolean }) => [s.key, s])
+      );
+      expect(subjects.get('project')).toMatchObject({ field: 'projectIds', list: true });
+      expect(subjects.get('thing')).toMatchObject({ field: 'thingId', list: false });
+    });
+
+    it('22. the listener cache honours enabled: the only endpoint of a workspace switched off, nobody listens; back on, it listens (G6)', async () => {
+      const solo = (await app.registry.workspaces.create('Solo', actors.owner!.userId)).workspaceId;
+      const there = { 'x-workspace-id': solo };
+      const only = await createEndpoint(
+        actors.owner!,
+        { url: `${base}/hook-solo`, events: ['thing.created'] },
+        there
+      );
+      expect(await app.webhooks.wants(solo, 'thing.created')).toBe(true);
+
+      const off = await send('PATCH', `/webhooks/${only.id}`, actors.owner!, { enabled: false }, there);
+      expect(off.status).toBe(200);
+      expect(await app.webhooks.wants(solo, 'thing.created')).toBe(false);
+      const jobsBefore = await eventJobs();
+      expect(await emitCreated('t-solo', 'p0', app, solo)).toBeNull();
+      expect(await eventJobs()).toBe(jobsBefore);
+
+      const on = await send('PATCH', `/webhooks/${only.id}`, actors.owner!, { enabled: true }, there);
+      expect(on.status).toBe(200);
+      expect(await app.webhooks.wants(solo, 'thing.created')).toBe(true);
+    });
+  });
+
+  // ── The chassis's own events ─────────────────────────────────────────────────
+
+  describe('the chassis’s own events', () => {
+    const chassisBodies = (path: string) =>
+      requestsTo(path).map(
+        (r) => JSON.parse(r.body) as { type: string; data: Record<string, unknown>; [k: string]: unknown }
+      );
+    const bodyAt = (path: string, type: string, key: string, value: string) => () =>
+      chassisBodies(path).find((b) => b.type === type && b.data[key] === value);
+
+    it("23. project.created (in the create's transaction) and project.archived reach the receiver, the project a list of one (G5)", async () => {
+      const hookCh = await createEndpoint(actors.owner!, {
+        url: `${base}/hook-chassis`,
+        events: ['project.*']
+      });
+      try {
+        const created = await send('POST', '/projects', actors.owner!, { name: 'Hooked project' });
+        expect(created.status).toBe(201);
+        const projectId = (await readJson(created)).id as string;
+        const createdEvent = await waitFor(
+          'project.created',
+          bodyAt('/hook-chassis', 'project.created', 'projectId', projectId)
+        );
+        expect(createdEvent).toMatchObject({
+          workspaceId,
+          data: { projectId, name: 'Hooked project', createdBy: actors.owner!.userId }
+        });
+        // The minimal tool declares `project` as a list: the chassis's one id is written as a list of one.
+        expect(createdEvent.subjects).toEqual({ projectIds: [projectId] });
+
+        const archived = await send('POST', `/projects/${projectId}/archive`, actors.owner!);
+        expect(archived.status).toBe(200);
+        const archivedEvent = await waitFor(
+          'project.archived',
+          bodyAt('/hook-chassis', 'project.archived', 'projectId', projectId)
+        );
+        expect(archivedEvent).toMatchObject({ workspaceId, data: { projectId, name: 'Hooked project' } });
+        expect(archivedEvent.subjects).toEqual({ projectIds: [projectId] });
+      } finally {
+        // Off again: the later tests' projects are not this endpoint's business.
+        await send('PATCH', `/webhooks/${hookCh.id}`, actors.owner!, { enabled: false });
+      }
+    });
+
+    it('29. apikey.created, bridged from the in-process bus, reaches the receiver (G5)', async () => {
+      const hookKey = await createEndpoint(actors.owner!, {
+        url: `${base}/hook-chassis-key`,
+        events: ['apikey.created']
+      });
+      try {
+        const minted = await send('POST', '/api-keys', actors.owner!, {
+          name: 'hooked-key',
+          scopes: [host.scopes.read]
+        });
+        expect(minted.status).toBe(201);
+        const apiKeyId = (await readJson(minted)).apiKey.id as string;
+        const keyEvent = await waitFor(
+          'apikey.created',
+          bodyAt('/hook-chassis-key', 'apikey.created', 'apiKeyId', apiKeyId)
+        );
+        expect(keyEvent).toMatchObject({ workspaceId, subjects: {}, data: { apiKeyId } });
+      } finally {
+        await send('PATCH', `/webhooks/${hookKey.id}`, actors.owner!, { enabled: false });
+      }
     });
   });
 
@@ -667,8 +894,10 @@ describe.skipIf(!host.webhooks)('outbound webhooks (PRDCT-3482)', () => {
         expect(off.disabledAt).not.toBeNull();
         expect(off.consecutiveFailures).toBeGreaterThanOrEqual(DIALS.disableAfterFailures);
 
-        // No request after the switch: the fifth failure was the last one the receiver saw.
-        expect(requestsTo('/hook-d')).toHaveLength(DIALS.disableAfterFailures);
+        // At least the five failures that switched it off reached the receiver; with the delivery
+        // queue's eight pollers a sixth attempt may already have been in flight when the fifth
+        // switched it off, so the count is not exact (it is pinned below: nothing NEW after).
+        expect(requestsTo('/hook-d').length).toBeGreaterThanOrEqual(DIALS.disableAfterFailures);
         const mails = mail.sent.filter((m) => m.subject.includes('switched off'));
         expect(mails).toHaveLength(1);
         expect(mails[0]!.to).toBe(OWNER.email);
@@ -692,7 +921,12 @@ describe.skipIf(!host.webhooks)('outbound webhooks (PRDCT-3482)', () => {
           20_000
         );
         expect(rows).toHaveLength(2);
-        expect(requestsTo('/hook-d')).toHaveLength(DIALS.disableAfterFailures);
+        // No new request once the endpoint is off and its deliveries are refused.
+        const seenOnceOff = requestsTo('/hook-d').length;
+        expect(seenOnceOff).toBeLessThanOrEqual(DIALS.disableAfterFailures + 1);
+        await settle();
+        expect(requestsTo('/hook-d')).toHaveLength(seenOnceOff);
+        expect(mail.sent.filter((m) => m.subject.includes('switched off'))).toHaveLength(1);
 
         statusFor.set('/hook-d', 200);
         const patched = await send('PATCH', `/webhooks/${hookD.id}`, actors.owner!, { enabled: true });
@@ -704,6 +938,230 @@ describe.skipIf(!host.webhooks)('outbound webhooks (PRDCT-3482)', () => {
           consecutiveFailures: 0
         });
         expect(await endpointRow(hookD.id)).toMatchObject({ firstFailureAt: null, consecutiveFailures: 0 });
+      }
+    );
+
+    it('24. a secret that cannot be opened fails the delivery as secret_unreadable at its first attempt, with no request and no retry (MN3)', async () => {
+      const hookS = await createEndpoint(actors.admin!, {
+        url: `${base}/hook-s`,
+        events: ['thing.created'],
+        filters: { thing: ['t-s'] }
+      });
+      await app.db.db
+        .update(webhookEndpoints)
+        .set({ secret: 'v1.garbage' })
+        .where(eq(webhookEndpoints.id, hookS.id));
+      const eventId = (await emitCreated('t-s'))!;
+      expect(eventId).toEqual(expect.any(String));
+      const row = await waitFor('the delivery failed', async () => {
+        const r = await deliveryFor(hookS.id, eventId);
+        return r?.status === 'failed' ? r : undefined;
+      });
+      expect(row).toMatchObject({ lastError: 'secret_unreadable', attempt: 1, lastStatusCode: null });
+      expect(requestsTo('/hook-s')).toEqual([]);
+      await settle();
+      const rows = await deliveriesOf(hookS.id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ status: 'failed', attempt: 1, lastError: 'secret_unreadable' });
+      expect(requestsTo('/hook-s')).toEqual([]);
+    });
+
+    it(
+      '25. the auto-disable mail is not sent to a creator who has left the workspace (MN4)',
+      { timeout: 60_000 },
+      async () => {
+        const leaver = await addActor('leaver', 'leaver@example.com', { role: 'admin' });
+        statusFor.set('/hook-leave', 503);
+        const hookL = await createEndpoint(leaver, {
+          url: `${base}/hook-leave`,
+          events: ['thing.created'],
+          filters: { thing: ['t-leave'] }
+        });
+        expect((await endpointRow(hookL.id))!.createdBy).toBe(leaver.userId);
+        await app.db.db
+          .update(workspaceMembers)
+          .set({ isActive: false })
+          .where(
+            and(eq(workspaceMembers.workspaceId, workspaceId), eq(workspaceMembers.userId, leaver.userId))
+          );
+        const mailsBefore = mail.sent.length;
+
+        // Two events, three attempts each: the fifth failed attempt disables.
+        expect(await emitCreated('t-leave')).toEqual(expect.any(String));
+        expect(await emitCreated('t-leave')).toEqual(expect.any(String));
+        const off = await waitFor(
+          'the endpoint switched off',
+          async () => {
+            const r = await endpointRow(hookL.id);
+            return r && !r.enabled ? r : undefined;
+          },
+          40_000
+        );
+        expect(off).toMatchObject({ enabled: false, disabledReason: 'delivery_failures' });
+        // The mail is sent by the attempt that switched it off, right after: give it the time.
+        await settle(1500);
+        expect(mail.sent.filter((m) => m.to === leaver.email)).toEqual([]);
+        expect(mail.sent.slice(mailsBefore).filter((m) => m.subject.includes('switched off'))).toEqual([]);
+      }
+    );
+
+    it('26. the failure streak is counted in the statement: concurrent failures add up, and the switch-off mails once (MN5)', async () => {
+      statusFor.set('/hook-race', 500);
+      const url = `${base}/hook-race`;
+      const hookR = await createEndpoint(actors.owner!, {
+        url,
+        events: ['thing.created'],
+        filters: { thing: ['t-race-never'] }
+      });
+      const switchedOff = () =>
+        mail.sent.filter((m) => m.subject.includes('switched off') && (m.text ?? '').includes(url)).length;
+      // Two pending rows attempted at once (no job behind them: the two attempts are the race).
+      const race = async () => {
+        const rows = await app.db.db
+          .insert(webhookDeliveries)
+          .values(
+            [0, 1].map(() => ({
+              endpointId: hookR.id,
+              workspaceId,
+              eventId: randomUUID(),
+              eventType: 'thing.created',
+              payload: {
+                type: 'thing.created',
+                workspaceId,
+                subjects: { thingId: 't-race-never', projectIds: ['p0'] },
+                data: { thingId: 't-race-never', name: 'Race' }
+              },
+              status: 'pending' as const
+            }))
+          )
+          .returning({ id: webhookDeliveries.id });
+        const outcomes = await Promise.all(rows.map((r) => app.webhooks.attempt(r.id, { retryable: false })));
+        expect(outcomes.map((o) => o?.status)).toEqual(['failed', 'failed']);
+      };
+
+      await race();
+      expect(await endpointRow(hookR.id)).toMatchObject({ consecutiveFailures: 2, enabled: true });
+      await race();
+      expect(await endpointRow(hookR.id)).toMatchObject({ consecutiveFailures: 4, enabled: true });
+      expect(switchedOff()).toBe(0);
+      // 4 → 5 and 4 → 6: both reach the threshold (5), only one switch-off wins.
+      await race();
+      expect(await endpointRow(hookR.id)).toMatchObject({
+        consecutiveFailures: 6,
+        enabled: false,
+        disabledReason: 'delivery_failures'
+      });
+      expect(switchedOff()).toBe(1);
+      expect(requestsTo('/hook-race')).toHaveLength(6);
+    });
+
+    it(
+      '27. a hold whose re-send fails leaves the row pending, and the held job’s own retry re-drives it (G3)',
+      { timeout: 60_000 },
+      async () => {
+        statusFor.set('/hook-h', 500);
+        const hookH = await createEndpoint(actors.admin!, {
+          url: `${base}/hook-h`,
+          events: ['thing.created'],
+          filters: { thing: ['t-h'] }
+        });
+        const eventId = (await emitCreated('t-h'))!;
+        const delivery = await waitFor('the delivery row', () => deliveryFor(hookH.id, eventId));
+
+        // The fan-out is done: the next send of THIS delivery on the delivery queue is the hold's
+        // re-send. Refuse it once (another endpoint's hold passes through untouched).
+        const boss = app.jobs.boss;
+        const original = boss.send;
+        let refused = false;
+        const spy = vi.spyOn(boss, 'send').mockImplementation(((...args: unknown[]) => {
+          const data = args[1] as { deliveryId?: string } | undefined;
+          if (!refused && args[0] === 'webhook-deliveries' && data?.deliveryId === delivery.id) {
+            refused = true;
+            return Promise.reject(new Error('the test refuses this send'));
+          }
+          return (original as (...a: unknown[]) => Promise<string | null>)(...args);
+        }) as typeof boss.send);
+        let retrying: { id: string };
+        try {
+          retrying = await waitFor(
+            'the held job failing its re-send',
+            async () => {
+              if (!refused) return undefined;
+              const { rows } = await app.db.pool.query<{ id: string; state: string }>(
+                `SELECT id, state FROM pgboss.job WHERE name = 'webhook-deliveries-held' AND data->>'deliveryId' = $1`,
+                [delivery.id]
+              );
+              return rows.find((r) => r.state === 'retry');
+            },
+            30_000
+          );
+        } finally {
+          spy.mockRestore();
+        }
+        // The hold rolled back with its send: the row is pending, never held with no job behind it.
+        const row = await deliveryFor(hookH.id, eventId);
+        expect(row).toMatchObject({ status: 'pending', attempt: DIALS.retryLimit + 1 });
+        const { rows: live } = await app.db.pool.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM pgboss.job WHERE name = 'webhook-deliveries' AND data->>'deliveryId' = $1 AND state IN ('created', 'retry', 'active')`,
+          [delivery.id]
+        );
+        expect(live[0]!.n).toBe(0);
+
+        // The held queue retries a minute later; brought forward so the suite does not sit it out.
+        statusFor.set('/hook-h', 200);
+        await app.db.pool.query(
+          `UPDATE pgboss.job SET start_after = now() WHERE id = $1 AND state = 'retry'`,
+          [retrying.id]
+        );
+        const delivered = await waitFor(
+          'the held delivery re-driven',
+          async () => {
+            const r = await deliveryFor(hookH.id, eventId);
+            return r?.status === 'delivered' ? r : undefined;
+          },
+          30_000
+        );
+        expect(delivered).toMatchObject({ attempt: DIALS.retryLimit + 2, lastStatusCode: 200 });
+        expect(hitsAt('/hook-h', eventId)).toHaveLength(DIALS.retryLimit + 2);
+      }
+    );
+
+    it(
+      '28. a silent receiver holds one delivery slot, not the instance: a fast endpoint is served while three deliveries hang (MJ1)',
+      { timeout: 45_000 },
+      async () => {
+        silentPaths.add('/hook-silent');
+        const hookSlow = await createEndpoint(actors.admin!, {
+          url: `${base}/hook-silent`,
+          events: ['thing.created'],
+          filters: { thing: ['t-slow'] }
+        });
+        const hookFast = await createEndpoint(actors.admin!, {
+          url: `${base}/hook-fast`,
+          events: ['thing.created'],
+          filters: { thing: ['t-fast'] }
+        });
+        try {
+          for (let i = 0; i < 3; i++) expect(await emitCreated('t-slow')).toEqual(expect.any(String));
+          const fastId = (await emitCreated('t-fast'))!;
+          await waitFor('the fast delivery row', () => deliveryFor(hookFast.id, fastId));
+          const rowAt = Date.now();
+          await waitFor('the fast delivery', () => hitsAt('/hook-fast', fastId).length > 0, 12_000);
+          const arrivedAt = Date.now();
+          // Measured from the fast row (the fan-out done), not from the emit: the fan-out queue's own
+          // polling (two seconds, two pollers) is not what is under test. pg-boss polls every two
+          // seconds, so a free delivery poller takes the row within one interval; one serial poller
+          // would reach it only behind the silent deliveries and their retries (2 s timeouts each).
+          expect(arrivedAt - rowAt).toBeLessThan(2500);
+          // Several silent deliveries were held open AT ONCE: the queue runs them side by side.
+          await waitFor(
+            'two silent deliveries open at once',
+            () => (openMax.get('/hook-silent') ?? 0) >= 2,
+            10_000
+          );
+        } finally {
+          await send('PATCH', `/webhooks/${hookSlow.id}`, actors.admin!, { enabled: false });
+        }
       }
     );
   });

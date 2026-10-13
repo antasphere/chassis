@@ -81,10 +81,16 @@ export const minimalTool: ToolDefinition<NoEnv, NoDomain> = {
     contractRoutes: defineChassisRoutes(contract, THINGS_IDENTITY, THINGS_ROUTES_COPY)
   },
   services: () => ({}),
-  // The webhooks catalog (PRDCT-3482): two events over one subject, so the
-  // chassis suite can emit, match, filter and deliver a tool's event.
+  // The webhooks catalog (PRDCT-3482): two events over two subjects, so the
+  // chassis suite can emit, match, filter and deliver a tool's event. The
+  // tool re-declares the chassis's `project` subject as a LIST under
+  // `projectIds` (a thing in several projects), as a real tool does, so the
+  // suite proves the chassis's own project events follow the tool's shape.
   webhooks: {
-    subjects: { thing: { field: 'thingId', description: 'A thing of the workspace, by id' } },
+    subjects: {
+      thing: { field: 'thingId', description: 'A thing of the workspace, by id' },
+      project: { field: 'projectIds', description: 'The projects of a thing, by id', list: true }
+    },
     events: [
       {
         type: 'thing.created',

@@ -1338,6 +1338,7 @@ export function createApiApp<
   }
   registerMemberRoutes(api, {
     db,
+    events: chassisRegistry.events,
     auth,
     publicBaseUrl: env.PUBLIC_BASE_URL,
     accountDeletion: deps.accountDeletion,
@@ -1358,7 +1359,13 @@ export function createApiApp<
       guestTargetMessage: tool.copy.guestTarget
     });
   }
-  registerApiKeyRoutes(api, db, apiKeyService, { apiKeysListRoute, apiKeyCreateRoute, apiKeyRevokeRoute });
+  registerApiKeyRoutes(
+    api,
+    db,
+    apiKeyService,
+    { apiKeysListRoute, apiKeyCreateRoute, apiKeyRevokeRoute },
+    chassisRegistry.events
+  );
   registerInvitationRoutes(api, {
     db,
     env,

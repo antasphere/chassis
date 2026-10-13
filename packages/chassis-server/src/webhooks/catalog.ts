@@ -14,7 +14,8 @@ import type { WebhookCatalog } from '@antasphere/chassis-contract';
  * endpoint narrows its subscription to a list of ids per subject, and the
  * envelope carries each subject's value under the FIELD the tool names for it
  * (`thingId`, `projectIds`). An event declares which subjects it carries. A
- * subject's value in the envelope is one id or a list of ids.
+ * subject's value in the envelope is one id, or always a list of ids when
+ * the subject is declared `list` (the shape never varies per event).
  */
 
 /** One filterable key of the tool, as the slot declares it. */
@@ -22,6 +23,12 @@ export interface WebhookSubjectDeclaration {
   /** The envelope field the subject's value is written under (`thingId`, `projectIds`). */
   field: string;
   description: string;
+  /**
+   * The subject's value is a LIST of ids (a thing in several projects): the
+   * envelope always writes an array under the field, a single id included.
+   * Absent: one id, always a string; a list is refused at emit.
+   */
+  list?: boolean;
 }
 
 /** One event type of the tool, as the slot declares it. */
@@ -66,13 +73,13 @@ export const CHASSIS_WEBHOOK_EVENTS: readonly WebhookEventDeclaration[] = [
   },
   {
     type: 'member.joined',
-    description: 'A person joined the workspace (setup, an accepted invitation, a claimed grant).',
+    description: 'A person joined the workspace by accepting an invitation.',
     subjects: [],
     data: z.object({ userId: z.string(), role: z.string() })
   },
   {
     type: 'member.removed',
-    description: 'A person was removed from the workspace.',
+    description: 'A person was removed from the workspace by an owner or an admin.',
     subjects: [],
     data: z.object({ userId: z.string() })
   },
@@ -180,7 +187,8 @@ export function catalogToWire(catalog: WebhookCatalogIndex): WebhookCatalog {
     subjects: Object.entries(catalog.subjects).map(([key, s]) => ({
       key,
       field: s.field,
-      description: s.description
+      description: s.description,
+      list: s.list === true
     })),
     events: [...catalog.events.values()].map((e) => ({
       type: e.type,

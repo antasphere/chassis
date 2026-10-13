@@ -71,8 +71,8 @@ export function registerWebhookRoutes(api: OpenAPIHono, deps: WebhookRouteDeps):
     try {
       created = await service.create(principal.workspaceId, principal.userId, body);
     } catch (e) {
-      if (e instanceof WebhookRefusedError && e.code === 'url_refused')
-        return c.json(err('url_refused', e.message), 400);
+      if (e instanceof WebhookRefusedError && e.code !== 'not_found')
+        return c.json(err(e.code, e.message), 400);
       throw e;
     }
     c.set('audit', {
@@ -105,8 +105,8 @@ export function registerWebhookRoutes(api: OpenAPIHono, deps: WebhookRouteDeps):
     try {
       updated = await service.update(principal.workspaceId, id, body);
     } catch (e) {
-      if (e instanceof WebhookRefusedError && e.code === 'url_refused')
-        return c.json(err('url_refused', e.message), 400);
+      if (e instanceof WebhookRefusedError && e.code !== 'not_found')
+        return c.json(err(e.code, e.message), 400);
       throw e;
     }
     if (!updated) return c.json(NOT_FOUND, 404);
