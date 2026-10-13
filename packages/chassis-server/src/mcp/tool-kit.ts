@@ -73,7 +73,11 @@ export function createScopeCheck<TRead extends string, TWrite extends string>(
     if (principal.scopes && !principal.scopes.has(scope)) {
       return deny(
         `Missing scope "${scope}": this connection was not granted ` +
-          (scope === scopes.write ? 'permission to create or edit data.' : 'permission to read data.') +
+          (scope === scopes.write
+            ? 'permission to create or edit data.'
+            : scope === scopes.webhooks
+              ? 'permission to manage webhooks.'
+              : 'permission to read data.') +
           ' Reconnect the MCP server and approve the permission on the consent screen.'
       );
     }

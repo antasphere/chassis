@@ -4,6 +4,7 @@ import { mcpInputs } from './inputs.js';
 import { jsonText, mergeErrorHints, wrapToolErrors, type ErrorHints } from './errors.js';
 import { projectErrorHints, registerProjectTools } from './projects.js';
 import { registerTeamTools } from './teams.js';
+import { registerWebhookTools, webhookErrorHints } from './webhooks.js';
 import {
   callApi,
   createScopeCheck,
@@ -57,13 +58,17 @@ export type McpIdentity = ToolIdentity['mcp'];
 
 /**
  * The ONE composition of an instance's hint table: the domain hints, then
- * every chassis group (the projects today), then the tool's own last, so a
+ * every chassis group (the projects, the webhooks), then the tool's own last, so a
  * tool may re-word a chassis code and never the reverse. A tool set that
  * wraps its own errors reads the same composition (never a copy), so a
  * chassis group added here reaches the tool's tools without a second edit.
  */
 export function composeErrorHints(toolHints: ErrorHints, toolPrefix: string): ErrorHints {
-  return mergeErrorHints({ ...projectErrorHints(toolPrefix), ...toolHints });
+  return mergeErrorHints({
+    ...projectErrorHints(toolPrefix),
+    ...webhookErrorHints(toolPrefix),
+    ...toolHints
+  });
 }
 
 export function buildMcpServer(
@@ -166,6 +171,9 @@ export function buildMcpServer(
   // Teams (PRDCT-2813): a chassis concept too, read-only over MCP, right after
   // the projects they can be members of.
   registerTeamTools(server, ctx, identity, tool.scopes, checkScope, hints);
+  // Webhooks (PRDCT-3482): a chassis concept, registered only when the tool
+  // declares the webhooks scope (a tool without one serves no webhook tool).
+  if (tool.scopes.webhooks) registerWebhookTools(server, ctx, identity, tool.scopes, checkScope, hints);
 
   // The product surface: the tool's own set, after the chassis tools.
   tool.registerTools(server, ctx);

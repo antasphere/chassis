@@ -31,7 +31,10 @@ export function bindPlaceholders(text: string, values: unknown[]): SQL {
     } else {
       const index = Number(part) - 1;
       if (index < 0 || index >= values.length) throw new Error(`tx-send: placeholder $${part} has no value`);
-      chunks.push(sql`${values[index]}`);
+      // pg-boss hands `undefined` for an option it leaves to the queue's
+      // default; drizzle renders an undefined parameter as nothing, which
+      // breaks the statement (`::int as retry_limit_default`), so it is bound as NULL.
+      chunks.push(sql`${values[index] === undefined ? null : values[index]}`);
     }
   }
   return sql.join(chunks, sql``);

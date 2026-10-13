@@ -10,6 +10,7 @@ export {
 export { mcpRoutes } from './http.js';
 export { projectErrorHints, registerProjectTools } from './projects.js';
 export { registerTeamTools } from './teams.js';
+export { registerWebhookTools, webhookErrorHints } from './webhooks.js';
 export { type McpInputs, mcpInputs } from './inputs.js';
 export {
   type McpIdentity,
