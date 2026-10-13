@@ -14,6 +14,7 @@ import type {
   CliAuthRequest,
   CliAuthRequested,
   CliAuthRevoked,
+  CliPackageRequest,
   DefaultWorkspace,
   DemoPass,
   DemoPassesList,
@@ -397,6 +398,33 @@ export class ChassisClient<TScope extends string> {
    */
   ssoCliConnect(req: SsoCliConnect): Promise<CliAuthCompleted<TScope>> {
     return this.request('POST', '/sso/cli-connect', req);
+  }
+
+  /**
+   * Public, CLOUD EDITION only (404 on oss): download the tool's own CLI
+   * package (a gzipped tarball, `instance().cli` names it) on a hub-minted
+   * exchange token, the same token and the same one-time rule as
+   * ssoCliConnect. The token rides in the body and the client's API key is
+   * NEVER sent: the route refuses a machine credential (403
+   * `endpoint_not_allowed`). Raw Response so the caller can stream it; a
+   * non-2xx answer throws PlatformApiError (401 `invalid_token`, 404
+   * `cli_not_packaged`, 404 `not_found` on an instance without the route).
+   */
+  async downloadCliPackage(req: CliPackageRequest): Promise<Response> {
+    const { authorization: _credential, ...headers } = this.baseHeaders();
+    const res = await this.fetchImpl(`${this.baseUrl}/api/v1/cli/package`, {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      credentials: 'same-origin',
+      signal: this.signal('download'),
+      // Browser-only field; cast keeps this isomorphic under a Node lib.
+      cache: 'no-store',
+      body: JSON.stringify(req)
+    } as RequestInit);
+    if (!res.ok) {
+      await this.parse(res); // throws PlatformApiError with the wire shape
+    }
+    return res;
   }
 
   /**

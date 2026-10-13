@@ -70,3 +70,41 @@ describe('chassis client downloads carry the active workspace', () => {
     }
   });
 });
+
+describe('the CLI package download (PRDCT-3312)', () => {
+  it('posts the exchange token in the body and never sends the client’s API key', async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    const fetchImpl = (async (input: unknown, init?: RequestInit) => {
+      calls.push({ url: String(input), init: init ?? {} });
+      return new Response(new Uint8Array([31, 139, 8]), { status: 200 });
+    }) as typeof globalThis.fetch;
+    const client: Client = new ChassisClient({
+      baseUrl: 'http://x',
+      fetch: fetchImpl,
+      apiKey: 'tk_live_abc'
+    });
+    const res = await client.downloadCliPackage({ token: 'a.b.c' });
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(new Uint8Array([31, 139, 8]));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe('http://x/api/v1/cli/package');
+    expect(calls[0]!.init.method).toBe('POST');
+    expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ token: 'a.b.c' });
+    const headers = calls[0]!.init.headers as Record<string, string>;
+    expect(headers['authorization']).toBeUndefined();
+    expect(headers['content-type']).toBe('application/json');
+  });
+
+  it('a refusal throws the wire error (cli_not_packaged)', async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ error: { code: 'cli_not_packaged', message: 'none' } }), {
+        status: 404,
+        headers: { 'content-type': 'application/json' }
+      })) as typeof globalThis.fetch;
+    const client: Client = new ChassisClient({ baseUrl: 'http://x', fetch: fetchImpl });
+    await expect(client.downloadCliPackage({ token: 'a.b.c' })).rejects.toMatchObject({
+      name: 'PlatformApiError',
+      status: 404,
+      code: 'cli_not_packaged'
+    });
+  });
+});

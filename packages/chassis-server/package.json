@@ -54,6 +54,10 @@
       "types": "./dist/apikeys/index.d.ts",
       "default": "./dist/apikeys/index.js"
     },
+    "./cli-package": {
+      "types": "./dist/cli-package/index.d.ts",
+      "default": "./dist/cli-package/index.js"
+    },
     "./accounts": {
       "types": "./dist/accounts/index.d.ts",
       "default": "./dist/accounts/index.js"

@@ -7,7 +7,7 @@ import { registerOpenApiDoc } from './index.js';
 import { ulid } from 'ulid';
 import { and, asc, desc, eq } from 'drizzle-orm';
 import { ACTIVE_WORKSPACE_HEADER, type Principal } from '@antasphere/chassis-contract';
-import { instanceRoute, setupRoute } from '@antasphere/chassis-contract/routes';
+import { cliPackageRoute, instanceRoute, setupRoute } from '@antasphere/chassis-contract/routes';
 import {
   account,
   instanceSettings,
@@ -76,6 +76,8 @@ import {
   type WorkspaceCloudDeps
 } from './index.js';
 import { registerSsoConnectRoutes } from './index.js';
+import { registerCliPackageRoutes } from './index.js';
+import { loadCliPackage } from '../cli-package/index.js';
 import { registerSsoLogoutRoutes } from './index.js';
 import { registerMemberRoutes } from './index.js';
 import { demoSessionJudge, demoSignInOn, registerDemoPassRoutes } from './index.js';
@@ -357,6 +359,13 @@ export function createApiApp<
   // Demo sign-in (the demo pass spec): DEMO_SIGN_IN on the self-hosted
   // edition only. Off, no demo route, wall or discovery key exists.
   const demoSignIn = demoSignInOn(env, hub, logger);
+  // The tool's own CLI package (PRDCT-3312), read once here. parseEnv has
+  // already refused a CLI_PACKAGE_DIR that does not hold the pair, so a
+  // throw from here (the folder emptied between the two reads) still
+  // refuses the boot, it is never a person's failed install. Served (and
+  // advertised) only where its route is registered: the cloud block below.
+  const cliPackage = loadCliPackage(env.CLI_PACKAGE_DIR);
+  const cliServed = deps.hubSso && deps.hubGrant ? cliPackage : null;
 
   const api = new OpenAPIHono({
     // Validation failures use the same wire shape as every other error.
@@ -573,6 +582,9 @@ export function createApiApp<
   // route itself: oss mounts zero hub surface.
   if (deps.hubSso) {
     api.use('/sso/cli-connect', rateLimit(limiters.cliConnect, clientIp));
+    // The CLI package download (cloud only, api/cli-package.ts) presents the
+    // same one-time hub token at the same cost: the same wall.
+    api.use('/cli/package', rateLimit(limiters.cliConnect, clientIp));
   }
 
   // ── JSON pre-validation in front of the Better Auth mount (AF-1 + the
@@ -832,6 +844,10 @@ export function createApiApp<
         // Present only on a cloud instance whose operator restricted the tool
         // (PRDCT-2947): organizations are opened by Antasphere, not created here.
         ...(hub && env.TOOL_RESTRICTED ? { restricted: true } : {}),
+        // Present only on a cloud instance whose release packed the tool's
+        // CLI (PRDCT-3312): what `POST /cli/package` serves, for the `team`
+        // command to install. An oss boot has no route, so no key either.
+        ...(cliServed ? { cli: { name: cliServed.name, version: cliServed.version } } : {}),
         // What this version declares for the billing rail (§7): the hub seeds
         // from it, staff read it, a client reads the limit it is held to.
         entitlements: {
@@ -1290,6 +1306,14 @@ export function createApiApp<
       cliKeyScopes: tool.scopes.cliKey,
       routes: { ssoCliConnectRoute }
     });
+    // The tool's own CLI package (PRDCT-3312): cloud-only for the same
+    // reason as /sso/cli-connect (it verifies the same hub exchange token
+    // and burns it in the same ledger), so an oss boot leaves the path to
+    // the JSON 404 terminator. Deliberately UNLISTED in the machine scope
+    // allowlist and absent from PUBLIC_API_PATHS: the token rides in the
+    // body, a request without a credential reaches the handler, and an API
+    // key or an OAuth bearer meets 403 endpoint_not_allowed before it.
+    registerCliPackageRoutes(api, { db, hubSso, cliPackage, logger, routes: { cliPackageRoute } });
   }
   // Single logout (SL-2): cloud-only like /sso/cli-connect — an oss boot
   // leaves POST /sso/logout to the JSON 404 terminator. Deliberately

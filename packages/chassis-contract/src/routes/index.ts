@@ -38,6 +38,7 @@ import {
 } from '../schemas/cli-auth.js';
 import { ssoCliConnectSchema } from '../schemas/sso-connect.js';
 import { ssoLogoutResponseSchema } from '../schemas/sso-logout.js';
+import { cliPackageRequestSchema } from '../schemas/cli-package.js';
 import {
   breakGlassClaimOwnershipRequestSchema,
   breakGlassClaimOwnershipSchema,
@@ -132,6 +133,55 @@ export const instanceRoute = createRoute({
   summary: 'Instance discovery (unauthenticated, cacheable)',
   responses: {
     200: jsonBody(instanceInfoSchema, 'Instance descriptor')
+  }
+});
+
+// ── The tool's own CLI package (cloud edition only, PRDCT-3312) ─────────────
+// Reached with NO credential but the hub exchange token in the body (the
+// `/sso/cli-connect` token, burned in the same one-time ledger). NOT in
+// PUBLIC_API_PATHS and unlisted in the machine scope allowlist on purpose: a
+// request without a credential reaches the handler, a key or an OAuth bearer
+// meets 403 endpoint_not_allowed before it. The route exists ONLY on
+// EDITION=cloud; oss answers the plain 404 terminator. Rate-limited on the
+// CLI-connect wall, per client address.
+export const cliPackageRoute = createRoute({
+  method: 'post',
+  path: '/cli/package',
+  tags: ['cli'],
+  summary: "Download the tool's own CLI package (cloud edition) on a hub-minted exchange token",
+  description:
+    'Answers the gzipped tarball the release packed (the output of `pnpm pack` of the tool CLI), named ' +
+    "as npm names it, to a member the hub lets into the tool. The client first asks the hub's " +
+    '`POST /api/v1/sso/tool-token` for an exchange token for this instance, then posts it here as ' +
+    '`{ token }`. The refusals a client meets, and what each one means: ' +
+    "the hub's 403 `tool_access_denied` on the tool-token step (this person has no access to this tool " +
+    'on the hub); 401 `invalid_token` here (bad signature, issuer, audience or purpose, expired, or ' +
+    'already used: run the exchange again, each token works once, here or at `/sso/cli-connect`); ' +
+    '404 `cli_not_packaged` (the instance was released without its CLI package); a plain 404 ' +
+    '`not_found` (a self-hosted instance, or a chassis from before this route: the path is not ' +
+    'registered); 403 `endpoint_not_allowed` (an API key or an OAuth bearer was sent: this route takes ' +
+    'the exchange token in its body and never a machine credential).',
+  request: { body: jsonRequestBody(cliPackageRequestSchema, 'The hub exchange token') },
+  responses: {
+    200: {
+      description: 'The CLI package, a gzipped tarball (application/gzip)',
+      content: { 'application/gzip': { schema: { type: 'string', format: 'binary' } } }
+    },
+    400: jsonBody(apiErrorSchema, 'Validation error'),
+    401: jsonBody(
+      apiErrorSchema,
+      'invalid_token: bad signature/iss/aud/purpose, expired, or an already used jti (here or at /sso/cli-connect)'
+    ),
+    403: jsonBody(
+      apiErrorSchema,
+      'endpoint_not_allowed: a machine credential (API key or OAuth bearer) was sent'
+    ),
+    404: jsonBody(
+      apiErrorSchema,
+      'cli_not_packaged: the instance was released without its CLI package (a plain not_found: not a cloud instance, or a chassis without the route)'
+    ),
+    429: errorResponses[429],
+    500: errorResponses[500]
   }
 });
 
