@@ -190,10 +190,11 @@ const COMMANDS = [
   'config',
   'workspaces',
   'workspace',
-  // generic: the subgroups of the workspace, its named groups of people, then
-  // the owner's demo links
+  // generic: the subgroups of the workspace, its named groups of people, its
+  // webhooks, then the owner's demo links
   'projects',
   'teams',
+  'webhooks',
   'demo',
   // the tool's own group, at the seam
   'things',

@@ -9,7 +9,7 @@ import type { Command } from 'commander';
  * seam, so the tool's positional hook in the program is exercised on every
  * run. It imports nothing from a tool.
  */
-export type ThingsScope = 'things:read' | 'things:write' | 'things:export';
+export type ThingsScope = 'things:read' | 'things:write' | 'things:export' | 'things:webhooks';
 
 export const VERSION = '0.0.1';
 
@@ -22,6 +22,7 @@ export const cli = defineCli({
     envPrefix: 'THINGS',
     keyPrefix: 'thk',
     exportScope: 'things:export',
+    webhooksScope: 'things:webhooks',
     cloudUrl: 'https://things.antasphere.test'
   },
   description: 'Command-line client for a Things instance',
