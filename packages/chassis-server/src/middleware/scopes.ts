@@ -30,6 +30,14 @@ export interface ScopeAllowlistOptions<S extends string> {
   write: S;
   /** The tool's dedicated opt-in scope for the full-workspace export. */
   dataExport: S;
+  /**
+   * The tool's dedicated opt-in scope for the webhooks family (PRDCT-3482):
+   * registering an endpoint is a standing read of the workspace to a URL of
+   * the caller's choice, so no read or write key opens it. Absent: no
+   * machine principal reaches `/webhooks` at all (the catalog read stays
+   * under the read scope).
+   */
+  webhooks?: S | undefined;
   /** The tool's own rules, asked in order AFTER the chassis rules. */
   rules: ReadonlyArray<ScopeRule<S>>;
 }
@@ -89,6 +97,7 @@ export function createScopeAllowlist<S extends string>({
   read,
   write,
   dataExport,
+  webhooks,
   rules
 }: ScopeAllowlistOptions<S>): (path: string, method: string) => S | null {
   return function requiredScopeFor(path: string, method: string): S | null {
@@ -130,6 +139,11 @@ export function createScopeAllowlist<S extends string>({
     // Teams: the same discipline (above).
     const team = teamAccess(path, method);
     if (team !== null) return team === 'read' ? read : write;
+    // Webhooks (PRDCT-3482): the catalog is a read any key may make; the
+    // family itself, reads included, needs the tool's dedicated scope, and
+    // closes entirely when the tool declares none.
+    if (path === '/api/v1/webhooks/events' && isRead) return read;
+    if (path === '/api/v1/webhooks' || path.startsWith('/api/v1/webhooks/')) return webhooks ?? null;
     for (const rule of rules) {
       const needed = rule(path, method, isRead);
       if (needed !== null) return needed;

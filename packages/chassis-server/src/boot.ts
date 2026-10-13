@@ -52,6 +52,7 @@ import { createOtel } from './observability/index.js';
 import { bindEditionSeams } from './platform/index.js';
 import { AllowAllEntitlements } from './platform/index.js';
 import { EventBus } from './platform/index.js';
+import { buildWebhookCatalog, WebhookService, webhookJobs } from './webhooks/index.js';
 import { LocalIdentityProvider } from './platform/index.js';
 import { createRegistry } from './platform/index.js';
 import { NoopUsageSink } from './platform/index.js';
@@ -654,6 +655,25 @@ export async function bootPlatform<
   // The usage queue's retry budget and its hold (PRDCT-2635): stated once,
   // shared by the sink that sends and the held queue that re-drives.
   const usageRetry: UsageRetry = { ...DEFAULT_USAGE_RETRY, ...overrides.usageRetry };
+  // Outbound webhooks (PRDCT-3482): the catalog checked, the service built
+  // BEFORE the job runtime (its four queues are declared to it like a tool's
+  // own) and attached to it right after; a tool's `services` slot receives
+  // the emitter, the API app the service, the bus the chassis's own events.
+  const webhookCatalog = buildWebhookCatalog(tool.webhooks);
+  const webhooks = new WebhookService({
+    db: db.db,
+    logger,
+    authSecret,
+    identity: tool.identity,
+    version: tool.runtime.version,
+    policy: { allowPrivateNetworks: env.WEBHOOKS_ALLOW_PRIVATE_NETWORKS, httpsOnly: env.EDITION === 'cloud' },
+    email,
+    brand: { name: tool.identity.displayName, tagline: tool.copy.mail.tagline },
+    publicBaseUrl: env.PUBLIC_BASE_URL,
+    catalog: webhookCatalog,
+    dials: overrides.webhookDials,
+    fetchOptions: overrides.webhookFetch
+  });
   const jobs = await createJobs(
     env,
     db.db,
@@ -662,9 +682,14 @@ export async function bootPlatform<
     overrides.usageDownstream ?? hubUsagePoster ?? new NoopUsageSink(),
     auth,
     audit,
-    tool.jobs?.({ env, db: db.db, logger, getTool: () => domainRef.current }) ?? [],
+    [
+      ...webhookJobs(webhooks, logger, env.WEBHOOK_DELIVERY_RETENTION_DAYS),
+      ...(tool.jobs?.({ env, db: db.db, logger, getTool: () => domainRef.current }) ?? [])
+    ],
     usageRetry
   );
+  webhooks.attach(jobs.boss);
+  webhooks.bindBus(events.chassisView());
   // The tool's billing-rail declarations (slot 22), asserted once here: a
   // route that meters an action the price book does not know, or a limit no
   // tier values, stops the boot naming the route.
@@ -806,6 +831,7 @@ export async function bootPlatform<
     events,
     authSecret,
     timers: jobs.timers,
+    webhooks,
     overrides: overrides.tool
   };
   const domain = tool.services(serviceCore);
@@ -849,6 +875,7 @@ export async function bootPlatform<
     principalGate: seams.principalGate,
     entitlements,
     entitlementCloud,
+    webhooks,
     // Cloud only (PRDCT-2443): POST /workspaces creates the organization at
     // the hub AS THE CALLER, then forces their reconcile. undefined on oss —
     // the route creates locally there.
@@ -885,7 +912,8 @@ export async function bootPlatform<
     ...(hubGrant?.promMetrics ?? []),
     ...(hubUsagePoster?.promMetrics ?? []),
     ...(hubCreditCheck?.promMetrics ?? []),
-    ...jobs.promMetrics
+    ...jobs.promMetrics,
+    ...webhooks.promMetrics
   ]) {
     metrics.registry.registerMetric(metric);
   }
@@ -952,5 +980,19 @@ export async function bootPlatform<
     state.reason = readinessRefusal;
   }
 
-  return { app, env, logger, state, db, auth, registry, jobs, email, otel, authSecret, tool: domain };
+  return {
+    app,
+    env,
+    logger,
+    state,
+    db,
+    auth,
+    registry,
+    jobs,
+    email,
+    otel,
+    authSecret,
+    webhooks,
+    tool: domain
+  };
 }

@@ -1,5 +1,6 @@
 export {
   type JobDeclaration,
+  type QueueOptions,
   type Jobs,
   type UsageRetry,
   DEFAULT_USAGE_RETRY,

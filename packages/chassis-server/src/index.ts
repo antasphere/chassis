@@ -63,3 +63,10 @@ export function createPlatform<
   return { boot: (source, overrides) => bootPlatform(tool, source, overrides) };
 }
 export type { MembershipRemovalHook, RemovedMembership, RemovalCounts } from './members/removal.js';
+export type {
+  WebhookCatalogDeclaration,
+  WebhookEmitter,
+  WebhookEventDeclaration,
+  WebhookSubjectDeclaration,
+  WebhookSubjectValue
+} from './webhooks/index.js';

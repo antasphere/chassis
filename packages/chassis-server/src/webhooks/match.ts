@@ -38,9 +38,15 @@ export function matchesFilters(
 
 /** Whether an endpoint takes this event: enabled, the type subscribed, the filters satisfied. */
 export function endpointWants(
-  endpoint: { enabled: boolean; events: readonly string[]; filters: Readonly<Record<string, readonly string[]>> },
+  endpoint: {
+    enabled: boolean;
+    events: readonly string[];
+    filters: Readonly<Record<string, readonly string[]>>;
+  },
   type: string,
   subjects: Readonly<Record<string, WebhookSubjectValue>>
 ): boolean {
-  return endpoint.enabled && matchesEventType(endpoint.events, type) && matchesFilters(endpoint.filters, subjects);
+  return (
+    endpoint.enabled && matchesEventType(endpoint.events, type) && matchesFilters(endpoint.filters, subjects)
+  );
 }

@@ -83,6 +83,8 @@ import { registerMemberRoutes } from './index.js';
 import { demoSessionJudge, demoSignInOn, registerDemoPassRoutes } from './index.js';
 import { registerProjectRoutes } from './index.js';
 import { registerTeamRoutes } from './index.js';
+import { registerWebhookRoutes } from './webhooks.js';
+import type { WebhookService } from '../webhooks/index.js';
 import { registerApiKeyRoutes } from './index.js';
 import { registerInvitationRoutes } from './index.js';
 import { registerAuditRoutes } from './index.js';
@@ -309,6 +311,8 @@ export interface ApiDeps<
    * the gate compares limits against their oss values and emits nothing.
    */
   entitlementCloud?: EntitlementCloud | undefined;
+  /** The outbound webhooks (PRDCT-3482): the endpoint routes and the catalog. */
+  webhooks: WebhookService;
 }
 
 /** Control-flow marker: the singleton claim lost (instance already set up). */
@@ -1343,6 +1347,8 @@ export function createApiApp<
   // Teams: the tool's own on self-hosted (and in a cloud-local workspace), the
   // hub's projection in a hub-origin workspace, where the members' gate refuses the writes.
   registerTeamRoutes(api, { db, hubManaged });
+  // Webhooks (PRDCT-3482): the tool's on both editions, never hub-managed (Romain's rule of 27 September 2026).
+  registerWebhookRoutes(api, { service: deps.webhooks });
   if (demoSignIn) {
     registerDemoPassRoutes(api, {
       db,
@@ -1370,7 +1376,7 @@ export function createApiApp<
   // Projects: a subgroup of the workspace with its own members. Deliberately
   // handed NO `hubManaged`: project membership is the tool's own on both
   // editions, picked among the workspace's existing members.
-  registerProjectRoutes(api, { db });
+  registerProjectRoutes(api, { db, webhooks: deps.webhooks });
   registerAuditRoutes(api, db);
   registerExportRoutes(api, {
     db,

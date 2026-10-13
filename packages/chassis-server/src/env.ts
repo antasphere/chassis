@@ -266,6 +266,10 @@ const chassisEnvShape = (version: string) => ({
   METRICS_TOKEN: optionalString(z.string().min(8)),
   /** Days of audit_log to keep (nightly purge at 03:00). 0 = keep forever. */
   AUDIT_RETENTION_DAYS: numeric(z.coerce.number().int().min(0).default(365)),
+  /** Days of webhook deliveries (the per-endpoint log) to keep (nightly purge at 03:00). 0 = keep forever. */
+  WEBHOOK_DELIVERY_RETENTION_DAYS: numeric(z.coerce.number().int().min(0).default(30)),
+  /** Let webhook endpoints target private, loopback and link-local addresses (a self-hoster's own n8n on the LAN). Default false: a webhook never reaches the instance's own network. Refused on EDITION=cloud. */
+  WEBHOOKS_ALLOW_PRIVATE_NETWORKS: booleanish.default(false),
   /** Grace period for orphaned users (accounts with ZERO workspace memberships, e.g. setup-race losers): the nightly 03:00 sweep deletes them once older than this many hours. A user with ANY membership row — even deactivated — is never touched. 0 = sweep disabled. */
   ORPHAN_USER_RETENTION_HOURS: numeric(z.coerce.number().int().min(0).default(72)),
   /** pino level. */
@@ -372,6 +376,13 @@ export function buildEnvSchema<TShape extends z.ZodRawShape = {}>(
     extension?.refine?.(env, ctx);
     demoSignInRefusal(env, ctx);
     if (env.EDITION !== 'cloud') return;
+    if (env.WEBHOOKS_ALLOW_PRIVATE_NETWORKS) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['WEBHOOKS_ALLOW_PRIVATE_NETWORKS'],
+        message: 'never on EDITION=cloud: a webhook of the cloud edition reaches public addresses only'
+      });
+    }
     for (const key of HUB_REQUIRED_VARS) {
       if (env[key] === undefined) {
         ctx.addIssue({

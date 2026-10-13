@@ -62,6 +62,8 @@ export type ScopeCheck<TScope extends string> = (
 export interface McpScopes<TRead extends string = string, TWrite extends string = string> {
   read: TRead;
   write: TWrite;
+  /** The webhooks' opt-in scope (PRDCT-3482); absent, the chassis registers no webhook tool. */
+  webhooks?: string | undefined;
 }
 
 export function createScopeCheck<TRead extends string, TWrite extends string>(

@@ -97,13 +97,13 @@ export const CHASSIS_WEBHOOK_EVENTS: readonly WebhookEventDeclaration[] = [
     type: 'project.created',
     description: 'A project was created in the workspace.',
     subjects: ['project'],
-    data: z.object({ projectId: z.string(), name: z.string(), slug: z.string(), createdBy: z.string() })
+    data: z.object({ projectId: z.string(), name: z.string(), createdBy: z.string() })
   },
   {
     type: 'project.archived',
     description: 'A project of the workspace was archived.',
     subjects: ['project'],
-    data: z.object({ projectId: z.string(), name: z.string(), slug: z.string() })
+    data: z.object({ projectId: z.string(), name: z.string() })
   }
 ];
 
@@ -149,7 +149,9 @@ export function buildWebhookCatalog(tool: WebhookCatalogDeclaration | undefined)
   const events = new Map<string, WebhookEventDeclaration>();
   for (const event of [...CHASSIS_WEBHOOK_EVENTS, ...(tool?.events ?? [])]) {
     if (!WEBHOOK_EVENT_TYPE.test(event.type)) {
-      throw new Error(`tool definition: webhooks event type "${event.type}" must be family.verb (${WEBHOOK_EVENT_TYPE})`);
+      throw new Error(
+        `tool definition: webhooks event type "${event.type}" must be family.verb (${WEBHOOK_EVENT_TYPE})`
+      );
     }
     if (events.has(event.type)) {
       throw new Error(`tool definition: webhooks event type "${event.type}" is declared twice`);
@@ -159,7 +161,9 @@ export function buildWebhookCatalog(tool: WebhookCatalogDeclaration | undefined)
     }
     for (const key of event.subjects) {
       if (!(key in subjects)) {
-        throw new Error(`tool definition: webhooks event "${event.type}" carries the subject "${key}", which webhooks.subjects does not declare`);
+        throw new Error(
+          `tool definition: webhooks event "${event.type}" carries the subject "${key}", which webhooks.subjects does not declare`
+        );
       }
     }
     if (typeof event.description !== 'string' || event.description === '') {
@@ -182,7 +186,10 @@ export function catalogToWire(catalog: WebhookCatalogIndex): WebhookCatalog {
       type: e.type,
       description: e.description,
       subjects: [...e.subjects],
-      schema: z.toJSONSchema(e.data, { target: 'draft-2020-12', unrepresentable: 'any' }) as Record<string, unknown>
+      schema: z.toJSONSchema(e.data, { target: 'draft-2020-12', unrepresentable: 'any' }) as Record<
+        string,
+        unknown
+      >
     }))
   };
 }

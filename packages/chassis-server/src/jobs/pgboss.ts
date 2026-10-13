@@ -69,7 +69,37 @@ export const ORPHAN_USER_PURGE_QUEUE = 'orphan-user-purge';
 export interface JobDeclaration<TData extends object = object> {
   queue: string;
   schedule?: { cron: string; enabled?: boolean };
+  /**
+   * The queue's own settings (PRDCT-3482), applied at install on every
+   * worker boot: the retry budget of the jobs sent to it and its dead
+   * letter, the queue a job goes to when the budget runs out. The dead
+   * letter is named ON THE QUEUE, never on a send (pg-boss stamps it on
+   * each job row at insert, and an api-role replica sends with no DDL), so
+   * it must be declared BEFORE the queue that names it.
+   */
+  options?: QueueOptions;
   handler(data: TData | null, job: TimerJob): Promise<void>;
+}
+
+/** A queue's settings, as a declaration names them. */
+export interface QueueOptions {
+  retryLimit?: number;
+  retryDelaySeconds?: number;
+  retryBackoff?: boolean;
+  /** The queue a job moves to when its retries run out; declared earlier in the list. */
+  deadLetter?: string;
+  expireInSeconds?: number;
+}
+
+function pgBossQueueOptions(name: string, options: QueueOptions): PgBoss.Queue {
+  return {
+    name,
+    ...(options.retryLimit !== undefined ? { retryLimit: options.retryLimit } : {}),
+    ...(options.retryDelaySeconds !== undefined ? { retryDelay: options.retryDelaySeconds } : {}),
+    ...(options.retryBackoff !== undefined ? { retryBackoff: options.retryBackoff } : {}),
+    ...(options.deadLetter !== undefined ? { deadLetter: options.deadLetter } : {}),
+    ...(options.expireInSeconds !== undefined ? { expireInSeconds: options.expireInSeconds } : {})
+  };
 }
 
 /**
@@ -219,6 +249,10 @@ export async function createJobs(
       // The tool's queues: same install section, same lock, declaration order.
       for (const job of toolJobs) {
         await boss.createQueue(job.queue);
+        // The settings are applied on every boot (`createQueue` leaves an
+        // existing queue as it is), so a changed budget reaches an installed
+        // instance at its next worker boot.
+        if (job.options) await boss.updateQueue(job.queue, pgBossQueueOptions(job.queue, job.options));
         if (!job.schedule) continue;
         if (job.schedule.enabled !== false) {
           await boss.schedule(job.queue, job.schedule.cron);
