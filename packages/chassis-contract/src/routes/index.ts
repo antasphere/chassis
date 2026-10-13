@@ -78,6 +78,22 @@ import {
   teamsListSchema,
   teamUpdateSchema
 } from '../schemas/teams.js';
+import {
+  webhookCatalogSchema,
+  webhookDeliveriesListQuerySchema,
+  webhookDeliveriesListSchema,
+  webhookDeliveryParamsSchema,
+  webhookDeliverySchema,
+  webhookEndpointCreatedSchema,
+  webhookEndpointCreateSchema,
+  webhookEndpointSchema,
+  webhookEndpointUpdateSchema,
+  webhookParamsSchema,
+  webhookSecretRotatedSchema,
+  webhooksListQuerySchema,
+  webhooksListSchema,
+  webhookTestResultSchema
+} from '../schemas/webhooks.js';
 
 /**
  * Server-only entry: route contracts for @hono/zod-openapi. Importing this
@@ -678,6 +694,173 @@ export const teamMemberRemoveRoute = createRoute({
   summary: 'Unseat a member from a team (owner or admin; the membership stays)',
   request: { params: teamMemberParamsSchema },
   responses: { 200: jsonBody(teamMemberSchema, 'The removed team member'), ...teamErrors }
+});
+
+// ── Webhooks ─────────────────────────────────────────────────────────────────
+// Outbound webhooks (PRDCT-3482): URLs a workspace registers to be told, by a
+// signed POST, when one of the tool's events happens. Owners and admins only,
+// on both editions; a guest gets 403 `guest_forbidden`, a session a demo pass
+// opened 403 `demo_session`. The signing secret appears in two answers only,
+// the create and the rotation, and never again.
+
+/** The refusals every webhook route shares (the writes add their own). */
+const webhookErrors = {
+  401: errorResponses[401],
+  403: jsonBody(apiErrorSchema, 'guest_forbidden, forbidden (not an owner or admin), or demo_session'),
+  404: errorResponses[404]
+};
+const urlRefused400 = jsonBody(
+  apiErrorSchema,
+  'Validation error, or url_refused: the address is not one this instance may deliver to (a private network, a port, the scheme)'
+);
+
+export const webhooksListRoute = createRoute({
+  method: 'get',
+  path: '/webhooks',
+  tags: ['webhooks'],
+  summary: "List the workspace's webhook endpoints (owner or admin; cursor-paginated)",
+  request: { query: webhooksListQuerySchema },
+  responses: {
+    200: jsonBody(webhooksListSchema, 'Webhook endpoints, newest first'),
+    400: errorResponses[400],
+    401: errorResponses[401],
+    403: webhookErrors[403]
+  }
+});
+
+export const webhookCatalogRoute = createRoute({
+  method: 'get',
+  path: '/webhooks/events',
+  tags: ['webhooks'],
+  summary:
+    'The event catalog: every event type this instance can deliver, its subjects and the JSON Schema of its data',
+  responses: {
+    200: jsonBody(webhookCatalogSchema, 'The subjects and the event types'),
+    401: errorResponses[401],
+    403: webhookErrors[403]
+  }
+});
+
+export const webhookCreateRoute = createRoute({
+  method: 'post',
+  path: '/webhooks',
+  tags: ['webhooks'],
+  summary: 'Register a webhook endpoint (owner or admin); its signing secret is shown once, here',
+  description:
+    'An endpoint subscribes to `events`: exact types (`thing.created`), families (`thing.*`) or everything (`*`), ' +
+    'checked against the catalog (`GET /webhooks/events`). `filters` narrows the subscription by subject: a ' +
+    'subject key mapped to the ids it accepts, AND across keys, OR within a key; an event that does not carry a ' +
+    "filtered subject does not match. Every delivery is signed with the endpoint's secret (`whsec_…`), returned " +
+    'in this answer only: store it now, it is never shown again (`POST /webhooks/{id}/rotate-secret` makes a new one).',
+  request: {
+    body: jsonRequestBody(webhookEndpointCreateSchema, 'The URL, what it subscribes to, its filters')
+  },
+  responses: {
+    201: jsonBody(webhookEndpointCreatedSchema, 'The created endpoint, with its signing secret (shown once)'),
+    400: urlRefused400,
+    ...webhookErrors,
+    403: jsonBody(
+      apiErrorSchema,
+      'guest_forbidden, forbidden (not an owner or admin), demo_session, or plan_required'
+    )
+  }
+});
+
+export const webhookGetRoute = createRoute({
+  method: 'get',
+  path: '/webhooks/{id}',
+  tags: ['webhooks'],
+  summary: 'Read one webhook endpoint (owner or admin)',
+  request: { params: webhookParamsSchema },
+  responses: { 200: jsonBody(webhookEndpointSchema, 'The endpoint'), ...webhookErrors }
+});
+
+export const webhookUpdateRoute = createRoute({
+  method: 'patch',
+  path: '/webhooks/{id}',
+  tags: ['webhooks'],
+  summary: "Change an endpoint's URL, description, events, filters or enabled switch (owner or admin)",
+  description: 'Only the fields named change; at least one is required.',
+  request: {
+    params: webhookParamsSchema,
+    body: jsonRequestBody(webhookEndpointUpdateSchema, 'Fields to change')
+  },
+  responses: {
+    200: jsonBody(webhookEndpointSchema, 'The endpoint as it now is'),
+    400: urlRefused400,
+    ...webhookErrors
+  }
+});
+
+export const webhookDeleteRoute = createRoute({
+  method: 'delete',
+  path: '/webhooks/{id}',
+  tags: ['webhooks'],
+  summary: 'Delete a webhook endpoint and its delivery history (owner or admin)',
+  request: { params: webhookParamsSchema },
+  responses: {
+    200: jsonBody(webhookEndpointSchema, 'The deleted endpoint (final snapshot)'),
+    ...webhookErrors
+  }
+});
+
+export const webhookRotateSecretRoute = createRoute({
+  method: 'post',
+  path: '/webhooks/{id}/rotate-secret',
+  tags: ['webhooks'],
+  summary: "Replace an endpoint's signing secret (owner or admin); the new one is shown once, here",
+  description:
+    'The previous secret keeps signing until `previousSecretExpiresAt`, so a receiver can switch keys without a gap.',
+  request: { params: webhookParamsSchema },
+  responses: {
+    200: jsonBody(webhookSecretRotatedSchema, 'The endpoint, with its new signing secret (shown once)'),
+    ...webhookErrors
+  }
+});
+
+export const webhookTestRoute = createRoute({
+  method: 'post',
+  path: '/webhooks/{id}/test',
+  tags: ['webhooks'],
+  summary: 'Send a signed webhook.ping to the endpoint now and report the outcome',
+  request: { params: webhookParamsSchema },
+  responses: {
+    200: jsonBody(webhookTestResultSchema, 'The ping, attempted inline: its outcome is on the delivery'),
+    ...webhookErrors
+  }
+});
+
+export const webhookDeliveriesListRoute = createRoute({
+  method: 'get',
+  path: '/webhooks/{id}/deliveries',
+  tags: ['webhooks'],
+  summary: "List an endpoint's deliveries, optionally by status (owner or admin; cursor-paginated)",
+  request: { params: webhookParamsSchema, query: webhookDeliveriesListQuerySchema },
+  responses: {
+    200: jsonBody(webhookDeliveriesListSchema, 'Deliveries, newest first'),
+    400: errorResponses[400],
+    ...webhookErrors
+  }
+});
+
+export const webhookDeliveryGetRoute = createRoute({
+  method: 'get',
+  path: '/webhooks/{id}/deliveries/{deliveryId}',
+  tags: ['webhooks'],
+  summary: 'Read one delivery, with the payload as sent and its latest attempt (owner or admin)',
+  request: { params: webhookDeliveryParamsSchema },
+  responses: { 200: jsonBody(webhookDeliverySchema, 'The delivery'), ...webhookErrors }
+});
+
+export const webhookRedeliverRoute = createRoute({
+  method: 'post',
+  path: '/webhooks/{id}/deliveries/{deliveryId}/redeliver',
+  tags: ['webhooks'],
+  summary: 'Queue the same event again for this endpoint, as a new delivery',
+  description:
+    "The new delivery carries the same `eventId`, the receiver's dedupe key, and the same payload.",
+  request: { params: webhookDeliveryParamsSchema },
+  responses: { 201: jsonBody(webhookDeliverySchema, 'The new delivery, queued'), ...webhookErrors }
 });
 
 // ── Demo passes ──────────────────────────────────────────────────────────────
