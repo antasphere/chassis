@@ -13,7 +13,8 @@ import type { WebhookCatalog } from '@antasphere/chassis-contract';
  * A SUBJECT is a filterable key the tool exposes (`thing`, `project`): an
  * endpoint narrows its subscription to a list of ids per subject, and the
  * envelope carries each subject's value under the FIELD the tool names for it
- * (`thingId`, `projectIds`). An event declares which subjects it carries.
+ * (`thingId`, `projectIds`). An event declares which subjects it carries. A
+ * subject's value in the envelope is one id or a list of ids.
  */
 
 /** One filterable key of the tool, as the slot declares it. */
@@ -109,8 +110,8 @@ export const CHASSIS_WEBHOOK_EVENTS: readonly WebhookEventDeclaration[] = [
 
 /**
  * The chassis's own subject: a project, which every tool has (the chassis
- * owns projects). A tool that declares `project` itself must name the same
- * field; the boot refuses a different one.
+ * owns projects). A tool that declares `project` itself may name another
+ * field for it (`projectIds`, a list); the chassis's project events follow.
  */
 export const CHASSIS_WEBHOOK_SUBJECTS: Readonly<Record<string, WebhookSubjectDeclaration>> = {
   project: { field: 'projectId', description: 'A project of the workspace, by id' }
@@ -138,12 +139,11 @@ export function buildWebhookCatalog(tool: WebhookCatalogDeclaration | undefined)
     if (typeof subject.field !== 'string' || subject.field === '') {
       throw new Error(`tool definition: webhooks.subjects.${key}.field is required (the envelope field)`);
     }
-    const chassis = CHASSIS_WEBHOOK_SUBJECTS[key];
-    if (chassis && chassis.field !== subject.field) {
-      throw new Error(
-        `tool definition: webhooks.subjects.${key} is the chassis's subject, written under "${chassis.field}", not "${subject.field}"`
-      );
-    }
+    // A tool may re-declare the chassis's `project` subject under its own
+    // field (a tool whose things belong to several projects writes a list
+    // under `projectIds`); the chassis's own project events then write
+    // their one id under that field too. A subject's value is one id or a
+    // list of ids, and the catalog says so.
     subjects[key] = subject;
   }
   const events = new Map<string, WebhookEventDeclaration>();

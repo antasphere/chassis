@@ -66,7 +66,8 @@ export const minimalTool: ToolDefinition<NoEnv, NoDomain> = {
       THINGS_SCOPES.dataExport,
       THINGS_SCOPES.webhooks
     ],
-    cliKey: [THINGS_SCOPES.read, THINGS_SCOPES.write],
+    // The webhooks scope rides the CLI key like the read and write scopes (Romain's ruling of 13 October 2026).
+    cliKey: [THINGS_SCOPES.read, THINGS_SCOPES.write, THINGS_SCOPES.webhooks],
     requiredScopeFor: createScopeAllowlist<ThingsScope>({
       ...THINGS_SCOPES,
       rules: [
