@@ -136,6 +136,13 @@ export interface WebhookEmitter {
    * a webhook must never break the write it reports).
    */
   emit(conn: DbConn, event: WebhookEmit): Promise<string | null>;
+  /**
+   * Whether any enabled endpoint of the workspace subscribes to the type:
+   * the cheap exit a tool takes BEFORE it computes the facts of an event
+   * that is frequent and costs something to describe (a view). Cached per
+   * replica; `emit` runs the same check itself.
+   */
+  wants(workspaceId: string, type: string): Promise<boolean>;
 }
 
 export interface WebhookServiceDeps {

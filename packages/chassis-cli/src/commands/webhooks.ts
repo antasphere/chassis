@@ -186,7 +186,7 @@ function catalogLines(catalog: WebhookCatalog): string {
   if (catalog.subjects.length > 0) {
     out +=
       '\nSubjects (what --filter <subject>=<id> matches on):\n' +
-      table(catalog.subjects.map((s) => [`  ${s.key}`, `data.${s.field}`, s.description]));
+      table(catalog.subjects.map((s) => [`  ${s.key}`, `subjects.${s.field}`, s.description]));
   }
   return out;
 }

@@ -193,7 +193,7 @@ export const webhookTestResultSchema = z.object({
 });
 export type WebhookTestResult = z.infer<typeof webhookTestResultSchema>;
 
-/** A subject events can carry and endpoints can filter on: its key, the field of `data` holding its id. */
+/** A subject events can carry and endpoints can filter on: its key (what a filter names), the field of the envelope's `subjects` its value is written under (one id or a list of ids). */
 export const webhookCatalogSubjectSchema = z.object({
   key: z.string(),
   field: z.string(),

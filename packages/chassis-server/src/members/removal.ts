@@ -12,6 +12,7 @@ import {
   workspaceTeamMembers,
   type DbConn
 } from '@antasphere/chassis-db';
+import type { WebhookEmitter } from '../webhooks/service.js';
 
 /**
  * The membership an ADD hangs a right on, re-read inside the add's own
@@ -68,8 +69,27 @@ export interface RemovedMembership {
  */
 export type MembershipRemovalHook = (
   tx: DbConn,
+  removed: readonly RemovedMembership[],
+  ctx: MembershipRemovalContext
+) => Promise<Record<string, number>>;
+
+/** What the tool's hook receives beside the rows: the webhooks' emitter, to report what it ended inside the same transaction (PRDCT-3483). */
+export interface MembershipRemovalContext {
+  webhooks: WebhookEmitter;
+}
+
+/** The hook as the chassis calls it, the context bound at boot (`bindMembershipRemoval`). */
+export type BoundMembershipRemoval = (
+  tx: DbConn,
   removed: readonly RemovedMembership[]
 ) => Promise<Record<string, number>>;
+
+export function bindMembershipRemoval(
+  hook: MembershipRemovalHook | undefined,
+  ctx: MembershipRemovalContext
+): BoundMembershipRemoval | undefined {
+  return hook ? (tx, removed) => hook(tx, removed, ctx) : undefined;
+}
 
 export interface RemovalCounts {
   projectGrants: number;
@@ -127,7 +147,7 @@ export interface RemovalCounts {
 export async function deleteMembershipGrants(
   tx: DbConn,
   removed: readonly RemovedMembership[],
-  toolHook?: MembershipRemovalHook
+  toolHook?: BoundMembershipRemoval
 ): Promise<RemovalCounts> {
   if (removed.length === 0) {
     return { projectGrants: 0, teamSeats: 0, invitations: 0, demoPasses: 0, tool: {} };

@@ -152,7 +152,8 @@ export function registerWebhookTools(
         `The event catalog of this instance: every event type it delivers to webhooks. ${WHAT_IS_A_WEBHOOK} ` +
         'Returns { subjects: [{ key, field, description }], events: [{ type, description, subjects, ' +
         'schema }] } — `subjects` are what an event is about (the key a filter uses, and the field of ' +
-        'the event’s `data` holding its id), `schema` is the JSON Schema of the event’s `data`. ' +
+        'the envelope’s `subjects` its value is written under: one id or a list of ids), `schema` is ' +
+        'the JSON Schema of the event’s `data`. ' +
         `${EVENT_PATTERNS} Read this before ${t('create_webhook')}. Every member may read it.`,
       inputSchema: { workspace: workspaceInput },
       annotations: { readOnlyHint: true }

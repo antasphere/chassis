@@ -85,6 +85,7 @@ import { registerProjectRoutes } from './index.js';
 import { registerTeamRoutes } from './index.js';
 import { registerWebhookRoutes } from './webhooks.js';
 import type { WebhookService } from '../webhooks/index.js';
+import { bindMembershipRemoval } from '../members/removal.js';
 import { registerApiKeyRoutes } from './index.js';
 import { registerInvitationRoutes } from './index.js';
 import { registerAuditRoutes } from './index.js';
@@ -1342,7 +1343,7 @@ export function createApiApp<
     accountDeletion: deps.accountDeletion,
     hubManaged,
     guestTargetMessage: tool.copy.guestTarget,
-    onMembershipRemoval: tool.membershipRemoval
+    onMembershipRemoval: bindMembershipRemoval(tool.membershipRemoval, { webhooks: deps.webhooks })
   });
   // Teams: the tool's own on self-hosted (and in a cloud-local workspace), the
   // hub's projection in a hub-origin workspace, where the members' gate refuses the writes.

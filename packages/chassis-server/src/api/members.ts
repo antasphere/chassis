@@ -20,7 +20,7 @@ import { hubManagedMembershipGate } from '../middleware/hub-managed.js';
 import {
   deleteMembershipGrants,
   mergeRemovalCounts,
-  type MembershipRemovalHook,
+  type BoundMembershipRemoval,
   type RemovalCounts
 } from '../members/removal.js';
 
@@ -38,7 +38,7 @@ export interface MemberRouteDeps {
   /** The tool's `guest_target` sentence (`copy.guestTarget`). */
   guestTargetMessage: string;
   /** The tool's half of a removal (the `membershipRemoval` slot), run in the removal's transaction. */
-  onMembershipRemoval?: MembershipRemovalHook | undefined;
+  onMembershipRemoval?: BoundMembershipRemoval | undefined;
 }
 
 const err = (code: string, message: string) => ({ error: { code, message } });

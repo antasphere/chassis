@@ -53,6 +53,7 @@ import { bindEditionSeams } from './platform/index.js';
 import { AllowAllEntitlements } from './platform/index.js';
 import { EventBus } from './platform/index.js';
 import { buildWebhookCatalog, WebhookService, webhookJobs } from './webhooks/index.js';
+import { bindMembershipRemoval } from './members/removal.js';
 import { LocalIdentityProvider } from './platform/index.js';
 import { createRegistry } from './platform/index.js';
 import { NoopUsageSink } from './platform/index.js';
@@ -541,6 +542,26 @@ export async function bootPlatform<
     }
   }
 
+  // Outbound webhooks (PRDCT-3482): the catalog checked, the service built
+  // BEFORE the job runtime (its four queues are declared to it like a tool's
+  // own) and attached to it right after; a tool's `services` slot receives
+  // the emitter, the API app the service, the bus the chassis's own events.
+  const webhookCatalog = buildWebhookCatalog(tool.webhooks);
+  const webhooks = new WebhookService({
+    db: db.db,
+    logger,
+    authSecret,
+    identity: tool.identity,
+    version: tool.runtime.version,
+    policy: { allowPrivateNetworks: env.WEBHOOKS_ALLOW_PRIVATE_NETWORKS, httpsOnly: env.EDITION === 'cloud' },
+    email,
+    brand: { name: tool.identity.displayName, tagline: tool.copy.mail.tagline },
+    publicBaseUrl: env.PUBLIC_BASE_URL,
+    catalog: webhookCatalog,
+    dials: overrides.webhookDials,
+    fetchOptions: overrides.webhookFetch
+  });
+
   // The live user-scoped federation stack (cloud only, internal/federation.md):
   // each user's OWN hub grant (offline_access refresh token on the account
   // row) → as-the-user `GET /orgs` reads → the org reconciler that the
@@ -612,7 +633,7 @@ export async function bootPlatform<
           audit,
           logger,
           dials: hubDials,
-          onMembershipRemoval: tool.membershipRemoval,
+          onMembershipRemoval: bindMembershipRemoval(tool.membershipRemoval, { webhooks }),
           ...(overrides.hubNow ? { now: overrides.hubNow } : {})
         })
       : undefined;
@@ -655,25 +676,6 @@ export async function bootPlatform<
   // The usage queue's retry budget and its hold (PRDCT-2635): stated once,
   // shared by the sink that sends and the held queue that re-drives.
   const usageRetry: UsageRetry = { ...DEFAULT_USAGE_RETRY, ...overrides.usageRetry };
-  // Outbound webhooks (PRDCT-3482): the catalog checked, the service built
-  // BEFORE the job runtime (its four queues are declared to it like a tool's
-  // own) and attached to it right after; a tool's `services` slot receives
-  // the emitter, the API app the service, the bus the chassis's own events.
-  const webhookCatalog = buildWebhookCatalog(tool.webhooks);
-  const webhooks = new WebhookService({
-    db: db.db,
-    logger,
-    authSecret,
-    identity: tool.identity,
-    version: tool.runtime.version,
-    policy: { allowPrivateNetworks: env.WEBHOOKS_ALLOW_PRIVATE_NETWORKS, httpsOnly: env.EDITION === 'cloud' },
-    email,
-    brand: { name: tool.identity.displayName, tagline: tool.copy.mail.tagline },
-    publicBaseUrl: env.PUBLIC_BASE_URL,
-    catalog: webhookCatalog,
-    dials: overrides.webhookDials,
-    fetchOptions: overrides.webhookFetch
-  });
   const jobs = await createJobs(
     env,
     db.db,

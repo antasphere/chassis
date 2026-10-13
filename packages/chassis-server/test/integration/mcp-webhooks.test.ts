@@ -140,7 +140,8 @@ async function signIn(email: string): Promise<string> {
   return extractCookie(res);
 }
 
-describe.skipIf(!WEBHOOKS_SCOPE)('the webhook tools', () => {
+// Under a real tool's host the catalog has no `thing.*` event: the file runs on the chassis's own host only.
+describe.skipIf(!WEBHOOKS_SCOPE || !host.webhooks)('the webhook tools', () => {
   const scope = WEBHOOKS_SCOPE!;
 
   beforeAll(async () => {

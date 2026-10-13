@@ -737,7 +737,7 @@ export const webhookCatalogRoute = createRoute({
   responses: {
     200: jsonBody(webhookCatalogSchema, 'The subjects and the event types'),
     401: errorResponses[401],
-    403: webhookErrors[403]
+    403: jsonBody(apiErrorSchema, 'guest_forbidden (every other member reads the catalog)')
   }
 });
 
