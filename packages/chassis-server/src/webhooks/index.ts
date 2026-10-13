@@ -53,4 +53,4 @@ export {
 } from './service.js';
 export { webhookJobs } from './jobs.js';
 export { buildWebhookDisabledEmail, type WebhookDisabledEmailParams } from './mail.js';
-export { bindPlaceholders, drizzleExecutor, sendInTx } from './tx-send.js';
+export { connectionOf, drizzleExecutor, sendInTx } from './tx-send.js';

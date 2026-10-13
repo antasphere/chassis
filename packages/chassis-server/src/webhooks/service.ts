@@ -552,25 +552,36 @@ export class WebhookService implements WebhookEmitter {
     return row!;
   }
 
-  /** The held queue's work: mark the row held, count it, and queue it again after the hold. */
+  /**
+   * The held queue's work: mark the row held and queue it again after the
+   * hold, in ONE transaction, so a re-send that fails leaves the row pending
+   * and the held job's own retry finds it again (the chassis suite's round 1:
+   * a row marked held outside the transaction was never re-driven once its
+   * send had failed). A row already delivered, failed or gone is left alone.
+   */
   async hold(deliveryId: string): Promise<void> {
     const now = this.now();
-    const [row] = await this.deps.db
-      .update(webhookDeliveries)
-      .set({
-        status: 'held',
-        nextAttemptAt: new Date(now.getTime() + this.dials.heldDelaySeconds * 1000),
-        updatedAt: now
-      })
-      .where(and(eq(webhookDeliveries.id, deliveryId), eq(webhookDeliveries.status, 'pending')))
-      .returning({ id: webhookDeliveries.id, endpointId: webhookDeliveries.endpointId });
-    if (!row) return; // delivered, failed or gone meanwhile
+    const row = await this.deps.db.transaction(async (tx) => {
+      const [updated] = await tx
+        .update(webhookDeliveries)
+        .set({
+          status: 'held',
+          nextAttemptAt: new Date(now.getTime() + this.dials.heldDelaySeconds * 1000),
+          updatedAt: now
+        })
+        .where(and(eq(webhookDeliveries.id, deliveryId), eq(webhookDeliveries.status, 'pending')))
+        .returning({ id: webhookDeliveries.id, endpointId: webhookDeliveries.endpointId });
+      if (!updated) return null;
+      await this.queueDelivery(tx, deliveryId, this.dials.heldDelaySeconds);
+      return updated;
+    });
+    if (!row) return;
+    // Counted and logged once the hold committed: a rolled-back hold is not one.
     this.held.inc();
     this.deps.logger.error(
       { deliveryId, endpointId: row.endpointId, retryAfterSeconds: this.dials.heldDelaySeconds },
       'webhooks: a delivery exhausted its retries — held, re-driven after the hold (webhook_deliveries_held_total)'
     );
-    await this.queueDelivery(this.deps.db, deliveryId, this.dials.heldDelaySeconds);
   }
 
   private async mailDisabled(endpoint: WebhookEndpointRow, streak: number, since: Date): Promise<void> {
