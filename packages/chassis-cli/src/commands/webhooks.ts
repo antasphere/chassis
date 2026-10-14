@@ -53,6 +53,10 @@ export function explainWebhookRefusal(
     case 'url_refused':
     case 'demo_session':
       return e.message;
+    case 'unknown_event':
+      return `${e.message}. The exact types are in \`webhooks events\`; a family is its first word plus \`.*\`.`;
+    case 'unknown_subject':
+      return `${e.message}. The subject keys are in \`webhooks events\`.`;
     case 'plan_required': {
       const url = (e.details as { upgradeUrl?: unknown } | undefined)?.upgradeUrl;
       return typeof url === 'string' && url ? `${e.message} — upgrade the plan at ${url}` : e.message;

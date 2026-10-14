@@ -174,6 +174,23 @@ export class WebhookRefusedError extends Error {
   }
 }
 
+/**
+ * Thrown by an attempt that did not run because the endpoint already holds
+ * its share of this replica's pollers (`MAX_IN_FLIGHT_PER_ENDPOINT`): the
+ * worker puts the job back in the queue a moment later, its retry budget
+ * untouched, so one dead receiver can never take every slot (verifier
+ * round 2, MJ-R2-1).
+ */
+export class WebhookDeliveryDeferred extends Error {
+  constructor(readonly deliveryId: string) {
+    super('deferred');
+    this.name = 'WebhookDeliveryDeferred';
+  }
+}
+
+/** How many attempts one endpoint may have in flight on one replica at once. */
+export const MAX_IN_FLIGHT_PER_ENDPOINT = 2;
+
 /** Thrown by a retryable attempt that failed, so pg-boss retries the job. */
 export class WebhookDeliveryFailed extends Error {
   constructor(
@@ -200,6 +217,8 @@ export class WebhookService implements WebhookEmitter {
   private readonly now: () => Date;
   /** Filled by boot once pg-boss exists (`attach`); the jobs are declared before it. */
   private boss: PgBoss | null = null;
+  /** Attempts in flight per endpoint on this replica (the per-endpoint bound). */
+  private readonly inFlight = new Map<string, number>();
 
   constructor(private readonly deps: WebhookServiceDeps) {
     this.dials = { ...DEFAULT_WEBHOOK_DIALS, ...deps.dials };
@@ -468,8 +487,15 @@ export class WebhookService implements WebhookEmitter {
       this.deliveries.inc({ outcome: 'refused' });
       this.deps.logger.error(
         { err: e, endpointId: endpoint.id, deliveryId: delivery.id },
-        'webhooks: the endpoint’s secret cannot be opened — the delivery is failed, not retried'
+        'webhooks: the endpoint’s secret cannot be opened — the delivery is failed and the endpoint switched off'
       );
+      // An endpoint whose secret never opens would fail every event for ever
+      // (verifier round 2, N-R2-2): it is switched off here, with its reason.
+      await this.deps.db
+        .update(webhookEndpoints)
+        .set({ enabled: false, disabledAt: now, disabledReason: 'secret_unreadable', updatedAt: now })
+        .where(and(eq(webhookEndpoints.id, endpoint.id), eq(webhookEndpoints.enabled, true)));
+      this.invalidateListeners(endpoint.workspaceId);
       return this.finish(delivery, {
         status: 'failed',
         attempt,
@@ -478,6 +504,10 @@ export class WebhookService implements WebhookEmitter {
         now
       });
     }
+    if (opts.retryable && (this.inFlight.get(endpoint.id) ?? 0) >= MAX_IN_FLIGHT_PER_ENDPOINT) {
+      throw new WebhookDeliveryDeferred(delivery.id);
+    }
+    this.inFlight.set(endpoint.id, (this.inFlight.get(endpoint.id) ?? 0) + 1);
     let statusCode: number | null = null;
     let error: string | null = null;
     try {
@@ -494,6 +524,10 @@ export class WebhookService implements WebhookEmitter {
           : (e as Error).name === 'TimeoutError' || (e as Error).name === 'AbortError'
             ? 'timeout'
             : String((e as Error).message ?? e).slice(0, MAX_ERROR_TEXT);
+    } finally {
+      const left = (this.inFlight.get(endpoint.id) ?? 1) - 1;
+      if (left <= 0) this.inFlight.delete(endpoint.id);
+      else this.inFlight.set(endpoint.id, left);
     }
     if (error === null) {
       this.deliveries.inc({ outcome: 'delivered' });
@@ -606,6 +640,11 @@ export class WebhookService implements WebhookEmitter {
       .where(eq(webhookDeliveries.id, delivery.id))
       .returning();
     return row!;
+  }
+
+  /** Put a delivery back in the queue after `inSeconds` (a deferred attempt). */
+  async requeue(deliveryId: string, inSeconds: number): Promise<void> {
+    await this.queueDelivery(this.deps.db, deliveryId, inSeconds);
   }
 
   /**

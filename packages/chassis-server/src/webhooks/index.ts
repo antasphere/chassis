@@ -42,6 +42,8 @@ export {
   WEBHOOK_EVENTS_QUEUE,
   WEBHOOK_PURGE_QUEUE,
   WEBHOOK_SECRET_BOX_INFO,
+  MAX_IN_FLIGHT_PER_ENDPOINT,
+  WebhookDeliveryDeferred,
   WebhookDeliveryFailed,
   WebhookRefusedError,
   WebhookService,

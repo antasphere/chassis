@@ -428,6 +428,31 @@ describe(`${bin} webhooks`, () => {
     expect(h2.err()).toContain('A demonstration session cannot do this');
   });
 
+  it('unknown_event points at `webhooks events` and the family form; unknown_subject at the subject keys (N-R2-1)', async () => {
+    const h = harness([refusal(400, 'unknown_event', 'Unknown event type or family: nothing.*')]);
+    const argv = ['webhooks', 'create', 'https://r.example', '--event', 'nothing.*'];
+    expect(await run([...argv, ...WIRED], h.io)).toBe(1);
+    expect(h.calls).toHaveLength(1);
+    expect(h.err()).toContain('Unknown event type or family: nothing.*');
+    expect(h.err()).toContain('The exact types are in `webhooks events`');
+    expect(h.err()).toContain('a family is its first word plus `.*`');
+
+    const h2 = harness([refusal(400, 'unknown_subject', 'Unknown filter subject: bogus')]);
+    const argv2 = [
+      'webhooks',
+      'create',
+      'https://r.example',
+      '--event',
+      'thing.created',
+      '--filter',
+      'bogus=x'
+    ];
+    expect(await run([...argv2, ...WIRED], h2.io)).toBe(1);
+    expect(h2.calls).toHaveLength(1);
+    expect(h2.err()).toContain('Unknown filter subject: bogus');
+    expect(h2.err()).toContain('The subject keys are in `webhooks events`');
+  });
+
   it('plan_required carries the upgrade link', async () => {
     const h = harness([
       refusal(403, 'plan_required', 'Webhooks need a paid plan', {

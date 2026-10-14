@@ -87,6 +87,13 @@ export interface JobDeclaration<TData extends object = object> {
    * pollers never share a job.
    */
   concurrency?: number;
+  /**
+   * How often each poller asks for work, in seconds (pg-boss's default is
+   * two). pg-boss's worker sleeps this long after EVERY loop, jobs found or
+   * not, so a queue that must drain a burst declares a short one (verifier
+   * round 2, MJ-R2-1).
+   */
+  pollingIntervalSeconds?: number;
   handler(data: TData | null, job: TimerJob): Promise<void>;
 }
 
@@ -417,15 +424,24 @@ export async function createJobs(
     for (const job of toolJobs) {
       const pollers = Math.max(1, Math.floor(job.concurrency ?? 1));
       for (let i = 0; i < pollers; i++) {
-        await boss.work<object>(job.queue, { includeMetadata: true }, async (jobs) => {
-          for (const fetched of jobs) {
-            await job.handler(fetched.data ?? null, {
-              id: fetched.id,
-              queue: job.queue,
-              key: fetched.singletonKey ?? null
-            });
+        await boss.work<object>(
+          job.queue,
+          {
+            includeMetadata: true,
+            ...(job.pollingIntervalSeconds !== undefined
+              ? { pollingIntervalSeconds: job.pollingIntervalSeconds }
+              : {})
+          },
+          async (jobs) => {
+            for (const fetched of jobs) {
+              await job.handler(fetched.data ?? null, {
+                id: fetched.id,
+                queue: job.queue,
+                key: fetched.singletonKey ?? null
+              });
+            }
           }
-        });
+        );
       }
     }
 

@@ -5,6 +5,7 @@ import {
   WEBHOOK_DELIVERIES_QUEUE,
   WEBHOOK_EVENTS_QUEUE,
   WEBHOOK_PURGE_QUEUE,
+  WebhookDeliveryDeferred,
   WebhookDeliveryFailed,
   type WebhookDeliveryJob,
   type WebhookEventJob,
@@ -37,6 +38,7 @@ export function webhookJobs(
     {
       queue: WEBHOOK_EVENTS_QUEUE,
       concurrency: 2,
+      pollingIntervalSeconds: 0.5,
       handler: async (data) => {
         const job = data as WebhookEventJob | null;
         if (!job?.id) return;
@@ -55,12 +57,19 @@ export function webhookJobs(
       // Eight deliveries in flight per replica: a receiver that answers
       // nothing holds one slot for its timeout, not the instance.
       concurrency: 8,
+      pollingIntervalSeconds: 0.5,
       handler: async (data) => {
         const job = data as WebhookDeliveryJob | null;
         if (!job?.deliveryId) return;
         try {
           await service.attempt(job.deliveryId, { retryable: true });
         } catch (e) {
+          if (e instanceof WebhookDeliveryDeferred) {
+            // The endpoint already holds its share of the pollers: back in the
+            // queue in two seconds, its retry budget untouched.
+            await service.requeue(job.deliveryId, 2);
+            return;
+          }
           if (e instanceof WebhookDeliveryFailed) {
             logger.warn(
               { deliveryId: e.deliveryId, reason: e.message },

@@ -330,5 +330,31 @@ describe.skipIf(!WEBHOOKS_SCOPE || !host.webhooks)('the webhook tools', () => {
       // The catalog stays every member's.
       await ok(memberKey, TOOL.events);
     });
+
+    it('an unknown event type or filter key is told where the catalog is (N-R2-1)', async () => {
+      const unknownEvent = await callTool(ownerKey, TOOL.create, {
+        url: UNREACHABLE_URL,
+        events: ['nothing.*']
+      });
+      expect(unknownEvent.isError).toBe(true);
+      expect(unknownEvent.text).toContain('unknown_event');
+      const eventHint = unknownEvent.text.split(' — Next: ')[1];
+      expect(eventHint, `no "Next:" sentence in: ${unknownEvent.text}`).toContain(TOOL.events);
+      expect(eventHint).toContain('`.*`');
+
+      const unknownSubject = await callTool(ownerKey, TOOL.create, {
+        url: UNREACHABLE_URL,
+        events: ['thing.created'],
+        filters: { bogus: ['x'] }
+      });
+      expect(unknownSubject.isError).toBe(true);
+      expect(unknownSubject.text).toContain('unknown_subject');
+      const subjectHint = unknownSubject.text.split(' — Next: ')[1];
+      expect(subjectHint, `no "Next:" sentence in: ${unknownSubject.text}`).toContain(TOOL.events);
+
+      // Neither refusal left an endpoint behind.
+      const list = await ok(ownerKey, TOOL.list);
+      expect(list.webhooks.map((w: { url: string }) => w.url)).not.toContain(UNREACHABLE_URL);
+    });
   });
 });

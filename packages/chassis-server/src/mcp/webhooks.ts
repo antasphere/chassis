@@ -63,7 +63,13 @@ export function webhookErrorHints(toolPrefix: string): ErrorHints {
       'scheme’s default, and an address that is not on the public internet (localhost, a private or ' +
       'link-local network), unless the operator of a self-hosted instance opened private networks. ' +
       `Use a public address of the receiver, then call ${toolPrefix}create_webhook or ` +
-      `${toolPrefix}update_webhook again.`
+      `${toolPrefix}update_webhook again.`,
+    unknown_event:
+      'One of the `events` entries is not an event type or family this instance delivers. ' +
+      `Read ${toolPrefix}webhook_events for the exact types; a family is its first word plus \`.*\`.`,
+    unknown_subject:
+      'One of the `filters` keys is not a subject this instance declares. ' +
+      `The subject keys are in ${toolPrefix}webhook_events (for example \`project\`).`
   };
 }
 

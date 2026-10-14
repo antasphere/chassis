@@ -91,13 +91,15 @@ export const CHASSIS_WEBHOOK_EVENTS: readonly WebhookEventDeclaration[] = [
   },
   {
     type: 'apikey.created',
-    description: 'An API key was created in the workspace.',
+    description:
+      'An API key was created on the API keys page or through the API (not the command line’s own sign-in key).',
     subjects: [],
     data: z.object({ apiKeyId: z.string() })
   },
   {
     type: 'apikey.revoked',
-    description: 'An API key of the workspace was revoked.',
+    description:
+      'An API key of the workspace was revoked from the API keys page or through the API (not a key revoking itself at logout).',
     subjects: [],
     data: z.object({ apiKeyId: z.string() })
   },

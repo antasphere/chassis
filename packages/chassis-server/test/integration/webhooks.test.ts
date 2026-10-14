@@ -86,6 +86,22 @@ const silentPaths = new Set<string>();
 const openNow = new Map<string, number>();
 const openMax = new Map<string, number>();
 const heldOpen: http.ServerResponse[] = [];
+/**
+ * Paths whose answer is a 200 held back this many milliseconds (the sender's
+ * timeout cuts it first when the hold is longer), counted in `openNow` /
+ * `openMax` like the silent ones; `answerAtOnce` releases them.
+ */
+const slowPaths = new Map<string, number>();
+const slowHeld = new Map<string, http.ServerResponse[]>();
+
+/** The slow path answers at once from now on, and the responses it holds are answered now. */
+function answerAtOnce(path: string): void {
+  slowPaths.delete(path);
+  for (const res of slowHeld.get(path) ?? []) {
+    if (!res.writableEnded && !res.destroyed) res.end('ok');
+  }
+  slowHeld.delete(path);
+}
 
 const requestsTo = (path: string) => received.filter((r) => r.url === path);
 const requestsWithId = (id: string) => received.filter((r) => r.headers['webhook-id'] === id);
@@ -273,6 +289,19 @@ describe.skipIf(!host.webhooks)('outbound webhooks (PRDCT-3482)', () => {
           res.on('close', () => openNow.set(url, (openNow.get(url) ?? 1) - 1));
           return;
         }
+        const holdMs = slowPaths.get(url);
+        if (holdMs !== undefined) {
+          const now = (openNow.get(url) ?? 0) + 1;
+          openNow.set(url, now);
+          openMax.set(url, Math.max(openMax.get(url) ?? 0, now));
+          res.on('close', () => openNow.set(url, (openNow.get(url) ?? 1) - 1));
+          slowHeld.set(url, [...(slowHeld.get(url) ?? []), res]);
+          const timer = setTimeout(() => {
+            if (!res.writableEnded && !res.destroyed) res.end('ok');
+          }, holdMs);
+          res.on('close', () => clearTimeout(timer));
+          return;
+        }
         res.statusCode = statusFor.get(url) ?? 200;
         res.end('ok');
       });
@@ -309,6 +338,7 @@ describe.skipIf(!host.webhooks)('outbound webhooks (PRDCT-3482)', () => {
     await app?.stop();
     await container?.stop();
     for (const res of heldOpen) res.destroy();
+    for (const held of slowHeld.values()) for (const res of held) res.destroy();
     server?.closeAllConnections();
     await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
   });
@@ -756,6 +786,103 @@ describe.skipIf(!host.webhooks)('outbound webhooks (PRDCT-3482)', () => {
         await send('PATCH', `/webhooks/${hookKey.id}`, actors.owner!, { enabled: false });
       }
     });
+
+    /** The owner invites a new person, who accepts with a new account (the public accept route). */
+    async function joinByInvitation(email: string, role: 'member' | 'admin') {
+      const invited = await send('POST', '/invitations', actors.owner!, { email, role });
+      expect(invited.status).toBe(201);
+      const token = ((await readJson(invited)).acceptUrl as string).split('/invite/')[1]!;
+      const accepted = await send(
+        'POST',
+        '/invitations/accept',
+        {},
+        { token, name: 'Joining Person', password: PASSWORD }
+      );
+      expect(accepted.status).toBe(200);
+      const body = (await readJson(accepted)) as { userId: string; role: string; workspaceId: string };
+      expect(body).toMatchObject({ workspaceId, role });
+      return body;
+    }
+
+    it('30. member.joined, on an accepted invitation, reaches the receiver with the new person and the role (G-R2-1)', async () => {
+      const hookJoin = await createEndpoint(actors.owner!, {
+        url: `${base}/hook-chassis-joined`,
+        events: ['member.joined']
+      });
+      try {
+        const joined = await joinByInvitation('joiner@example.com', 'admin');
+        expect(joined.userId).toEqual(expect.any(String));
+        expect(joined.userId).not.toBe(actors.owner!.userId);
+        const event = await waitFor(
+          'member.joined',
+          bodyAt('/hook-chassis-joined', 'member.joined', 'userId', joined.userId)
+        );
+        expect(event).toMatchObject({
+          workspaceId,
+          subjects: {},
+          data: { userId: joined.userId, role: 'admin' }
+        });
+        expect(chassisBodies('/hook-chassis-joined').filter((b) => b.type === 'member.joined')).toHaveLength(
+          1
+        );
+      } finally {
+        await send('PATCH', `/webhooks/${hookJoin.id}`, actors.owner!, { enabled: false });
+      }
+    });
+
+    it('31. member.removed, on POST /members/{id}/remove, reaches the receiver with the person removed (G-R2-1)', async () => {
+      const joined = await joinByInvitation('removed-one@example.com', 'member');
+      const hookRemoved = await createEndpoint(actors.owner!, {
+        url: `${base}/hook-chassis-removed`,
+        events: ['member.removed']
+      });
+      try {
+        const [membership] = await app.db.db
+          .select({ id: workspaceMembers.id })
+          .from(workspaceMembers)
+          .where(
+            and(eq(workspaceMembers.workspaceId, workspaceId), eq(workspaceMembers.userId, joined.userId))
+          );
+        const removed = await send('POST', `/members/${membership!.id}/remove`, actors.owner!);
+        expect(removed.status).toBe(200);
+        const event = await waitFor(
+          'member.removed',
+          bodyAt('/hook-chassis-removed', 'member.removed', 'userId', joined.userId)
+        );
+        expect(event).toMatchObject({ workspaceId, subjects: {}, data: { userId: joined.userId } });
+        expect(
+          chassisBodies('/hook-chassis-removed').filter((b) => b.type === 'member.removed')
+        ).toHaveLength(1);
+      } finally {
+        await send('PATCH', `/webhooks/${hookRemoved.id}`, actors.owner!, { enabled: false });
+      }
+    });
+
+    it('32. apikey.revoked, on DELETE /api-keys/{id}, reaches the receiver with the key (G-R2-1)', async () => {
+      const minted = await send('POST', '/api-keys', actors.owner!, {
+        name: 'revoked-key',
+        scopes: [host.scopes.read]
+      });
+      expect(minted.status).toBe(201);
+      const apiKeyId = (await readJson(minted)).apiKey.id as string;
+      const hookRevoked = await createEndpoint(actors.owner!, {
+        url: `${base}/hook-chassis-revoked`,
+        events: ['apikey.revoked']
+      });
+      try {
+        const revoked = await send('DELETE', `/api-keys/${apiKeyId}`, actors.owner!);
+        expect(revoked.status).toBe(200);
+        const event = await waitFor(
+          'apikey.revoked',
+          bodyAt('/hook-chassis-revoked', 'apikey.revoked', 'apiKeyId', apiKeyId)
+        );
+        expect(event).toMatchObject({ workspaceId, subjects: {}, data: { apiKeyId } });
+        // Only the revoke: the mint before the endpoint existed is nobody's here.
+        expect(chassisBodies('/hook-chassis-revoked').map((b) => b.type)).toEqual(['apikey.revoked']);
+      } finally {
+        await send('PATCH', `/webhooks/${hookRevoked.id}`, actors.owner!, { enabled: false });
+      }
+    });
   });
 
   // ── A closed instance ────────────────────────────────────────────────────────
@@ -964,6 +1091,10 @@ describe.skipIf(!host.webhooks)('outbound webhooks (PRDCT-3482)', () => {
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({ status: 'failed', attempt: 1, lastError: 'secret_unreadable' });
       expect(requestsTo('/hook-s')).toEqual([]);
+      // No retry can heal it: the endpoint is switched off, with its reason (N-R2-2).
+      const endpoint = await endpointRow(hookS.id);
+      expect(endpoint).toMatchObject({ enabled: false, disabledReason: 'secret_unreadable' });
+      expect(endpoint!.disabledAt).not.toBeNull();
     });
 
     it(
@@ -1164,6 +1295,146 @@ describe.skipIf(!host.webhooks)('outbound webhooks (PRDCT-3482)', () => {
         }
       }
     );
+
+    it(
+      '33. one slow receiver holds at most two of the eight delivery pollers: a fast endpoint is served at once, and the deferred deliveries keep their retry budget (MJ-R2-1)',
+      { timeout: 60_000 },
+      async () => {
+        const slowPath = '/hook-bound-slow';
+        // Held three seconds, longer than the sender's two-second timeout: every slow send is cut.
+        slowPaths.set(slowPath, 3000);
+        const hookSlow = await createEndpoint(actors.admin!, {
+          url: `${base}${slowPath}`,
+          events: ['thing.created'],
+          filters: { thing: ['t-bound-slow'] }
+        });
+        const hookFast = await createEndpoint(actors.admin!, {
+          url: `${base}/hook-bound-fast`,
+          events: ['thing.created'],
+          filters: { thing: ['t-bound-fast'] }
+        });
+        try {
+          const slowIds = await Promise.all(Array.from({ length: 10 }, () => emitCreated('t-bound-slow')));
+          expect(slowIds.every((id) => typeof id === 'string')).toBe(true);
+          const fastEmitAt = Date.now();
+          const fastId = (await emitCreated('t-bound-fast'))!;
+          expect(fastId).toEqual(expect.any(String));
+
+          await waitFor('the fast delivery row', () => deliveryFor(hookFast.id, fastId));
+          const rowAt = Date.now();
+          await waitFor('the fast delivery', () => hitsAt('/hook-bound-fast', fastId).length > 0, 12_000);
+          const fastMs = Date.now() - rowAt;
+          console.info(
+            `[33] fast delivery ${fastMs} ms after its row seen, ${Date.now() - fastEmitAt} ms after its emit; slow open now ${openNow.get(slowPath) ?? 0}`
+          );
+          // Eight pollers minus the slow endpoint's two: a free one takes the row at its next half-second poll.
+          expect(fastMs).toBeLessThan(3000);
+
+          // The slow endpoint did fill its share, and never more.
+          await waitFor(
+            'the slow endpoint holding two requests',
+            () => (openMax.get(slowPath) ?? 0) >= 2,
+            10_000
+          );
+          answerAtOnce(slowPath);
+
+          const rows = await waitFor(
+            'the ten slow deliveries delivered',
+            async () => {
+              const all = await deliveriesOf(hookSlow.id);
+              return all.length === 10 && all.every((d) => d.status === 'delivered') ? all : undefined;
+            },
+            40_000
+          );
+          console.info(
+            `[33] slow max open ${openMax.get(slowPath)}; attempts ${rows
+              .map((r) => r.attempt)
+              .sort()
+              .join(',')}; slow requests ${requestsTo(slowPath).length}`
+          );
+          expect(openMax.get(slowPath)).toBeLessThanOrEqual(2);
+          // A deferral is not an attempt: a row reads 1 (never cut) or 2 (cut once, then answered).
+          for (const row of rows) expect([1, 2]).toContain(row.attempt);
+          expect(new Set(rows.map((r) => r.eventId))).toEqual(new Set(slowIds));
+          for (const id of slowIds) expect(hitsAt(slowPath, id!).length).toBeGreaterThanOrEqual(1);
+        } finally {
+          answerAtOnce(slowPath);
+          await send('PATCH', `/webhooks/${hookSlow.id}`, actors.admin!, { enabled: false });
+          await send('PATCH', `/webhooks/${hookFast.id}`, actors.admin!, { enabled: false });
+        }
+      }
+    );
+
+    it(
+      '34. a burst of twelve events for one endpoint lands within six seconds of the first emit: the two webhook queues poll every half second (MJ-R2-1)',
+      { timeout: 45_000 },
+      async () => {
+        const hookBurst = await createEndpoint(actors.admin!, {
+          url: `${base}/hook-burst`,
+          events: ['thing.created'],
+          filters: { thing: ['t-burst'] }
+        });
+        try {
+          const firstEmitAt = Date.now();
+          const ids: string[] = [];
+          for (let i = 0; i < 12; i++) {
+            const id = await emitCreated('t-burst');
+            expect(id).toEqual(expect.any(String));
+            ids.push(id!);
+          }
+          const lastEmitAt = Date.now();
+          const rows = await waitFor(
+            'the twelve deliveries delivered',
+            async () => {
+              const all = await deliveriesOf(hookBurst.id);
+              return all.length === 12 && all.every((d) => d.status === 'delivered') ? all : undefined;
+            },
+            30_000
+          );
+          expect(new Set(rows.map((r) => r.eventId))).toEqual(new Set(ids));
+          const lastDeliveredAt = Math.max(...rows.map((r) => r.deliveredAt!.getTime()));
+          console.info(
+            `[34] emits took ${lastEmitAt - firstEmitAt} ms; last delivery ${lastDeliveredAt - firstEmitAt} ms after the first emit`
+          );
+          // pg-boss's default two-second poll with two fan-out pollers would take about twelve.
+          expect(lastDeliveredAt - firstEmitAt).toBeLessThan(6000);
+        } finally {
+          await send('PATCH', `/webhooks/${hookBurst.id}`, actors.admin!, { enabled: false });
+        }
+      }
+    );
+
+    it('35. the endpoint a secret_unreadable delivery switched off listens no more: the next emit of its workspace answers null (N-R2-2)', async () => {
+      const lone = (await app.registry.workspaces.create('Unreadable', actors.owner!.userId)).workspaceId;
+      const there = { 'x-workspace-id': lone };
+      const hookU = await createEndpoint(
+        actors.owner!,
+        { url: `${base}/hook-unreadable`, events: ['thing.created'] },
+        there
+      );
+      await app.db.db
+        .update(webhookEndpoints)
+        .set({ secret: 'v1.garbage' })
+        .where(eq(webhookEndpoints.id, hookU.id));
+      const eventId = (await emitCreated('t-unreadable', 'p0', app, lone))!;
+      expect(eventId).toEqual(expect.any(String));
+      const row = await waitFor('the delivery failed', async () => {
+        const r = await deliveryFor(hookU.id, eventId);
+        return r?.status === 'failed' ? r : undefined;
+      });
+      expect(row).toMatchObject({ lastError: 'secret_unreadable', attempt: 1 });
+      expect(await endpointRow(hookU.id)).toMatchObject({
+        enabled: false,
+        disabledReason: 'secret_unreadable'
+      });
+
+      expect(await app.webhooks.wants(lone, 'thing.created')).toBe(false);
+      const jobsBefore = await eventJobs();
+      expect(await emitCreated('t-unreadable', 'p0', app, lone)).toBeNull();
+      expect(await eventJobs()).toBe(jobsBefore);
+      expect(await deliveriesOf(hookU.id)).toHaveLength(1);
+      expect(requestsTo('/hook-unreadable')).toEqual([]);
+    });
   });
 
   // ── Secret, ping, redeliver, update, delete ──────────────────────────────────
