@@ -69,7 +69,9 @@ const TARGET_PATHS = new Set([
   '/api/v1/api-keys',
   '/api/v1/invitations',
   '/api/v1/workspaces',
-  '/api/v1/projects'
+  '/api/v1/projects',
+  // A retried registration answers the first one's secret, never a second endpoint (PRDCT-3482).
+  '/api/v1/webhooks'
 ]);
 // The two member routes that MINT a credential for another user. Both are
 // covered (FUZZ-7): a replayed mint hands out a second live secret, and the

@@ -13,7 +13,12 @@ export const THINGS_IDENTITY = {
   slug: 'things',
   displayName: 'Things',
   apiKeyPrefix: 'thg',
-  scopes: { read: 'things:read', write: 'things:write', dataExport: 'things:export' },
+  scopes: {
+    read: 'things:read',
+    write: 'things:write',
+    dataExport: 'things:export',
+    webhooks: 'things:webhooks'
+  },
   cliKeyScopesLabel: 'things:read+write',
   cloud: { url: 'https://things.antasphere.test' },
   cli: { bin: 'things', envPrefix: 'THINGS', legacyConfigDir: 'things' },

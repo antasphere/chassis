@@ -220,7 +220,12 @@ export const DEMO_SESSION_REFUSED_API_ROUTES: readonly DemoSessionRefusedApiRout
   { method: 'ALL', path: '/demo/passes', does: 'manage demo links' },
   { method: 'ALL', path: '/demo/passes/*', does: 'manage demo links' },
   { method: 'POST', path: '/workspaces', does: 'create a workspace' },
-  { method: 'PUT', path: '/me/default-workspace', does: 'change your default workspace' }
+  { method: 'PUT', path: '/me/default-workspace', does: 'change your default workspace' },
+  // A webhook is something the workspace keeps, and its secret is a credential (PRDCT-3482).
+  { method: 'POST', path: '/webhooks', does: 'register a webhook' },
+  { method: 'PATCH', path: '/webhooks/*', does: 'change a webhook' },
+  { method: 'DELETE', path: '/webhooks/*', does: 'delete a webhook' },
+  { method: 'POST', path: '/webhooks/*', does: 'act on a webhook' }
 ];
 
 /** The refusal's sentence for one entry of `DEMO_SESSION_REFUSED_API_ROUTES`. */

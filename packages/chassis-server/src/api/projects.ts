@@ -1,4 +1,5 @@
 import type { OpenAPIHono } from '@hono/zod-openapi';
+import type { WebhookEmitter } from '../webhooks/service.js';
 import type { Context } from 'hono';
 import { and, desc, eq, isNotNull, isNull, sql } from 'drizzle-orm';
 import { projectRoleAtLeast, type Principal, type ProjectRole } from '@antasphere/chassis-contract';
@@ -62,6 +63,8 @@ import {
  */
 export interface ProjectRouteDeps {
   db: Db;
+  /** The outbound webhooks' emitter (PRDCT-3482): `project.created` inside the create's transaction, `project.archived` after the archive. */
+  webhooks: WebhookEmitter;
 }
 
 const err = (code: string, message: string) => ({ error: { code, message } });
@@ -210,7 +213,7 @@ interface MemberUnionRow {
 }
 
 export function registerProjectRoutes(api: OpenAPIHono, deps: ProjectRouteDeps): void {
-  const { db } = deps;
+  const { db, webhooks } = deps;
 
   // Projects are a workspace-level surface: a guest membership exists for
   // principal resolution only (D2) and is refused the whole subtree, flat, on
@@ -362,6 +365,12 @@ export function registerProjectRoutes(api: OpenAPIHono, deps: ProjectRouteDeps):
         role: 'manager',
         addedBy: principal.userId
       });
+      await webhooks.emit(tx, {
+        workspaceId: principal.workspaceId,
+        type: 'project.created',
+        subjects: { project: project!.id },
+        data: { projectId: project!.id, name: body.name, createdBy: principal.userId }
+      });
       return readProject(tx, principal, project!.id);
     });
     // The principal resolved from an active membership a moment ago; losing
@@ -435,6 +444,12 @@ export function registerProjectRoutes(api: OpenAPIHono, deps: ProjectRouteDeps):
       .returning({ id: projects.id });
     if (updated.length === 0) return c.json(archived(), 409);
     const project = (await readProject(db, principal, id))!;
+    await webhooks.emit(db, {
+      workspaceId: principal.workspaceId,
+      type: 'project.archived',
+      subjects: { project: id },
+      data: { projectId: id, name: project.name }
+    });
     c.set('audit', { action: 'project.archive', resourceType: 'project', resourceId: id });
     return c.json(toWire(project), 200);
   });

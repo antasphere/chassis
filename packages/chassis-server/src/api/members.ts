@@ -20,12 +20,15 @@ import { hubManagedMembershipGate } from '../middleware/hub-managed.js';
 import {
   deleteMembershipGrants,
   mergeRemovalCounts,
-  type MembershipRemovalHook,
+  type BoundMembershipRemoval,
   type RemovalCounts
 } from '../members/removal.js';
+import type { EventBus } from '../platform/events.js';
 
 export interface MemberRouteDeps {
   db: Db;
+  /** The bus, for `member.removed` after a removal commits (the webhooks bridge it). */
+  events?: EventBus | undefined;
   auth: Auth;
   publicBaseUrl: string;
   accountDeletion: AccountDeletionService;
@@ -38,7 +41,7 @@ export interface MemberRouteDeps {
   /** The tool's `guest_target` sentence (`copy.guestTarget`). */
   guestTargetMessage: string;
   /** The tool's half of a removal (the `membershipRemoval` slot), run in the removal's transaction. */
-  onMembershipRemoval?: MembershipRemovalHook | undefined;
+  onMembershipRemoval?: BoundMembershipRemoval | undefined;
 }
 
 const err = (code: string, message: string) => ({ error: { code, message } });
@@ -425,6 +428,7 @@ export function registerMemberRoutes(api: OpenAPIHono, deps: MemberRouteDeps): v
       .where(eq(workspaceMembers.id, target.id))
       .limit(1);
 
+    deps.events?.emit('member.removed', { workspaceId: principal.workspaceId, userId: target.userId });
     c.set('audit', {
       action: 'member.remove',
       resourceType: 'member',

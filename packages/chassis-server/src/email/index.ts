@@ -24,3 +24,4 @@ export {
   buildPasswordResetEmail,
   buildVerifyEmailEmail
 } from './templates.js';
+export { buildWebhookDisabledEmail, type WebhookDisabledEmailParams } from '../webhooks/mail.js';

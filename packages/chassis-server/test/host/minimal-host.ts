@@ -31,5 +31,6 @@ export const host: ChassisTestHost<HostBootResult, HostBootOverrides> = {
   identity: THINGS_IDENTITY,
   hubClientId: 'tool-things-cloud',
   scopes: THINGS_SCOPES,
-  probeRoute: THINGS_ROUTE
+  probeRoute: THINGS_ROUTE,
+  webhooks: true
 };

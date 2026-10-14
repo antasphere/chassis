@@ -717,6 +717,130 @@ export const projectTeams = pgTable(
   ]
 );
 
+/**
+ * Outbound webhooks (PRDCT-3482): a URL a workspace registers to be told, by
+ * a signed POST, when something happens to the tool's own subjects. One row
+ * per endpoint, owned by its workspace (ON DELETE CASCADE: a deleted
+ * workspace takes its endpoints and, through them, their deliveries).
+ *
+ *  - `events` lists what the endpoint subscribes to: an event type
+ *    ('resource.created'), a family pattern ('resource.*') or everything
+ *    ('*'). The tool declares the types; the chassis only matches them.
+ *  - `filters` narrows the subscription by subject: a subject key mapped to
+ *    a list of ids. The keys are ANDed, the ids within one key ORed; an empty
+ *    object filters nothing.
+ *  - `secret` is the signing secret, SEALED (AES-GCM under a key derived from
+ *    the auth secret), never stored in plaintext. During a rotation the outgoing secret
+ *    stays in `previous_secret`, sealed the same way, until
+ *    `previous_secret_expires_at`, so a receiver can switch keys without a
+ *    gap.
+ *  - The failure streak (`consecutive_failures`, `first_failure_at`) drives
+ *    the auto-disable: an endpoint that keeps failing is switched off
+ *    (`enabled` false, `disabled_at` and `disabled_reason` set) rather than
+ *    retried forever.
+ *  - `last_delivery_at` / `last_delivery_status` are the endpoint's last
+ *    outcome, for the list; the history itself is `webhook_deliveries`.
+ */
+export const webhookEndpoints = pgTable(
+  'webhook_endpoints',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    url: text('url').notNull(),
+    description: text('description').notNull().default(''),
+    /** Event types or patterns: 'resource.created', 'resource.*', '*'. */
+    events: text('events').array().notNull(),
+    /** Subject key → ids; AND across keys, OR within one. */
+    filters: jsonb('filters').$type<Record<string, string[]>>().notNull().default({}),
+    enabled: boolean('enabled').notNull().default(true),
+    /** The signing secret, sealed; never plaintext. */
+    secret: text('secret').notNull(),
+    /** The sealed previous secret, kept during a rotation's overlap. */
+    previousSecret: text('previous_secret'),
+    previousSecretExpiresAt: timestamp('previous_secret_expires_at', { withTimezone: true }),
+    createdBy: text('created_by').references(() => user.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    // Set together by the auto-disable.
+    disabledAt: timestamp('disabled_at', { withTimezone: true }),
+    disabledReason: text('disabled_reason'),
+    consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+    /** When the current failure streak began; NULL while none runs. */
+    firstFailureAt: timestamp('first_failure_at', { withTimezone: true }),
+    lastDeliveryAt: timestamp('last_delivery_at', { withTimezone: true }),
+    lastDeliveryStatus: text('last_delivery_status', { enum: ['delivered', 'failed'] })
+  },
+  (t) => [
+    index('webhook_endpoints_workspace_idx').on(t.workspaceId),
+    // Serves the endpoints list's keyset pagination.
+    index('webhook_endpoints_workspace_created_id_idx').on(t.workspaceId, t.createdAt, t.id),
+    check(
+      'webhook_endpoints_last_status_check',
+      sql`${t.lastDeliveryStatus} IS NULL OR ${t.lastDeliveryStatus} IN ('delivered', 'failed')`
+    )
+  ]
+);
+
+/**
+ * The life of one delivery. A stray value must be impossible: text + CHECK,
+ * never a free string.
+ *
+ *  - `pending`: queued, or waiting for its next attempt (`next_attempt_at`).
+ *  - `delivered`: the receiver answered 2xx.
+ *  - `failed`: the attempt was refused for good (the endpoint disabled or gone).
+ *  - `held`: the retry budget ran out; the row waits on the held queue and
+ *    comes back through the delivery queue every hour until the receiver
+ *    takes it.
+ */
+export const webhookDeliveryStatuses = ['pending', 'delivered', 'failed', 'held'] as const;
+export type WebhookDeliveryStatus = (typeof webhookDeliveryStatuses)[number];
+
+/**
+ * One row per (endpoint, event): the delivery and its attempts, kept for the
+ * endpoint's history and for a redelivery. Both ends cascade: a deleted
+ * endpoint or workspace takes its rows. `workspace_id` is a copy of the
+ * endpoint's, kept on purpose so the lists and the nightly purge never join;
+ * an endpoint never changes workspace, so the copy cannot drift.
+ *
+ * `event_id` is the event's own id, the same on every attempt and on a
+ * redelivery: it is the receiver's dedupe key, never regenerated. `payload`
+ * is the envelope as sent, without the attempt number, which is the row's
+ * `attempt` and is stamped at each send. `last_status_code` and
+ * `last_error` describe the latest attempt only.
+ */
+export const webhookDeliveries = pgTable(
+  'webhook_deliveries',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    endpointId: uuid('endpoint_id')
+      .notNull()
+      .references(() => webhookEndpoints.id, { onDelete: 'cascade' }),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    eventId: uuid('event_id').notNull(),
+    eventType: text('event_type').notNull(),
+    payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+    status: text('status', { enum: webhookDeliveryStatuses }).notNull().default('pending'),
+    attempt: integer('attempt').notNull().default(0),
+    lastStatusCode: integer('last_status_code'),
+    lastError: text('last_error'),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }),
+    deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => [
+    // Serves an endpoint's deliveries list (keyset pagination).
+    index('webhook_deliveries_endpoint_created_id_idx').on(t.endpointId, t.createdAt, t.id),
+    // Serves the nightly purge (created_at range scan).
+    index('webhook_deliveries_created_idx').on(t.createdAt),
+    check('webhook_deliveries_status_check', sql`${t.status} IN ('pending', 'delivered', 'failed', 'held')`)
+  ]
+);
+
 export type InstanceSettings = typeof instanceSettings.$inferSelect;
 export type Workspace = typeof workspaces.$inferSelect;
 export type WorkspaceMember = typeof workspaceMembers.$inferSelect;
@@ -732,3 +856,5 @@ export type ProjectMemberRow = typeof projectMembers.$inferSelect;
 export type WorkspaceTeamRow = typeof workspaceTeams.$inferSelect;
 export type WorkspaceTeamMemberRow = typeof workspaceTeamMembers.$inferSelect;
 export type ProjectTeamRow = typeof projectTeams.$inferSelect;
+export type WebhookEndpointRow = typeof webhookEndpoints.$inferSelect;
+export type WebhookDeliveryRow = typeof webhookDeliveries.$inferSelect;

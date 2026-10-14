@@ -105,6 +105,10 @@
     "./testing": {
       "types": "./dist/testing/index.d.ts",
       "default": "./dist/testing/index.js"
+    },
+    "./webhooks": {
+      "types": "./dist/webhooks/index.d.ts",
+      "default": "./dist/webhooks/index.js"
     }
   },
   "scripts": {

@@ -10,6 +10,7 @@ import {
 import { defineChassisRoutes, fileUploadRoute } from '@antasphere/chassis-contract/routes';
 import type { BootOverrides, BootResult, ToolDefinition } from '@antasphere/chassis-server';
 import { createScopeAllowlist, requireAuth } from '@antasphere/chassis-server/middleware';
+import { z } from 'zod';
 import { THINGS_COPY, THINGS_IDENTITY, THINGS_ROUTES_COPY } from './identity.js';
 
 /**
@@ -36,7 +37,7 @@ export const THINGS_ROUTE = '/api/v1/things';
 const THINGS_EXPORT_ROUTE = '/api/v1/things/export';
 
 const contract = defineChassisContract({
-  scopes: [THINGS_SCOPES.read, THINGS_SCOPES.write, THINGS_SCOPES.dataExport]
+  scopes: [THINGS_SCOPES.read, THINGS_SCOPES.write, THINGS_SCOPES.dataExport, THINGS_SCOPES.webhooks]
 });
 
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type
@@ -62,9 +63,11 @@ export const minimalTool: ToolDefinition<NoEnv, NoDomain> = {
       'offline_access',
       THINGS_SCOPES.read,
       THINGS_SCOPES.write,
-      THINGS_SCOPES.dataExport
+      THINGS_SCOPES.dataExport,
+      THINGS_SCOPES.webhooks
     ],
-    cliKey: [THINGS_SCOPES.read, THINGS_SCOPES.write],
+    // The webhooks scope rides the CLI key like the read and write scopes (Romain's ruling of 13 October 2026).
+    cliKey: [THINGS_SCOPES.read, THINGS_SCOPES.write, THINGS_SCOPES.webhooks],
     requiredScopeFor: createScopeAllowlist<ThingsScope>({
       ...THINGS_SCOPES,
       rules: [
@@ -78,6 +81,31 @@ export const minimalTool: ToolDefinition<NoEnv, NoDomain> = {
     contractRoutes: defineChassisRoutes(contract, THINGS_IDENTITY, THINGS_ROUTES_COPY)
   },
   services: () => ({}),
+  // The webhooks catalog (PRDCT-3482): two events over two subjects, so the
+  // chassis suite can emit, match, filter and deliver a tool's event. The
+  // tool re-declares the chassis's `project` subject as a LIST under
+  // `projectIds` (a thing in several projects), as a real tool does, so the
+  // suite proves the chassis's own project events follow the tool's shape.
+  webhooks: {
+    subjects: {
+      thing: { field: 'thingId', description: 'A thing of the workspace, by id' },
+      project: { field: 'projectIds', description: 'The projects of a thing, by id', list: true }
+    },
+    events: [
+      {
+        type: 'thing.created',
+        description: 'A thing was created.',
+        subjects: ['thing', 'project'],
+        data: z.object({ thingId: z.string(), name: z.string() })
+      },
+      {
+        type: 'thing.deleted',
+        description: 'A thing was deleted.',
+        subjects: ['thing'],
+        data: z.object({ thingId: z.string() })
+      }
+    ]
+  },
   api: {
     // TEST FIXTURE ONLY: `undefined` is the whole-workspace view, for every member. The suite's
     // files tests never assert member-to-member privacy (that proof is the tool's, SL-B1), so
@@ -117,7 +145,7 @@ export const minimalTool: ToolDefinition<NoEnv, NoDomain> = {
     registerTools: () => {},
     instructions: (info) => `MCP endpoint of the "${info.instanceName}" instance.`,
     errorHints: {},
-    scopes: { read: THINGS_SCOPES.read, write: THINGS_SCOPES.write }
+    scopes: { read: THINGS_SCOPES.read, write: THINGS_SCOPES.write, webhooks: THINGS_SCOPES.webhooks }
   },
   copy: THINGS_COPY
 };

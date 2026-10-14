@@ -16,8 +16,13 @@ export interface ToolIdentity<TScope extends string = string> {
   displayName: string;
   /** API key prefix, without the underscore (`acm` mints `acm_<keyId>_<secret>`). Never change it once keys exist. */
   apiKeyPrefix: string;
-  /** The scope vocabulary, by the part each scope plays. `dataExport` is the opt-in full-workspace export. */
-  scopes: { read: TScope; write: TScope; dataExport: TScope };
+  /**
+   * The scope vocabulary, by the part each scope plays. `dataExport` is the
+   * opt-in full-workspace export; `webhooks` the opt-in management of the
+   * workspace's webhook endpoints (PRDCT-3482), absent on a tool that opens
+   * them to no machine.
+   */
+  scopes: { read: TScope; write: TScope; dataExport: TScope; webhooks?: TScope };
   /** How the OpenAPI document names the CLI key's grant (`things:read+write`). A literal: a contraction, not a join. */
   cliKeyScopesLabel: string;
   /**

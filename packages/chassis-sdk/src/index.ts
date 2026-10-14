@@ -57,6 +57,17 @@ import type {
   TeamMembersList,
   TeamsList,
   TeamUpdate,
+  WebhookCatalog,
+  WebhookDeliveriesList,
+  WebhookDelivery,
+  WebhookDeliveryStatus,
+  WebhookEndpoint,
+  WebhookEndpointCreate,
+  WebhookEndpointCreated,
+  WebhookEndpointUpdate,
+  WebhooksList,
+  WebhookSecretRotated,
+  WebhookTestResult,
   WorkspaceCreated,
   WorkspaceLook,
   WorkspaceRole,
@@ -628,6 +639,82 @@ export class ChassisClient<TScope extends string> {
   /** Unseats a member; the workspace membership stays. */
   removeTeamMember(id: string, userId: string): Promise<TeamMemberInfo> {
     return this.request('DELETE', `/teams/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`);
+  }
+
+  // ── Webhooks ──────────────────────────────────────────────────────────────
+  // URLs the workspace registers to be told, by a signed POST, when one of the
+  // tool's events happens. Owners and admins manage them (a guest gets 403
+  // `guest_forbidden`, a member 403 `forbidden`); every non-guest member reads
+  // the catalog. A machine credential needs the tool's webhooks scope (the
+  // catalog: its read scope). The signing secret is in two answers only, the
+  // create and the rotation, and never again.
+
+  /** The workspace's endpoints, newest first. */
+  webhooks(params: ListParams = {}): Promise<WebhooksList> {
+    return this.request('GET', this.pathWithQuery('/webhooks', params));
+  }
+
+  /** The event catalog: every event type, its subjects and the JSON Schema of its data. */
+  webhookEvents(): Promise<WebhookCatalog> {
+    return this.request('GET', '/webhooks/events');
+  }
+
+  /** Owner or admin. The answer carries the signing secret (`whsec_…`), shown once. */
+  createWebhook(
+    req: WebhookEndpointCreate,
+    opts: IdempotentRequestOptions = {}
+  ): Promise<WebhookEndpointCreated> {
+    return this.request('POST', '/webhooks', req, idempotencyHeader(opts));
+  }
+
+  webhook(id: string): Promise<WebhookEndpoint> {
+    return this.request('GET', `/webhooks/${encodeURIComponent(id)}`);
+  }
+
+  /** Only the fields named change; at least one is required. */
+  updateWebhook(id: string, req: WebhookEndpointUpdate): Promise<WebhookEndpoint> {
+    return this.request('PATCH', `/webhooks/${encodeURIComponent(id)}`, req);
+  }
+
+  /** Deletes the endpoint and its delivery history; answers its final snapshot. */
+  deleteWebhook(id: string): Promise<WebhookEndpoint> {
+    return this.request('DELETE', `/webhooks/${encodeURIComponent(id)}`);
+  }
+
+  /** A new signing secret, shown once; the previous one signs until `previousSecretExpiresAt`. */
+  rotateWebhookSecret(id: string): Promise<WebhookSecretRotated> {
+    return this.request('POST', `/webhooks/${encodeURIComponent(id)}/rotate-secret`);
+  }
+
+  /** Sends a signed `webhook.ping` now; the outcome is on the answered delivery. */
+  testWebhook(id: string): Promise<WebhookTestResult> {
+    return this.request('POST', `/webhooks/${encodeURIComponent(id)}/test`);
+  }
+
+  /** An endpoint's deliveries, newest first, optionally by status. */
+  webhookDeliveries(
+    id: string,
+    params: ListParams & { status?: WebhookDeliveryStatus } = {}
+  ): Promise<WebhookDeliveriesList> {
+    return this.request(
+      'GET',
+      this.pathWithQuery(`/webhooks/${encodeURIComponent(id)}/deliveries`, params, { status: params.status })
+    );
+  }
+
+  webhookDelivery(id: string, deliveryId: string): Promise<WebhookDelivery> {
+    return this.request(
+      'GET',
+      `/webhooks/${encodeURIComponent(id)}/deliveries/${encodeURIComponent(deliveryId)}`
+    );
+  }
+
+  /** Queues the same event again (same `eventId`, same payload) as a new delivery. */
+  redeliverWebhook(id: string, deliveryId: string): Promise<WebhookDelivery> {
+    return this.request(
+      'POST',
+      `/webhooks/${encodeURIComponent(id)}/deliveries/${encodeURIComponent(deliveryId)}/redeliver`
+    );
   }
 
   // ── Demo passes ───────────────────────────────────────────────────────────

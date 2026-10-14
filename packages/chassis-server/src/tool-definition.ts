@@ -29,6 +29,13 @@ import type { McpToolDefinition } from './mcp/server.js';
 import type { BucketDeclaration, ClientIpFn, RateLimiters } from './middleware/rate-limit.js';
 import type { Otel } from './observability/otel.js';
 import type { EventBus } from './platform/events.js';
+import type {
+  WebhookCatalogDeclaration,
+  WebhookDials,
+  WebhookEmitter,
+  WebhookService
+} from './webhooks/index.js';
+import type { SafeFetchOptions } from './webhooks/safe-fetch.js';
 import type { PlatformRegistry } from './platform/registry.js';
 import type { RuntimeState } from './state.js';
 import type { StorageDriver } from './storage/driver.js';
@@ -66,6 +73,13 @@ export interface ServiceCore<TEnvShape extends z.ZodRawShape, TEvents, TToolOver
   authSecret: string;
   /** One-off timers on the queues the `jobs` slot declared (`jobs/timers.ts`): a service arms and withdraws them. */
   timers: Timers;
+  /**
+   * The outbound webhooks' emitter (PRDCT-3482): a service calls
+   * `webhooks.emit(tx, …)` INSIDE the transaction of the write it reports,
+   * with a type the tool's `webhooks` slot declared. Costs one lookup when
+   * no endpoint of the workspace listens.
+   */
+  webhooks: WebhookEmitter;
   /** The tool's own test seams (`BootOverrides.tool`); undefined in production. */
   overrides: TToolOverrides | undefined;
 }
@@ -328,6 +342,15 @@ export interface ToolDefinition<
    * Absent = nothing declared: no route gated, empty lists in discovery.
    */
   entitlements?: (env: ToolEnv<TEnvShape>, ctx: EntitlementsContext<TDomain>) => ToolEntitlementDeclaration;
+  /**
+   * Slot 25: the tool's event catalog for outbound webhooks (PRDCT-3482):
+   * the subjects an endpoint may filter on (each with the envelope field it
+   * is written under) and the event types the tool emits, each with the zod
+   * schema of its `data`. Checked at boot (`buildWebhookCatalog`), merged
+   * with the chassis's own events, served on `GET /webhooks/events`. Absent
+   * = the chassis events alone; the routes exist on every instance.
+   */
+  webhooks?: WebhookCatalogDeclaration;
 }
 
 /**
@@ -393,6 +416,10 @@ export interface BootOverrides<TToolOverrides = never> {
   hubCreateOrg?: HubOrgCreator;
   /** The tool's own test seams, handed to its `services` slot as `core.overrides`. */
   tool?: TToolOverrides;
+  /** Shrinks the webhooks' retry budget, hold, auto-disable streak, listener cache and overlap for the tests. */
+  webhookDials?: Partial<WebhookDials> | undefined;
+  /** The guarded fetch's seams (a lookup, a transport) so a suite delivers to a loopback receiver. */
+  webhookFetch?: SafeFetchOptions | undefined;
 }
 
 export interface BootResult<
@@ -414,6 +441,8 @@ export interface BootResult<
   email: EmailDriver;
   otel: Otel;
   authSecret: string;
+  /** The outbound webhooks (PRDCT-3482): the emitter, the fan-out and the delivery, for a suite to drive directly. */
+  webhooks: WebhookService;
 }
 
 /**

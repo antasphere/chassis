@@ -62,4 +62,16 @@ export function createPlatform<
 ): Platform<TEnvShape, TDomain, TEvents, TToolOverrides> {
   return { boot: (source, overrides) => bootPlatform(tool, source, overrides) };
 }
-export type { MembershipRemovalHook, RemovedMembership, RemovalCounts } from './members/removal.js';
+export type {
+  MembershipRemovalContext,
+  MembershipRemovalHook,
+  RemovedMembership,
+  RemovalCounts
+} from './members/removal.js';
+export type {
+  WebhookCatalogDeclaration,
+  WebhookEmitter,
+  WebhookEventDeclaration,
+  WebhookSubjectDeclaration,
+  WebhookSubjectValue
+} from './webhooks/index.js';

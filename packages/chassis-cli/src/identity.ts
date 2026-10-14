@@ -31,6 +31,11 @@ export interface CliIdentity {
   /** The scope a key needs for the full-workspace export, as `export --help` names it. */
   exportScope: string;
   /**
+   * The scope a key needs to manage webhooks (`identity.scopes.webhooks`), as
+   * the `webhooks` refusals name it; absent, the tool opens webhooks to no key.
+   */
+  webhooksScope?: string | undefined;
+  /**
    * The tool's cloud home (`identity.cloud.url`): the last step of the URL
    * resolution and the instance of the implicit `cloud` profile, so a clean
    * machine with an `antasphere login` needs no flag (PRDCT-2947).
@@ -52,6 +57,7 @@ export function cliIdentity(identity: ToolIdentity): CliIdentity {
     envPrefix: identity.cli.envPrefix,
     keyPrefix: identity.apiKeyPrefix,
     exportScope: identity.scopes.dataExport,
+    webhooksScope: identity.scopes.webhooks,
     cloudUrl: identity.cloud.url
   };
 }

@@ -69,7 +69,53 @@ export const ORPHAN_USER_PURGE_QUEUE = 'orphan-user-purge';
 export interface JobDeclaration<TData extends object = object> {
   queue: string;
   schedule?: { cron: string; enabled?: boolean };
+  /**
+   * The queue's own settings (PRDCT-3482), applied at install on every
+   * worker boot: the retry budget of the jobs sent to it and its dead
+   * letter, the queue a job goes to when the budget runs out. The dead
+   * letter is named ON THE QUEUE, never on a send (pg-boss stamps it on
+   * each job row at insert, and an api-role replica sends with no DDL), so
+   * it must be declared BEFORE the queue that names it.
+   */
+  options?: QueueOptions;
+  /**
+   * How many pollers this replica runs on the queue (default 1). pg-boss's
+   * worker is a serial loop, one job at a time; a queue whose handler waits
+   * on the outside (a webhook delivery, up to its timeout) declares more, so
+   * one silent receiver never holds every other job of the instance behind
+   * it (verifier round 1, MJ1). Each poller fetches with SKIP LOCKED, so the
+   * pollers never share a job.
+   */
+  concurrency?: number;
+  /**
+   * How often each poller asks for work, in seconds (pg-boss's default is
+   * two). pg-boss's worker sleeps this long after EVERY loop, jobs found or
+   * not, so a queue that must drain a burst declares a short one (verifier
+   * round 2, MJ-R2-1).
+   */
+  pollingIntervalSeconds?: number;
   handler(data: TData | null, job: TimerJob): Promise<void>;
+}
+
+/** A queue's settings, as a declaration names them. */
+export interface QueueOptions {
+  retryLimit?: number;
+  retryDelaySeconds?: number;
+  retryBackoff?: boolean;
+  /** The queue a job moves to when its retries run out; declared earlier in the list. */
+  deadLetter?: string;
+  expireInSeconds?: number;
+}
+
+function pgBossQueueOptions(name: string, options: QueueOptions): PgBoss.Queue {
+  return {
+    name,
+    ...(options.retryLimit !== undefined ? { retryLimit: options.retryLimit } : {}),
+    ...(options.retryDelaySeconds !== undefined ? { retryDelay: options.retryDelaySeconds } : {}),
+    ...(options.retryBackoff !== undefined ? { retryBackoff: options.retryBackoff } : {}),
+    ...(options.deadLetter !== undefined ? { deadLetter: options.deadLetter } : {}),
+    ...(options.expireInSeconds !== undefined ? { expireInSeconds: options.expireInSeconds } : {})
+  };
 }
 
 /**
@@ -219,6 +265,10 @@ export async function createJobs(
       // The tool's queues: same install section, same lock, declaration order.
       for (const job of toolJobs) {
         await boss.createQueue(job.queue);
+        // The settings are applied on every boot (`createQueue` leaves an
+        // existing queue as it is), so a changed budget reaches an installed
+        // instance at its next worker boot.
+        if (job.options) await boss.updateQueue(job.queue, pgBossQueueOptions(job.queue, job.options));
         if (!job.schedule) continue;
         if (job.schedule.enabled !== false) {
           await boss.schedule(job.queue, job.schedule.cron);
@@ -372,15 +422,27 @@ export async function createJobs(
     // default batch), its payload and its key handed to the handler: a timer
     // (`./timers.ts`) rides the same poller as a cron.
     for (const job of toolJobs) {
-      await boss.work<object>(job.queue, { includeMetadata: true }, async (jobs) => {
-        for (const fetched of jobs) {
-          await job.handler(fetched.data ?? null, {
-            id: fetched.id,
-            queue: job.queue,
-            key: fetched.singletonKey ?? null
-          });
-        }
-      });
+      const pollers = Math.max(1, Math.floor(job.concurrency ?? 1));
+      for (let i = 0; i < pollers; i++) {
+        await boss.work<object>(
+          job.queue,
+          {
+            includeMetadata: true,
+            ...(job.pollingIntervalSeconds !== undefined
+              ? { pollingIntervalSeconds: job.pollingIntervalSeconds }
+              : {})
+          },
+          async (jobs) => {
+            for (const fetched of jobs) {
+              await job.handler(fetched.data ?? null, {
+                id: fetched.id,
+                queue: job.queue,
+                key: fetched.singletonKey ?? null
+              });
+            }
+          }
+        );
+      }
     }
 
     // Orphaned-user GC: setup-race losers, fail-closed SSO login strands

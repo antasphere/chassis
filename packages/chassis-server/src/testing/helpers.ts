@@ -93,6 +93,14 @@ export interface ChassisTestHost<TResult extends BootResultLike, TOverrides> {
    * scope) that answers 200 to any principal the gates let through.
    */
   probeRoute: string;
+  /**
+   * The host's tool is the chassis's minimal test tool, which declares the
+   * `thing` subject and the `thing.created` / `thing.deleted` events the
+   * webhooks suite emits (PRDCT-3482). A real tool leaves it unset: the
+   * suite's delivery scenarios skip under its host, and the tool proves its
+   * own events in its own suite.
+   */
+  webhooks?: boolean;
 }
 
 /** Postgres `admin_shutdown`: what a backend answers a still-connected client when the server stops. */

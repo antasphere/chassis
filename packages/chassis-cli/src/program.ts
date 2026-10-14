@@ -8,6 +8,7 @@ import { registerAuthCommands } from './commands/auth.js';
 import { registerWorkspaceCommands } from './commands/workspaces.js';
 import { registerProjectCommands } from './commands/projects.js';
 import { registerTeamCommands } from './commands/teams.js';
+import { registerWebhookCommands } from './commands/webhooks.js';
 import { registerDemoCommands } from './commands/demo.js';
 import { registerFileCommands } from './commands/files.js';
 import { registerCompletionCommand } from './commands/completion.js';
@@ -66,6 +67,8 @@ export function createProgram<TClient extends ChassisClient<string>>(
     registerProjectCommands(kit, program, io);
     // The named groups of the workspace's people: teams *.
     registerTeamCommands(kit, program, io);
+    // The signed POSTs the workspace's events send to its URLs: webhooks *.
+    registerWebhookCommands(kit, program, io);
     // Demo links, as a signed-in owner (never a key): demo link, list, revoke.
     registerDemoCommands(kit, program, io);
     // The tool's own groups, where they have always sat in `--help`.

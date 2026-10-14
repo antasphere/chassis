@@ -55,6 +55,7 @@ export { isInteractive, openInBrowser, platformOpener } from './open.js';
 
 export { safeDownloadName } from './commands/files.js';
 export { explainProjectRefusal, roleNamedBy, memberRef, type ProjectLookup } from './commands/projects.js';
+export { explainWebhookRefusal, type WebhookLookup } from './commands/webhooks.js';
 export { CliApiRefusal, drainPages } from './context.js';
 export type { Cli, CliDefinition, CliKit, RegisterTool } from './kit.js';
 
