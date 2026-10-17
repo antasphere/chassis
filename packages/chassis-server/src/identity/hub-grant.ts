@@ -492,6 +492,12 @@ export class HubGrantService {
       if (mode === 'demand') {
         const stored = await this.storedAccess(userId, first);
         if (stored) return { kind: 'ok', accessToken: stored };
+      } else if (mode === 'renew') {
+        // A sibling replica (or a login) already renewed: adopt its token
+        // without taking the lock (verifier round 6: the common case on
+        // several replicas was paying a dedicated connection for nothing).
+        const stored = await this.storedAccess(userId, first, minLeftMs);
+        if (stored) return { kind: 'ok', accessToken: stored };
       }
 
       // Slow path: rotate under the cross-replica lock.
