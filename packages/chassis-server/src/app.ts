@@ -2,13 +2,18 @@ import { Hono } from 'hono';
 import type { MiddlewareHandler } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import type { OpenAPIHono } from '@hono/zod-openapi';
-import { serveStatic } from '@hono/node-server/serve-static';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Logger } from './logger.js';
 import type { RuntimeState } from './util/index.js';
 import { requestId } from './middleware/index.js';
-import { buildCsp, inlineScriptHashes, securityHeaders } from './middleware/index.js';
+import {
+  REVALIDATE_CACHE_CONTROL,
+  buildCsp,
+  inlineScriptHashes,
+  securityHeaders,
+  staticAssets
+} from './middleware/index.js';
 import { healthRoutes } from './routes/index.js';
 
 export interface AppDeps {
@@ -214,9 +219,15 @@ export async function createApp({
   // static assets and the SPA fallback, after every credentialed surface.
   if (publicRoutes) app.route('/', publicRoutes);
 
-  app.use('*', serveStatic({ root: publicDir }));
+  // The dashboard build: hashed assets cached for a year, everything else
+  // revalidated, precompressed siblings served when accepted (PRDCT-3584).
+  app.use('*', staticAssets({ publicDir }));
 
   app.get('*', (c) => {
+    // The SPA fallback is the application's HTML under any route: kept by
+    // the browser but revalidated on every use, so a release is seen on the
+    // next load.
+    c.header('Cache-Control', REVALIDATE_CACHE_CONTROL);
     if (indexHtml) return c.html(indexHtml);
     return c.html(
       `<!doctype html><title>${displayName}</title><h1>${displayName} API is running</h1>` +

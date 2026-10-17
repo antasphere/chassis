@@ -31,3 +31,11 @@ export { MAX_JSON_DEPTH, exceedsJsonDepth, jsonDepthLimit } from './json-depth.j
 export { noStoreAuthenticated } from './no-store.js';
 export { isPublicOauthPath, oauthPublicEndpoints } from './oauth-public.js';
 export { buildCsp, hstsValue, inlineScriptHashes, securityHeaders } from './security-headers.js';
+export {
+  IMMUTABLE_ASSET_PREFIX,
+  IMMUTABLE_CACHE_CONTROL,
+  REVALIDATE_CACHE_CONTROL,
+  type StaticAssetsOptions,
+  staticAssets,
+  staticCacheControl
+} from './static-assets.js';
