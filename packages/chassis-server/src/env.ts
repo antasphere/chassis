@@ -222,6 +222,8 @@ const chassisEnvShape = (version: string) => ({
   HSTS_MAX_AGE: numeric(z.coerce.number().int().min(0).default(15552000)),
   /** Instance-level cap read by the default AllowAllEntitlements. */
   MAX_FILE_SIZE_MB: numeric(z.coerce.number().int().min(1).default(100)),
+  /** A JSON file listing the other tools of the organization for the Apps page (PRDCT-3493): `[{ "slug": "finance", "name": "Antasphere Finance", "launchUrl": "https://finance.example.com", "description": "optional sentence", "icon": "landmark", "drawing": "ledger", "accent": "#B5542A" }]`, the last four the hub's descriptor keys (icon and drawing from the contract's closed lists; an invalid descriptor is dropped, the entry kept). Read on a self-hosted instance (`EDITION=oss`), and on the cloud edition when the hub cannot be asked (the cloud edition otherwise asks the hub as the person, `GET /me/apps`). Every `launchUrl` must be http(s); an entry that is not is left out, with a warning in the log. Absent: the Apps page lists no other tool. */
+  APPS_FILE: optionalString(z.string().min(1).max(1000)),
   /** How many workspaces ONE person may own on this instance — the cap on creating another workspace from the dashboard (the first one comes from setup). Any signed-in member who is not a guest may create one until they own this many. 0 closes workspace creation for everyone. On the cloud edition the count is Antasphere's own organization limit; only the 0 switch applies here. */
   MAX_WORKSPACES_PER_USER: numeric(z.coerce.number().int().min(0).max(1000).default(10)),
   /** General per-principal API quota: sustained requests/minute allowed to every authenticated /api/v1 principal (API key, OAuth token, session). 0 disables the general limiter. */

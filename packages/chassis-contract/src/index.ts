@@ -33,6 +33,8 @@ export * from './schemas/projects.js';
 export * from './schemas/teams.js';
 export * from './schemas/webhooks.js';
 export * from './schemas/demo-passes.js';
+export * from './schemas/apps.js';
+export * from './tools.js';
 export * from './seams.js';
 export * from './entitlements.js';
 export * from './define.js';

@@ -109,6 +109,10 @@
     "./webhooks": {
       "types": "./dist/webhooks/index.d.ts",
       "default": "./dist/webhooks/index.js"
+    },
+    "./apps": {
+      "types": "./dist/apps/index.d.ts",
+      "default": "./dist/apps/index.js"
     }
   },
   "scripts": {
