@@ -503,3 +503,100 @@ describe('ambiguous outcomes: the presentation record + the RFC 7662 probe (PRDC
     expect((await makeService(FAST).accessToken(aliceId)).kind).toBe('ok');
   });
 });
+
+/** Bring the stored access token to the renewal window (two minutes left) — the row is what a renewal judges. */
+async function nearExpiryStoredAccess(): Promise<void> {
+  await app.db.pool.query(
+    `UPDATE account SET access_token_expires_at = now() + interval '2 minutes'
+     WHERE provider_id = 'antasphere' AND user_id = $1`,
+    [aliceId]
+  );
+}
+
+describe('the background renewal (PRDCT-3584, verifier round 5)', () => {
+  it('keeps serving the cached token while the hub answers the rotation', async () => {
+    const service = makeService();
+    await sso.ssoLogin(app, hub, alice);
+    const row = await grantRow();
+    const current = await symmetricDecrypt({ key: AUTH_SECRET, data: row.access_token! });
+    // the token is about to expire: inside the renewal window, outside the on-demand skew
+    service.prime(aliceId, current, new Date(Date.now() + 2 * 60_000));
+    await nearExpiryStoredAccess();
+    hub.tokenDelayMs = 1_200;
+    try {
+      const before = hub.refreshCount();
+      const renewal = service.renew(aliceId);
+      const t0 = Date.now();
+      const during = await service.accessToken(aliceId);
+      const waited = Date.now() - t0;
+      expect(during).toEqual({ kind: 'ok', accessToken: current });
+      expect(waited).toBeLessThan(300);
+      const out = await renewal;
+      expect(out.kind).toBe('ok');
+      expect(hub.refreshCount()).toBe(before + 1);
+      // the renewed token is what the next demand serves, without a hub call
+      const after = await service.accessToken(aliceId);
+      expect(after.kind).toBe('ok');
+      expect((after as { accessToken: string }).accessToken).not.toBe(current);
+      expect(hub.refreshCount()).toBe(before + 1);
+    } finally {
+      hub.tokenDelayMs = 0;
+    }
+  });
+
+  it('a transient answer leaves the cached token in place', async () => {
+    const service = makeService();
+    await sso.ssoLogin(app, hub, alice);
+    const row = await grantRow();
+    const current = await symmetricDecrypt({ key: AUTH_SECRET, data: row.access_token! });
+    service.prime(aliceId, current, new Date(Date.now() + 2 * 60_000));
+    await nearExpiryStoredAccess();
+    hub.tokenMode = 'http500';
+    try {
+      expect(await service.renew(aliceId)).toEqual({ kind: 'inconclusive' });
+    } finally {
+      hub.tokenMode = 'ok';
+    }
+    const before = hub.refreshCount();
+    expect(await service.accessToken(aliceId)).toEqual({ kind: 'ok', accessToken: current });
+    expect(hub.refreshCount()).toBe(before);
+  });
+
+  it('a sibling replica adopts the fresh token the first one stored instead of rotating again', async () => {
+    const a = makeService();
+    const b = makeService();
+    await sso.ssoLogin(app, hub, alice);
+    const row = await grantRow();
+    const current = await symmetricDecrypt({ key: AUTH_SECRET, data: row.access_token! });
+    a.prime(aliceId, current, new Date(Date.now() + 2 * 60_000));
+    b.prime(aliceId, current, new Date(Date.now() + 2 * 60_000));
+    await nearExpiryStoredAccess();
+    const before = hub.refreshCount();
+    expect((await a.renew(aliceId)).kind).toBe('ok');
+    expect(hub.refreshCount()).toBe(before + 1);
+    const adopted = await b.renew(aliceId);
+    expect(adopted.kind).toBe('ok');
+    expect(hub.refreshCount()).toBe(before + 1); // no second rotation
+    const fresh = await grantRow();
+    expect((adopted as { accessToken: string }).accessToken).toBe(
+      await symmetricDecrypt({ key: AUTH_SECRET, data: fresh.access_token! })
+    );
+  });
+
+  it('a refused renewal marks the grant dead like a refused refresh', async () => {
+    const service = makeService();
+    await sso.ssoLogin(app, hub, alice);
+    const row = await grantRow();
+    const current = await symmetricDecrypt({ key: AUTH_SECRET, data: row.access_token! });
+    service.prime(aliceId, current, new Date(Date.now() + 2 * 60_000));
+    await nearExpiryStoredAccess();
+    hub.tokenMode = 'invalid_grant';
+    try {
+      expect(await service.renew(aliceId)).toEqual({ kind: 'grant_dead' });
+    } finally {
+      hub.tokenMode = 'ok';
+    }
+    expect(await service.accessToken(aliceId)).toEqual({ kind: 'grant_dead' });
+    await sso.ssoLogin(app, hub, alice); // heal for any later suite
+  });
+});
