@@ -592,6 +592,11 @@ export async function bootPlatform<
         }
       })
     : undefined;
+  // The grants of the people this replica saw in the last hour are renewed
+  // in the background before they expire (PRDCT-3584), so a request never
+  // waits on the hub's token endpoint when the sweep got there first. The
+  // timer never holds the process open and pauses while draining.
+  hubGrant?.startSweep({ isDraining: () => state.draining });
   // RP-initiated logout against the hub (SL-2, cloud only): builds the
   // end-session URL /sso/logout returns. Same key seam as the grant store
   // (it only decrypts if a future Better Auth starts encrypting id_tokens);

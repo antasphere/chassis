@@ -23,9 +23,13 @@ export {
 } from './demo-pass-rules.js';
 export {
   DEFAULT_GRANT_DIALS,
+  DEFAULT_GRANT_SWEEP_DIALS,
   type GrantAccess,
+  type GrantSweepDials,
   HubGrantService,
-  LOCK_WATCHDOG_HEADROOM_MS
+  LOCK_WATCHDOG_HEADROOM_MS,
+  type RefusalReason,
+  refusalDescription
 } from './hub-grant.js';
 export { HubJwtVerifier } from './hub-jwt.js';
 export { HubLogoutService, hintCookieClearHeader } from './hub-logout.js';

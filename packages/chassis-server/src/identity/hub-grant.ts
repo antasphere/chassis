@@ -104,6 +104,37 @@ export const DEFAULT_GRANT_DIALS: HubGrantDials = {
 };
 
 /**
+ * The background renewal of grants about to expire (PRDCT-3584). Hub access
+ * tokens live 15 minutes, so a person who comes back to a tool after a
+ * coffee met the token endpoint INSIDE their first request: the refresh
+ * (the hub's rotation and the row write) stood between the click and the
+ * page. The sweep renews, off any request, the token of every person seen
+ * on this replica within `activeWithinMs` whose cached token expires within
+ * `renewAheadMs`; a person not seen for an hour is forgotten and renews on
+ * demand as before. It goes through `refresh()` and nothing else: the
+ * single-flight, the advisory lock, the re-read and the presentation
+ * ledger stay the only writers of the refresh chain. The timer never holds
+ * the process open and skips while the replica drains.
+ */
+export interface GrantSweepDials {
+  /** How often the sweep runs. */
+  intervalMs: number;
+  /** Renew a cached token this long before it expires. */
+  renewAheadMs: number;
+  /** Only people seen on this replica within this window are renewed. */
+  activeWithinMs: number;
+}
+
+export const DEFAULT_GRANT_SWEEP_DIALS: GrantSweepDials = {
+  intervalMs: 60_000,
+  renewAheadMs: 3 * 60_000,
+  activeWithinMs: 60 * 60_000
+};
+
+/** Bound the seen-map — a user-id flood must never balloon memory. */
+const MAX_SEEN_USERS = 10_000;
+
+/**
  * One answer about a user's hub access.
  *  - 'ok': a hub-callable access token.
  *  - 'no_link': the user holds no hub identity at all (a purely local user)
@@ -175,11 +206,29 @@ export function isLikelyEncrypted(token: string): boolean {
   return token.length % 2 === 0 && /^[0-9a-f]+$/i.test(token);
 }
 
+/**
+ * What the hub said when it refused: the RFC 6749 `error_description` and
+ * the HTTP status, kept for the log line and nothing else (PRDCT-3584). A
+ * refusal read as `invalid_grant` has four different causes at the pinned
+ * plugin (an unknown token, an expired one, a rotated-out one, a refresh
+ * the pre-flight refused), and only this sentence tells them apart.
+ */
+export interface RefusalReason {
+  status: number;
+  description: string | null;
+}
+
 type RefreshOutcome =
   | { kind: 'ok'; accessToken: string; expiresAt: Date; refreshToken: string | null }
-  | { kind: 'invalid_grant' }
-  | { kind: 'invalid_client' }
+  | ({ kind: 'invalid_grant' } & RefusalReason)
+  | ({ kind: 'invalid_client' } & RefusalReason)
   | { kind: 'transient' };
+
+/** The `error_description` of an RFC 6749 error payload, when it is a non-empty string. */
+export function refusalDescription(payload: unknown): string | null {
+  const d = (payload as { error_description?: unknown } | null)?.error_description;
+  return typeof d === 'string' && d.trim() ? d.trim().slice(0, 300) : null;
+}
 
 /** The RFC 7662 probe's answer about a refresh token the hub never confirmed consuming. */
 type ProbeOutcome = 'active' | 'inactive' | 'transient';
@@ -188,6 +237,8 @@ export class HubGrantService {
   /** userId → fresh access token (in-memory only; the row is the durable store). */
   private readonly cache = new Map<string, { token: string; expiresAtMs: number }>();
   private readonly inFlight = new Map<string, Promise<GrantAccess>>();
+  /** userId → when this replica last read a token for them (the sweep's population). */
+  private readonly lastSeen = new Map<string, number>();
   private readonly tokenUrl: string;
   private readonly introspectUrl: string;
   private readonly fetchImpl: typeof fetch;
@@ -302,6 +353,7 @@ export class HubGrantService {
 
   /** A hub-callable access token for the user, refresh-on-demand. */
   async accessToken(userId: string): Promise<GrantAccess> {
+    this.markSeen(userId);
     const cached = this.cache.get(userId);
     if (cached && cached.expiresAtMs - this.now() > this.dials.accessSkewMs) {
       return { kind: 'ok', accessToken: cached.token };
@@ -319,6 +371,71 @@ export class HubGrantService {
     const existing = this.inFlight.get(userId);
     if (existing) await existing.catch(() => {});
     return this.acquire(userId, true);
+  }
+
+  private markSeen(userId: string): void {
+    if (!this.lastSeen.has(userId) && this.lastSeen.size >= MAX_SEEN_USERS) {
+      // Drop the oldest entry (Map keeps insertion order); a re-seen user is
+      // re-inserted at the end below.
+      const oldest = this.lastSeen.keys().next().value;
+      if (oldest !== undefined) this.lastSeen.delete(oldest);
+    }
+    this.lastSeen.delete(userId);
+    this.lastSeen.set(userId, this.now());
+  }
+
+  /**
+   * One pass of the background renewal (GrantSweepDials): renew the cached
+   * token of every recently seen person whose token expires within the
+   * window, one at a time, through `refresh()`. Answers how many renewals
+   * were attempted. Never throws: a failed renewal is the next request's
+   * on-demand refresh, exactly as before the sweep existed.
+   */
+  async sweepExpiring(
+    dials: Omit<GrantSweepDials, 'intervalMs'> = DEFAULT_GRANT_SWEEP_DIALS
+  ): Promise<number> {
+    const now = this.now();
+    let attempted = 0;
+    for (const [userId, seenAt] of [...this.lastSeen]) {
+      if (now - seenAt > dials.activeWithinMs) {
+        this.lastSeen.delete(userId);
+        continue;
+      }
+      const cached = this.cache.get(userId);
+      if (!cached || cached.expiresAtMs - now > dials.renewAheadMs) continue;
+      if (this.inFlight.has(userId)) continue;
+      attempted += 1;
+      try {
+        const out = await this.refresh(userId);
+        if (out.kind !== 'ok') {
+          this.opts.logger.info({ userId, outcome: out.kind }, 'hub grant: background renewal did not renew');
+        }
+      } catch (err) {
+        this.opts.logger.warn(
+          { err, userId },
+          'hub grant: background renewal failed — the next request refreshes on demand'
+        );
+      }
+    }
+    return attempted;
+  }
+
+  /**
+   * Run the sweep on a timer that never holds the process open and skips
+   * while the replica drains. Returns the function that stops it.
+   */
+  startSweep(options: { isDraining?: () => boolean; dials?: Partial<GrantSweepDials> } = {}): () => void {
+    const dials = { ...DEFAULT_GRANT_SWEEP_DIALS, ...options.dials };
+    let running = false;
+    const timer = setInterval(() => {
+      if (running || options.isDraining?.()) return;
+      running = true;
+      void this.sweepExpiring(dials).finally(() => {
+        running = false;
+      });
+    }, dials.intervalMs);
+    timer.unref();
+    return () => clearInterval(timer);
   }
 
   private acquire(userId: string, force: boolean): Promise<GrantAccess> {
@@ -416,7 +533,7 @@ export class HubGrantService {
           this.cache.delete(userId);
           this.refreshes.inc({ outcome: 'invalid_grant' });
           this.opts.logger.warn(
-            { userId },
+            { userId, status: outcome.status, reason: outcome.description },
             'hub grant: token endpoint answered invalid_grant — grant marked dead; a browser SSO login heals it'
           );
           return { kind: 'grant_dead' };
@@ -429,6 +546,7 @@ export class HubGrantService {
           await this.clearPresentation(row.id);
           this.refreshes.inc({ outcome: 'invalid_client' });
           this.opts.logger.error(
+            { status: outcome.status, reason: outcome.description },
             'hub grant: token endpoint answered invalid_client — HUB_CLIENT_ID/HUB_CLIENT_SECRET are broken; ' +
               'refreshes are failing transient (grants are NOT being killed); fix the client credentials'
           );
@@ -657,9 +775,13 @@ export class HubGrantService {
     // RFC 6749 errors ride 400/401; anything else (5xx…) is transient.
     if (res.status === 400 || res.status === 401) {
       const error = (payload as { error?: unknown } | null)?.error;
-      if (error === 'invalid_grant') return { kind: 'invalid_grant' };
-      if (error === 'invalid_client') return { kind: 'invalid_client' };
-      this.opts.logger.warn({ status: res.status, error }, 'hub grant: unrecognized token-endpoint error');
+      const description = refusalDescription(payload);
+      if (error === 'invalid_grant') return { kind: 'invalid_grant', status: res.status, description };
+      if (error === 'invalid_client') return { kind: 'invalid_client', status: res.status, description };
+      this.opts.logger.warn(
+        { status: res.status, error, description },
+        'hub grant: unrecognized token-endpoint error'
+      );
       return { kind: 'transient' };
     }
     this.opts.logger.warn({ status: res.status }, 'hub grant: token endpoint answered non-2xx');
