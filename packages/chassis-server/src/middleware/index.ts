@@ -35,7 +35,10 @@ export {
   IMMUTABLE_ASSET_PREFIX,
   IMMUTABLE_CACHE_CONTROL,
   REVALIDATE_CACHE_CONTROL,
+  type SpaFallback,
   type StaticAssetsOptions,
+  acceptedEncodings,
+  loadSpaFallback,
   staticAssets,
   staticCacheControl
 } from './static-assets.js';

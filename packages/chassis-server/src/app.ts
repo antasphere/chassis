@@ -11,6 +11,7 @@ import {
   REVALIDATE_CACHE_CONTROL,
   buildCsp,
   inlineScriptHashes,
+  loadSpaFallback,
   securityHeaders,
   staticAssets
 } from './middleware/index.js';
@@ -223,12 +224,13 @@ export async function createApp({
   // revalidated, precompressed siblings served when accepted (PRDCT-3584).
   app.use('*', staticAssets({ publicDir }));
 
+  // The SPA fallback is the application's HTML under any route: kept by the
+  // browser but revalidated on every use (a strong ETag, a 304 when it still
+  // holds), precompressed when the build wrote the sibling.
+  const fallback = indexHtml ? await loadSpaFallback(publicDir, indexHtml) : null;
   app.get('*', (c) => {
-    // The SPA fallback is the application's HTML under any route: kept by
-    // the browser but revalidated on every use, so a release is seen on the
-    // next load.
+    if (fallback) return fallback.respond(c);
     c.header('Cache-Control', REVALIDATE_CACHE_CONTROL);
-    if (indexHtml) return c.html(indexHtml);
     return c.html(
       `<!doctype html><title>${displayName}</title><h1>${displayName} API is running</h1>` +
         '<p>No dashboard build found. API health: <a href="/healthz">/healthz</a></p>'

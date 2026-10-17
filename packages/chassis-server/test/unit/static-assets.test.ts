@@ -7,6 +7,8 @@ import { brotliCompressSync, gzipSync } from 'node:zlib';
 import {
   IMMUTABLE_CACHE_CONTROL,
   REVALIDATE_CACHE_CONTROL,
+  acceptedEncodings,
+  loadSpaFallback,
   staticAssets,
   staticCacheControl
 } from '@antasphere/chassis-server/middleware';
@@ -123,5 +125,87 @@ describe('staticAssets', () => {
       const res = await app.request(path);
       expect(res.headers.get('cache-control'), path).not.toContain('immutable');
     }
+  });
+});
+
+describe('the SPA fallback', () => {
+  const html = '<!doctype html><title>app</title><script>1</script>';
+  let dir: string;
+  let fallbackApp: Hono;
+  let etag: string;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'chassis-fallback-'));
+    writeFileSync(join(dir, 'index.html'), html);
+    writeFileSync(join(dir, 'index.html.br'), brotliCompressSync(Buffer.from(html)));
+    // no .gz sibling on purpose: a gzip-only client gets the plain HTML
+    const fallback = await loadSpaFallback(dir, html);
+    etag = fallback.etag;
+    fallbackApp = new Hono();
+    fallbackApp.use('*', staticAssets({ publicDir: dir }));
+    fallbackApp.get('*', (c) => fallback.respond(c));
+  });
+
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('answers a deep link with the plain HTML, a strong ETag and no-cache', async () => {
+    const res = await fallbackApp.request('/settings/members');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/html');
+    expect(res.headers.get('cache-control')).toBe(REVALIDATE_CACHE_CONTROL);
+    expect(res.headers.get('etag')).toBe(etag);
+    expect(res.headers.get('content-encoding')).toBeNull();
+    expect(res.headers.get('vary')).toBe('Accept-Encoding');
+    expect(await res.text()).toBe(html);
+  });
+
+  it('answers 304 to a matching If-None-Match, with no body', async () => {
+    const res = await fallbackApp.request('/settings/members', { headers: { 'if-none-match': etag } });
+    expect(res.status).toBe(304);
+    expect(await res.text()).toBe('');
+    expect(res.headers.get('etag')).toBe(etag);
+    expect(res.headers.get('cache-control')).toBe(REVALIDATE_CACHE_CONTROL);
+  });
+
+  it('serves the brotli sibling to a client that accepts br, under its own validator', async () => {
+    const res = await fallbackApp.request('/login', {
+      headers: { 'accept-encoding': 'gzip, deflate, br;q=1.0' }
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-encoding')).toBe('br');
+    const variant = res.headers.get('etag')!;
+    expect(variant).not.toBe(etag);
+    expect(variant.endsWith('-br"')).toBe(true);
+    const body = Buffer.from(await res.arrayBuffer());
+    expect(body.equals(brotliCompressSync(Buffer.from(html)))).toBe(true);
+    const again = await fallbackApp.request('/login', {
+      headers: { 'accept-encoding': 'br', 'if-none-match': variant }
+    });
+    expect(again.status).toBe(304);
+    // the plain validator never confirms the compressed body
+    const cross = await fallbackApp.request('/login', {
+      headers: { 'accept-encoding': 'br', 'if-none-match': etag }
+    });
+    expect(cross.status).toBe(200);
+  });
+
+  it('falls back to the plain HTML when the accepted encoding has no sibling', async () => {
+    const res = await fallbackApp.request('/login', { headers: { 'accept-encoding': 'gzip' } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-encoding')).toBeNull();
+    expect(await res.text()).toBe(html);
+  });
+
+  it('reads Accept-Encoding tokens with their weights stripped', () => {
+    expect([...acceptedEncodings('gzip, deflate, br;q=1.0, zstd')]).toEqual([
+      'gzip',
+      'deflate',
+      'br',
+      'zstd'
+    ]);
+    expect([...acceptedEncodings(undefined)]).toEqual([]);
+    expect(acceptedEncodings(' BR ').has('br')).toBe(true);
   });
 });
