@@ -31,7 +31,7 @@ function service(nowRef: { t: number }) {
     },
     now: () => nowRef.t
   });
-  const refresh = vi.spyOn(svc, 'refresh').mockResolvedValue({ kind: 'ok', accessToken: 'renewed' });
+  const refresh = vi.spyOn(svc, 'renew').mockResolvedValue({ kind: 'ok', accessToken: 'renewed' });
   return { svc, refresh };
 }
 
@@ -46,7 +46,7 @@ describe('HubGrantService.sweepExpiring', () => {
     now.t += 13 * MIN; // 2 min left: inside renewAheadMs (3 min)
     expect(await svc.sweepExpiring()).toBe(1);
     expect(refresh).toHaveBeenCalledTimes(1);
-    expect(refresh).toHaveBeenCalledWith('alice');
+    expect(refresh).toHaveBeenCalledWith('alice', DEFAULT_GRANT_SWEEP_DIALS.renewAheadMs);
   });
 
   it('leaves a token that still has time, and a person it never saw', async () => {
@@ -91,16 +91,51 @@ describe('HubGrantService.sweepExpiring', () => {
       svc.prime('alice', 'tok', new Date(now.t + 2 * MIN));
       await svc.accessToken('alice');
       let draining = true;
-      const stop = svc.startSweep({ isDraining: () => draining, dials: { intervalMs: 1_000 } });
+      const sweep = svc.startSweep({ isDraining: () => draining, dials: { intervalMs: 1_000 } });
+      // the timer never holds the process open (verifier round 5, gap d)
+      expect(sweep.timer.hasRef()).toBe(false);
       await vi.advanceTimersByTimeAsync(1_500);
       expect(refresh).not.toHaveBeenCalled();
       draining = false;
       await vi.advanceTimersByTimeAsync(1_000);
       expect(refresh).toHaveBeenCalledTimes(1);
-      stop();
+      sweep.stop();
       svc.prime('alice', 'tok', new Date(now.t + 2 * MIN));
       await vi.advanceTimersByTimeAsync(5_000);
       expect(refresh).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('skips a person whose acquisition is already in flight (verifier round 5, gap a)', async () => {
+    const now = { t: 1_000_000 };
+    const { svc, refresh } = service(now);
+    svc.prime('alice', 'tok', new Date(now.t + 2 * MIN));
+    await svc.accessToken('alice');
+    // a request's acquisition is running: the sweep must not stack a rotation behind it
+    (svc as unknown as { inFlight: Map<string, Promise<unknown>> }).inFlight.set(
+      'alice',
+      new Promise(() => {})
+    );
+    expect(await svc.sweepExpiring()).toBe(0);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it('never runs two passes at once: a slow renewal holds the next tick (verifier round 5, gap e)', async () => {
+    vi.useFakeTimers();
+    try {
+      const now = { t: 1_000_000 };
+      const { svc, refresh } = service(now);
+      refresh.mockImplementation(
+        () => new Promise((resolve) => setTimeout(() => resolve({ kind: 'ok', accessToken: 'r' }), 2_500))
+      );
+      svc.prime('alice', 'tok', new Date(now.t + 2 * MIN));
+      await svc.accessToken('alice');
+      const sweep = svc.startSweep({ dials: { intervalMs: 1_000 } });
+      await vi.advanceTimersByTimeAsync(3_200); // ticks at 1 s, 2 s, 3 s; the renewal from the first still runs
+      expect(refresh).toHaveBeenCalledTimes(1);
+      sweep.stop();
     } finally {
       vi.useRealTimers();
     }

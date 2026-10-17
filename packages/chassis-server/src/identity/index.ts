@@ -26,6 +26,7 @@ export {
   DEFAULT_GRANT_SWEEP_DIALS,
   type GrantAccess,
   type GrantSweepDials,
+  type GrantSweepHandle,
   HubGrantService,
   LOCK_WATCHDOG_HEADROOM_MS,
   type RefusalReason,

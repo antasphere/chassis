@@ -111,9 +111,12 @@ export const DEFAULT_GRANT_DIALS: HubGrantDials = {
  * page. The sweep renews, off any request, the token of every person seen
  * on this replica within `activeWithinMs` whose cached token expires within
  * `renewAheadMs`; a person not seen for an hour is forgotten and renews on
- * demand as before. It goes through `refresh()` and nothing else: the
- * single-flight, the advisory lock, the re-read and the presentation
- * ledger stay the only writers of the refresh chain. The timer never holds
+ * demand as before. It goes through `renew()`, the same acquisition as a
+ * request's (the single-flight, the advisory lock, the re-read and the
+ * presentation ledger stay the only writers of the refresh chain), with two
+ * differences the verifier of 18 October 2026 asked for: the cached token is
+ * served until the rotation's result is known, and a sibling replica's
+ * fresh token is adopted instead of rotated again. The timer never holds
  * the process open and skips while the replica drains.
  */
 export interface GrantSweepDials {
@@ -130,6 +133,12 @@ export const DEFAULT_GRANT_SWEEP_DIALS: GrantSweepDials = {
   renewAheadMs: 3 * 60_000,
   activeWithinMs: 60 * 60_000
 };
+
+/** What `startSweep` hands back: the timer (never holding the process open) and its stop. */
+export interface GrantSweepHandle {
+  timer: NodeJS.Timeout;
+  stop(): void;
+}
 
 /** Bound the seen-map — a user-id flood must never balloon memory. */
 const MAX_SEEN_USERS = 10_000;
@@ -229,6 +238,14 @@ export function refusalDescription(payload: unknown): string | null {
   const d = (payload as { error_description?: unknown } | null)?.error_description;
   return typeof d === 'string' && d.trim() ? d.trim().slice(0, 300) : null;
 }
+
+/**
+ * How a token is acquired: on `demand` (serve a fresh stored one, else
+ * present); by `force` (the hub refused the current one: present, after the
+ * cache was dropped by the caller); or as a `renew` (the background sweep:
+ * nothing dropped up front, a sibling's fresh stored token adopted).
+ */
+type AcquireMode = 'demand' | 'force' | 'renew';
 
 /** The RFC 7662 probe's answer about a refresh token the hub never confirmed consuming. */
 type ProbeOutcome = 'active' | 'inactive' | 'transient';
@@ -358,7 +375,7 @@ export class HubGrantService {
     if (cached && cached.expiresAtMs - this.now() > this.dials.accessSkewMs) {
       return { kind: 'ok', accessToken: cached.token };
     }
-    return this.acquire(userId, false);
+    return this.acquire(userId, 'demand');
   }
 
   /**
@@ -370,7 +387,7 @@ export class HubGrantService {
     this.cache.delete(userId);
     const existing = this.inFlight.get(userId);
     if (existing) await existing.catch(() => {});
-    return this.acquire(userId, true);
+    return this.acquire(userId, 'force');
   }
 
   private markSeen(userId: string): void {
@@ -387,7 +404,7 @@ export class HubGrantService {
   /**
    * One pass of the background renewal (GrantSweepDials): renew the cached
    * token of every recently seen person whose token expires within the
-   * window, one at a time, through `refresh()`. Answers how many renewals
+   * window, one at a time, through `renew()`. Answers how many renewals
    * were attempted. Never throws: a failed renewal is the next request's
    * on-demand refresh, exactly as before the sweep existed.
    */
@@ -406,7 +423,7 @@ export class HubGrantService {
       if (this.inFlight.has(userId)) continue;
       attempted += 1;
       try {
-        const out = await this.refresh(userId);
+        const out = await this.renew(userId, dials.renewAheadMs);
         if (out.kind !== 'ok') {
           this.opts.logger.info({ userId, outcome: out.kind }, 'hub grant: background renewal did not renew');
         }
@@ -424,10 +441,13 @@ export class HubGrantService {
    * Run the sweep on a timer that never holds the process open and skips
    * while the replica drains. Returns the function that stops it.
    */
-  startSweep(options: { isDraining?: () => boolean; dials?: Partial<GrantSweepDials> } = {}): () => void {
+  startSweep(
+    options: { isDraining?: () => boolean; dials?: Partial<GrantSweepDials> } = {}
+  ): GrantSweepHandle {
     const dials = { ...DEFAULT_GRANT_SWEEP_DIALS, ...options.dials };
     let running = false;
     const timer = setInterval(() => {
+      // One pass at a time: a slow hub must never stack passes.
       if (running || options.isDraining?.()) return;
       running = true;
       void this.sweepExpiring(dials).finally(() => {
@@ -435,13 +455,27 @@ export class HubGrantService {
       });
     }, dials.intervalMs);
     timer.unref();
-    return () => clearInterval(timer);
+    return { timer, stop: () => clearInterval(timer) };
   }
 
-  private acquire(userId: string, force: boolean): Promise<GrantAccess> {
+  /**
+   * Renew the grant in the background (the sweep's path, PRDCT-3584): the
+   * cached token keeps being served until the rotation's result is known
+   * (nothing is evicted up front, unlike `refresh()`), and a token a sibling
+   * replica stored with at least `minLeftMs` of life left is adopted instead
+   * of rotating a second time. Joins an acquisition already in flight.
+   */
+  async renew(
+    userId: string,
+    minLeftMs: number = DEFAULT_GRANT_SWEEP_DIALS.renewAheadMs
+  ): Promise<GrantAccess> {
+    return this.acquire(userId, 'renew', minLeftMs);
+  }
+
+  private acquire(userId: string, mode: AcquireMode, minLeftMs?: number): Promise<GrantAccess> {
     let flight = this.inFlight.get(userId);
     if (!flight) {
-      flight = this.doAcquire(userId, force).finally(() => {
+      flight = this.doAcquire(userId, mode, minLeftMs).finally(() => {
         if (this.inFlight.get(userId) === flight) this.inFlight.delete(userId);
       });
       this.inFlight.set(userId, flight);
@@ -449,13 +483,13 @@ export class HubGrantService {
     return flight;
   }
 
-  private async doAcquire(userId: string, force: boolean): Promise<GrantAccess> {
+  private async doAcquire(userId: string, mode: AcquireMode, minLeftMs?: number): Promise<GrantAccess> {
     try {
       const first = await this.readRow(userId);
       if (!first) return { kind: 'no_link' };
       if (!first.refreshToken) return { kind: 'grant_dead' };
 
-      if (!force) {
+      if (mode === 'demand') {
         const stored = await this.storedAccess(userId, first);
         if (stored) return { kind: 'ok', accessToken: stored };
       }
@@ -471,8 +505,14 @@ export class HubGrantService {
         const row = await this.readRow(userId);
         if (!row) return { kind: 'no_link' };
         if (!row.refreshToken) return { kind: 'grant_dead' };
-        if (!force || row.refreshToken !== first.refreshToken) {
+        if (mode === 'demand' || row.refreshToken !== first.refreshToken) {
           const stored = await this.storedAccess(userId, row);
+          if (stored) return { kind: 'ok', accessToken: stored };
+        } else if (mode === 'renew') {
+          // A renewal rotates only what is about to expire: a stored token
+          // with more life than the renewal window is a sibling replica's
+          // fresh one (or a login's), adopted rather than rotated again.
+          const stored = await this.storedAccess(userId, row, minLeftMs);
           if (stored) return { kind: 'ok', accessToken: stored };
         }
 
@@ -682,10 +722,14 @@ export class HubGrantService {
   }
 
   /** Decrypt-and-cache the row's access token when it is still fresh. */
-  private async storedAccess(userId: string, row: GrantRow): Promise<string | null> {
+  private async storedAccess(
+    userId: string,
+    row: GrantRow,
+    minLeftMs: number = this.dials.accessSkewMs
+  ): Promise<string | null> {
     if (!row.accessToken || !row.accessTokenExpiresAt) return null;
     const expiresAtMs = row.accessTokenExpiresAt.getTime();
-    if (expiresAtMs - this.now() <= this.dials.accessSkewMs) return null;
+    if (expiresAtMs - this.now() <= minLeftMs) return null;
     try {
       const token = await this.decrypt(row.accessToken);
       this.cache.set(userId, { token, expiresAtMs });
