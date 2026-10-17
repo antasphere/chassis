@@ -107,10 +107,15 @@ describe('staticAssets', () => {
     const icon = await app.request('/favicon.png');
     expect(icon.status).toBe(200);
     expect(icon.headers.get('cache-control')).toBe(REVALIDATE_CACHE_CONTROL);
-    const root = await app.request('/');
-    expect(root.status).toBe(200);
-    expect(root.headers.get('cache-control')).toBe(REVALIDATE_CACHE_CONTROL);
-    expect(await root.text()).toContain('<title>t</title>');
+  });
+
+  it('leaves the application HTML itself to the fallback', async () => {
+    for (const path of ['/', '/index.html']) {
+      const res = await app.request(path);
+      expect(res.status, path).toBe(200);
+      expect(res.headers.get('cache-control'), path).toBe(REVALIDATE_CACHE_CONTROL);
+      expect(await res.text(), path).toContain('fallback');
+    }
   });
 
   it('falls through to the SPA fallback on an application route, revalidated', async () => {
@@ -161,12 +166,23 @@ describe('the SPA fallback', () => {
     expect(await res.text()).toBe(html);
   });
 
-  it('answers 304 to a matching If-None-Match, with no body', async () => {
+  it('answers 304 to a matching If-None-Match, with no body and the HTML type', async () => {
     const res = await fallbackApp.request('/settings/members', { headers: { 'if-none-match': etag } });
     expect(res.status).toBe(304);
     expect(await res.text()).toBe('');
     expect(res.headers.get('etag')).toBe(etag);
     expect(res.headers.get('cache-control')).toBe(REVALIDATE_CACHE_CONTROL);
+    expect(res.headers.get('content-type')).toContain('text/html');
+  });
+
+  it('answers the root and /index.html with the validator too', async () => {
+    for (const path of ['/', '/index.html']) {
+      const res = await fallbackApp.request(path);
+      expect(res.status, path).toBe(200);
+      expect(res.headers.get('etag'), path).toBe(etag);
+      const again = await fallbackApp.request(path, { headers: { 'if-none-match': etag } });
+      expect(again.status, path).toBe(304);
+    }
   });
 
   it('serves the brotli sibling to a client that accepts br, under its own validator', async () => {

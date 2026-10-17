@@ -54,6 +54,10 @@ export interface StaticAssetsOptions {
 export function staticAssets(options: StaticAssetsOptions): MiddlewareHandler {
   const serve = serveStatic({ root: options.publicDir, precompressed: true });
   return async (c, next) => {
+    // The application's HTML itself (`/`, `/index.html`) is the SPA
+    // fallback's to answer, with its validator and its sibling; the static
+    // server would hand it out with neither (verifier round 2).
+    if (c.req.path === '/' || c.req.path === '/index.html') return next();
     const res = await serve(c, next);
     // serveStatic answers a Response for a file it found and the result of
     // `next()` otherwise; only the file gets the policy.
@@ -120,15 +124,18 @@ export async function loadSpaFallback(publicDir: string, html: string): Promise<
       // One validator per representation: a cached brotli body is never
       // confirmed against a plain one.
       const variantEtag = encoding ? etag.replace(/"$/, `-${encoding}"`) : etag;
+      // The type rides the 304 too: the node server would otherwise stamp a
+      // text/plain default on it (verifier round 2), and RFC 9110 allows the
+      // 304 to repeat what the 200 carries.
       const headers: Record<string, string> = {
         'Cache-Control': REVALIDATE_CACHE_CONTROL,
+        'Content-Type': 'text/html; charset=utf-8',
         ETag: variantEtag,
         Vary: 'Accept-Encoding'
       };
       if (c.req.header('if-none-match') === variantEtag) {
         return c.body(null, 304, headers);
       }
-      headers['Content-Type'] = 'text/html; charset=utf-8';
       if (encoding) headers['Content-Encoding'] = encoding;
       const body = encoding ? variants.get(encoding)! : plain;
       return c.body(new Uint8Array(body), 200, headers);
