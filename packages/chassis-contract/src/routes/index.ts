@@ -3,6 +3,7 @@ import type { ChassisContract } from '../define.js';
 import type { ToolIdentity } from '../identity.js';
 import { apiErrorSchema, cursorPageQuerySchema } from '../schemas/common.js';
 import { instanceInfoSchema } from '../schemas/instance.js';
+import { appsListSchema } from '../schemas/apps.js';
 import { setupRequestSchema, setupResponseSchema } from '../schemas/setup.js';
 import { onboardingDismissedSchema } from '../schemas/me.js';
 import {
@@ -149,6 +150,28 @@ export const instanceRoute = createRoute({
   summary: 'Instance discovery (unauthenticated, cacheable)',
   responses: {
     200: jsonBody(instanceInfoSchema, 'Instance descriptor')
+  }
+});
+
+// ── The Apps page's list (PRDCT-3493) ───────────────────────────────────────
+// The other tools of the person's organization: on the cloud edition the
+// hub asked as the person (`GET /me/apps` with their own grant, the tools
+// the organization lets them open), on a self-hosted instance the operator's
+// `APPS_FILE`. A browser session's alone: no rule of the scope allowlist
+// opens it, so an API key or an OAuth token is refused 403 before the handler
+// (fail-closed), and the handler says the same to anything that is not a
+// session. Every member reads it, a guest included: it lists only what the
+// hub (or the operator) says the person may open.
+export const appsListRoute = createRoute({
+  method: 'get',
+  path: '/apps',
+  tags: ['apps'],
+  summary:
+    'The other tools of the organization the caller may open, and the account that signs them in (browser session only)',
+  responses: {
+    200: jsonBody(appsListSchema, 'The tools, the hub, and where the list came from'),
+    401: errorResponses[401],
+    403: errorResponses[403]
   }
 });
 

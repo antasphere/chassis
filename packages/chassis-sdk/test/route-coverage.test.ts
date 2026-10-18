@@ -36,6 +36,7 @@ const SAMPLE_DELIVERY_ID = '9c1d2e3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f';
 
 const INVOKERS: Record<string, (c: Client) => Promise<unknown>> = {
   'GET /instance': (c) => c.instance(),
+  'GET /apps': (c) => c.apps(),
   'POST /setup': (c) =>
     c.setup({
       instanceName: 'X',

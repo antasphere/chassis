@@ -72,7 +72,8 @@ import type {
   WorkspaceLook,
   WorkspaceRole,
   WorkspaceUpdate,
-  WorkspaceUpdated
+  WorkspaceUpdated,
+  AppsList
 } from '@antasphere/chassis-contract';
 
 /**
@@ -657,6 +658,15 @@ export class ChassisClient<TScope extends string> {
   /** The event catalog: every event type, its subjects and the JSON Schema of its data. */
   webhookEvents(): Promise<WebhookCatalog> {
     return this.request('GET', '/webhooks/events');
+  }
+
+  // ── The Apps page (PRDCT-3493) ─────────────────────────────────────────────
+  // The other tools of the organization: a browser session's alone (an API key
+  // or an OAuth token is refused 403).
+
+  /** The tools the caller may open, the account that signs them in, and where the list came from. */
+  apps(): Promise<AppsList> {
+    return this.request('GET', '/apps');
   }
 
   /** Owner or admin. The answer carries the signing secret (`whsec_…`), shown once. */

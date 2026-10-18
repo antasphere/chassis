@@ -5,7 +5,8 @@ import {
   usageCheckSchema,
   usageEventSchema,
   usageEventsBatchSchema,
-  usageIngestResultSchema
+  usageIngestResultSchema,
+  meAppsSchema
 } from '@antasphere/chassis-contract';
 import { randomUUID } from 'node:crypto';
 import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
@@ -111,6 +112,14 @@ export interface HubUserFixture {
   overrides?: HubTokenOverrides | undefined;
 }
 
+/** One tool of the fake's catalogue (what GET /me/apps serves, PRDCT-3493). */
+export interface FakeHubTool {
+  slug: string;
+  name: string;
+  launchUrl: string;
+  descriptor?: Record<string, unknown> | undefined;
+}
+
 /** One entry of a user's org registry (what GET /orgs serves). */
 export interface HubOrgEntry {
   name: string | null;
@@ -180,6 +189,11 @@ export class FakeHub {
   private readonly orgTeamRegistry = new Map<string, Array<{ id: string; slug: string; name: string }>>();
   /** sub → the orgs that do NOT open the tool to them (GET /orgs' top-level `denied`). */
   private readonly userDenied = new Map<string, Array<{ id: string; name: string }>>();
+  /** The catalogue GET /me/apps serves (PRDCT-3493): the registry's tools, in order, with their descriptor. */
+  private tools: FakeHubTool[] = [];
+  /** Per user and tool, the organizations that do NOT open the tool to them (absent = open everywhere). */
+  private readonly userToolClosed = new Map<string, Set<string>>();
+  readonly meAppsRequests: Array<{ auth: string | null; orgId: string | null }> = [];
   /** Every JWT access token this fake minted (bearer lookup for /api/v1). */
   private readonly accessTokens = new Map<string, AccessTokenRecord>();
   /** Live + rotated-out refresh tokens (rotation families). */
@@ -550,6 +564,9 @@ export class FakeHub {
     if (req.method === 'GET' && url.pathname === '/api/v1/teams') {
       return this.handleTeams(req, res, url);
     }
+    if (req.method === 'GET' && url.pathname === '/api/v1/me/apps') {
+      return this.handleMeApps(req, res);
+    }
     if (req.method === 'POST' && url.pathname === '/api/v1/orgs') {
       return this.handleOrgCreate(req, res);
     }
@@ -880,6 +897,71 @@ export class FakeHub {
   }
 
   // ── GET /api/v1/orgs: the caller-scoped org list ──────────────────────
+  /** The tools GET /me/apps lists, in this order. */
+  setTools(tools: FakeHubTool[]): void {
+    this.tools = tools;
+  }
+
+  /** Close one tool to one user in one organization (the real hub's teams rule, reduced to its verdict). */
+  setToolClosed(sub: string, slug: string, orgId: string, closed = true): void {
+    const key = `${sub}:${slug}`;
+    const set = this.userToolClosed.get(key) ?? new Set<string>();
+    if (closed) set.add(orgId);
+    else set.delete(orgId);
+    this.userToolClosed.set(key, set);
+  }
+
+  // ── GET /api/v1/me/apps: the catalogue as one person sees it (PRDCT-3493) ─
+  // Mirrors the hub's api/me-apps.ts: the same bearer rule as /orgs, the
+  // organization the `X-Workspace-Id` header names (else the user's first org,
+  // the real hub's default), every registered tool with `open` from the
+  // per-user closures, `connected` false (the fake keeps no connection facts).
+  private handleMeApps(req: IncomingMessage, res: ServerResponse): void {
+    const header = req.headers['x-workspace-id'];
+    const orgId = (Array.isArray(header) ? header[0] : header) ?? null;
+    this.meAppsRequests.push({ auth: req.headers.authorization ?? null, orgId });
+    const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? '')?.[1] ?? null;
+    const record = bearer ? this.accessTokens.get(bearer) : undefined;
+    if (!record || record.expMs <= Date.now() || !record.aud.includes(this.apiResource)) {
+      return sendJson(res, 401, { error: { code: 'invalid_token', message: 'Unauthorized' } });
+    }
+    const orgs = this.userOrgs.get(record.sub) ?? new Map<string, HubOrgEntry>();
+    const resolved = orgId ?? orgs.keys().next().value ?? null;
+    if (!resolved || !orgs.has(resolved)) {
+      return sendJson(res, 401, { error: { code: 'unauthenticated', message: 'Authentication required' } });
+    }
+    const tools = this.tools.map((tool) => ({
+      slug: tool.slug,
+      clientId: `tool-${tool.slug}`,
+      name: tool.name,
+      launchUrl: tool.launchUrl,
+      returnOrigins: [new URL(tool.launchUrl).origin],
+      connected: false,
+      connectedAt: null,
+      lastUsedAt: null,
+      ...(tool.descriptor ? { descriptor: tool.descriptor } : {}),
+      open: !(this.userToolClosed.get(`${record.sub}:${tool.slug}`)?.has(resolved) ?? false)
+    }));
+    const entry = orgs.get(resolved);
+    const body = {
+      organization: { id: resolved, name: entry?.name ?? '', status: entry?.status ?? 'active' },
+      tools
+    };
+    // The fake answers the hub's published shape and nothing else: a body the
+    // real hub would never send is a test proving nothing, so it is refused
+    // here, as a 500 naming the drift (a thrown error would only hang the socket).
+    const checked = meAppsSchema.safeParse(body);
+    if (!checked.success) {
+      return sendJson(res, 500, {
+        error: {
+          code: 'fake_hub_drift',
+          message: `/me/apps body is off the hub contract: ${checked.error.message}`
+        }
+      });
+    }
+    return sendJson(res, 200, body);
+  }
+
   private async handleOrgs(req: IncomingMessage, res: ServerResponse): Promise<void> {
     this.orgsRequests.push({ auth: req.headers.authorization ?? null });
     if (this.orgsDelayMs > 0) await new Promise((r) => setTimeout(r, this.orgsDelayMs));

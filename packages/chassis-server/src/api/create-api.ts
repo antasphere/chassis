@@ -84,6 +84,8 @@ import { demoSessionJudge, demoSignInOn, registerDemoPassRoutes } from './index.
 import { registerProjectRoutes } from './index.js';
 import { registerTeamRoutes } from './index.js';
 import { registerWebhookRoutes } from './webhooks.js';
+import { AppsService } from '../apps/service.js';
+import { registerAppsRoutes } from '../apps/routes.js';
 import type { WebhookService } from '../webhooks/index.js';
 import { bindMembershipRemoval } from '../members/removal.js';
 import { registerApiKeyRoutes } from './index.js';
@@ -1351,6 +1353,25 @@ export function createApiApp<
   registerTeamRoutes(api, { db, hubManaged });
   // Webhooks (PRDCT-3482): the tool's on both editions, never hub-managed (Romain's rule of 27 September 2026).
   registerWebhookRoutes(api, { service: deps.webhooks });
+
+  // The Apps page (PRDCT-3493): the other tools of the person's organization,
+  // from the hub as the person on cloud (one GET /me/apps with the person's
+  // own grant, the same store the reconciler uses) or from the operator's
+  // APPS_FILE. Both editions. Session-only — unlisted in the machine scope
+  // allowlist, re-checked in the handler. The chassis mounts it so every tool
+  // lists its siblings from the hub's catalogue and ships no copy of their look.
+  registerAppsRoutes(
+    api,
+    new AppsService({
+      db,
+      logger,
+      edition: env.EDITION,
+      hubIssuerUrl: env.HUB_ISSUER_URL,
+      appsFile: env.APPS_FILE,
+      selfSlug: tool.identity.slug,
+      tokens: hub && deps.hubGrant ? deps.hubGrant : null
+    })
+  );
   if (demoSignIn) {
     registerDemoPassRoutes(api, {
       db,
