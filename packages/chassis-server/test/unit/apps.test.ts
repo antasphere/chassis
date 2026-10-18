@@ -5,15 +5,26 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Db } from '@antasphere/chassis-db';
 import type { GrantAccess } from '../../src/identity/hub-grant.js';
 import type { Logger } from '../../src/logger.js';
-import { appsFromFile, readDescriptor, safeHttpUrl, selectHubApps } from '../../src/apps/select.js';
+import { OpenAPIHono } from '@hono/zod-openapi';
+import type { Principal } from '@antasphere/chassis-contract';
+import {
+  appsFromFile,
+  readDescriptor,
+  readOrganization,
+  safeHttpUrl,
+  selectHubApps
+} from '../../src/apps/select.js';
+import { registerAppsRoutes } from '../../src/apps/routes.js';
 import { APPS_CACHE_TTL_MS, AppsService, type HubTokens } from '../../src/apps/service.js';
 
 /**
  * The Apps page's list (`src/apps/`, PRDCT-3493): the URL rule, the
  * operator's file with the descriptor keys, the hub's one answer kept where
  * the organization opens the tool, the current tool, and the service's
- * fall-backs and cache. The route itself (session only, the allowlist's 403)
- * is the integration suite's (`test/integration/apps-route.test.ts`).
+ * fall-backs and cache, the suspended organization served as an empty list,
+ * the handler's own session-only refusal. The route through the real boot
+ * (the allowlist's 403 before the handler) is the integration suite's
+ * (`test/integration/apps-route.test.ts`).
  */
 
 const ORG = '0b9f1a52-6f8e-4b5e-9a35-1d2c3e4f5a6b';
@@ -59,6 +70,39 @@ describe('readDescriptor', () => {
     expect(readDescriptor({ logo: 'https://x.example/logo.svg' })).toBeUndefined();
     expect(readDescriptor({ accent: 'red' })).toBeUndefined();
     expect(readDescriptor('landmark')).toBeUndefined();
+    expect(readDescriptor(['landmark'])).toBeUndefined();
+  });
+
+  it('drops the one key the contract refuses and keeps the rest: a newer hub’s icon or key never costs the sentence', () => {
+    expect(readDescriptor({ icon: 'mail', badge: 'new' })).toEqual({ icon: 'mail' });
+    expect(readDescriptor({ icon: 'anchor', drawing: 'ledger', accent: '#112233' })).toEqual({
+      drawing: 'ledger',
+      accent: '#112233'
+    });
+    expect(readDescriptor({ ...DESCRIPTOR, accent: 'red' })).toEqual({
+      description: DESCRIPTOR.description,
+      icon: DESCRIPTOR.icon,
+      drawing: DESCRIPTOR.drawing
+    });
+    expect(readDescriptor({ description: '  trimmed  ', icon: 'skull' })).toEqual({ description: 'trimmed' });
+  });
+});
+
+describe('readOrganization', () => {
+  it('reads the organization and its status, null without one or on another shape', () => {
+    expect(readOrganization({ organization: { id: ORG, name: 'Acme', status: 'active' } })).toEqual({
+      name: 'Acme',
+      status: 'active'
+    });
+    expect(readOrganization({ organization: { id: ORG, name: 'Acme', status: 'suspended' } })).toEqual({
+      name: 'Acme',
+      status: 'suspended'
+    });
+    expect(readOrganization({ organization: { id: ORG, name: 'Acme' } })).toBeNull();
+    expect(readOrganization({ organization: { status: 'frozen' } })).toBeNull();
+    expect(readOrganization({ organization: 'Acme' })).toBeNull();
+    expect(readOrganization({})).toBeNull();
+    expect(readOrganization(null)).toBeNull();
   });
 });
 
@@ -88,8 +132,8 @@ describe('appsFromFile', () => {
     expect(file.apps.map((a) => [a.slug, a.current, a.descriptor])).toEqual([
       ['finance', false, DESCRIPTOR],
       ['yourtool', true, undefined],
-      // one bad key drops the whole descriptor, the entry stays
-      ['mail', false, undefined]
+      // one bad key drops that key alone, the entry and its other keys stay
+      ['mail', false, { icon: 'mail' }]
     ]);
     expect(file.apps[0]).toMatchObject({ connected: false, firstUsedAt: null, lastUsedAt: null });
   });
@@ -237,7 +281,9 @@ function fakeTokens(access: GrantAccess = { kind: 'ok', accessToken: 'tok-1' }) 
 }
 
 /** A hub that answers /me/apps for the given token, recording every call with its organization header. */
-function fakeHub(opts: { token?: string; status?: number; body?: unknown } = {}) {
+function fakeHub(
+  opts: { token?: string; status?: number; body?: unknown; orgStatus?: 'active' | 'suspended' } = {}
+) {
   const calls: Array<{ path: string; org: string | null }> = [];
   const impl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
@@ -249,7 +295,7 @@ function fakeHub(opts: { token?: string; status?: number; body?: unknown } = {})
     if (opts.status) return Response.json(opts.body ?? {}, { status: opts.status });
     return Response.json(
       opts.body ?? {
-        organization: { id: ORG, name: 'Acme' },
+        organization: { id: ORG, name: 'Acme', status: opts.orgStatus ?? 'active' },
         tools: [
           {
             slug: 'finance',
@@ -323,6 +369,39 @@ describe('AppsService on the cloud edition', () => {
       ['yourtool', true, true]
     ]);
     expect(list.apps[0]!.descriptor).toEqual(DESCRIPTOR);
+    expect(list.organization).toEqual({ name: 'Acme', status: 'active' });
+  });
+
+  it('serves a suspended organization as an empty list that says so, never as the tools, and holds that answer', async () => {
+    const hub = fakeHub({ orgStatus: 'suspended' });
+    const service = cloud({ fetchImpl: hub.impl });
+    const list = await service.list(principal);
+    expect(list).toEqual({
+      apps: [],
+      hub: { url: 'https://account.example.com/', name: 'Antasphere Account' },
+      source: 'hub',
+      organization: { name: 'Acme', status: 'suspended' }
+    });
+    await service.list(principal);
+    expect(hub.calls).toHaveLength(1);
+  });
+
+  it('an older hub naming no organization status is read as active', async () => {
+    const body = {
+      organization: { id: ORG, name: 'Acme' },
+      tools: [
+        {
+          slug: 'finance',
+          name: 'Finance',
+          launchUrl: 'https://finance.example.com',
+          connected: false,
+          open: true
+        }
+      ]
+    };
+    const list = await cloud({ fetchImpl: fakeHub({ body }).impl }).list(principal);
+    expect(list.apps.map((a) => a.slug)).toEqual(['finance']);
+    expect(list.organization).toBeUndefined();
   });
 
   it('refreshes the grant once on a 401 and retries', async () => {
@@ -344,9 +423,12 @@ describe('AppsService on the cloud edition', () => {
     expect(hub.calls).toHaveLength(1);
     await service.list({ userId: 'usr_2', workspaceId: 'ws_1' });
     expect(hub.calls).toHaveLength(2);
+    // the same person in another workspace is another organization: asked again
+    await service.list({ userId: 'usr_1', workspaceId: 'ws_2' });
+    expect(hub.calls).toHaveLength(3);
     now += APPS_CACHE_TTL_MS;
     await service.list(principal);
-    expect(hub.calls).toHaveLength(3);
+    expect(hub.calls).toHaveLength(4);
   });
 
   it('falls back to the file when the grant is dead, the hub fails or answers another shape, or the workspace is no hub organization', async () => {
@@ -410,5 +492,45 @@ describe('AppsService on a self-hosted instance', () => {
     const path = join(dir, 'apps.json');
     writeFileSync(path, '{not json');
     expect((await oss(path).list(principal)).source).toBe('none');
+  });
+});
+
+// ── The handler ──────────────────────────────────────────────────────────────
+
+describe('the GET /apps handler', () => {
+  /** The route alone, behind a principal the test sets: the allowlist that refuses machines first is not mounted here. */
+  function routeAs(via: Principal['via']) {
+    const api = new OpenAPIHono();
+    api.use('*', async (c, next) => {
+      c.set('principal', {
+        ...principal,
+        email: 'p@x.test',
+        name: 'P',
+        role: 'member',
+        origin: 'local',
+        via
+      } as Principal);
+      await next();
+    });
+    const service = { list: vi.fn(async () => ({ apps: [], hub: null, source: 'none' as const })) };
+    registerAppsRoutes(api, service as unknown as AppsService);
+    return { api, service };
+  }
+
+  it('answers a browser session', async () => {
+    const { api, service } = routeAs('session');
+    const res = await api.request('/apps');
+    expect(res.status).toBe(200);
+    expect(service.list).toHaveBeenCalledWith(expect.objectContaining(principal));
+  });
+
+  it('refuses anything that is not a session itself, 403 session_required, whatever an allowlist would say', async () => {
+    for (const via of ['api_key', 'oauth'] as const) {
+      const { api, service } = routeAs(via);
+      const res = await api.request('/apps');
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe('session_required');
+      expect(service.list).not.toHaveBeenCalled();
+    }
   });
 });

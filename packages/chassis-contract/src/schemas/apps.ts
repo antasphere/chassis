@@ -17,6 +17,11 @@ import { toolDescriptorSchema } from '@antasphere/contract';
  *    or when the hub could not be asked;
  *  - `none`: neither, and the list is empty.
  *
+ * `organization` is the hub organization the list was asked for (the hub
+ * source alone): its name and its status. On `suspended` the hub's contract
+ * says a tool's Apps service never serves the list, so `apps` is empty and
+ * the dashboard says why instead of showing the operator's empty plate.
+ *
  * Every URL is an http(s) URL the server checked before serving it, and the
  * descriptor is the hub's registry descriptor (or the file's, validated the
  * same way): the sentence, the icon and the drawing names from the closed
@@ -48,11 +53,17 @@ export type AppEntry = z.infer<typeof appEntrySchema>;
 export const APP_SOURCES = ['hub', 'file', 'none'] as const;
 export type AppSource = (typeof APP_SOURCES)[number];
 
+/** The hub organization's statuses, as the hub's `GET /me/apps` names them. */
+export const APP_ORGANIZATION_STATUSES = ['active', 'suspended'] as const;
+
 /** GET /apps. */
 export const appsListSchema = z.object({
   apps: z.array(appEntrySchema),
   /** The account that signs the person in (the hub), when the instance knows one. */
   hub: z.object({ url: z.string(), name: z.string() }).nullable(),
-  source: z.enum(APP_SOURCES)
+  source: z.enum(APP_SOURCES),
+  /** The hub organization the list is for (the hub source); `suspended` empties the list. */
+  organization: z.object({ name: z.string(), status: z.enum(APP_ORGANIZATION_STATUSES) }).optional()
 });
 export type AppsList = z.infer<typeof appsListSchema>;
+export type AppsOrganization = NonNullable<AppsList['organization']>;

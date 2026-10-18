@@ -1,4 +1,10 @@
-import { toolDescriptorSchema, type AppEntry, type ToolDescriptor } from '@antasphere/chassis-contract';
+import {
+  APP_ORGANIZATION_STATUSES,
+  toolDescriptorSchema,
+  type AppEntry,
+  type AppsOrganization,
+  type ToolDescriptor
+} from '@antasphere/chassis-contract';
 
 /**
  * The Apps page's selection rules (PRDCT-3493), pure so the unit tests hold
@@ -38,16 +44,41 @@ const text = (raw: unknown, max: number): string | null =>
   typeof raw === 'string' && raw.trim() !== '' && raw.length <= max ? raw.trim() : null;
 
 /**
- * A descriptor as the hub's contract validates it, or undefined when the
- * value is not one (an older or newer hub, a typo in a file): the entry is
- * kept without a descriptor rather than refused, since the page is a
- * convenience and the name alone renders. An empty descriptor is undefined too.
+ * A descriptor read key by key against the hub's contract: a key the contract
+ * validates is kept, a key it does not (an icon name a newer hub added and
+ * this chassis has not shipped, a typo in a file, a key the contract does not
+ * know) is dropped alone, so the sentence and the accent survive an icon the
+ * dashboard cannot draw yet. Undefined when nothing valid remains, or when
+ * the value is not an object: the entry is kept without a descriptor rather
+ * than refused, since the page is a convenience and the name alone renders.
  */
 export function readDescriptor(raw: unknown): ToolDescriptor | undefined {
-  if (raw === null || raw === undefined) return undefined;
-  const parsed = toolDescriptorSchema.safeParse(raw);
-  if (!parsed.success || Object.keys(parsed.data).length === 0) return undefined;
-  return parsed.data;
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const whole = toolDescriptorSchema.safeParse(raw);
+  const kept: Record<string, unknown> = whole.success ? whole.data : {};
+  if (!whole.success) {
+    const value = raw as Record<string, unknown>;
+    for (const [key, field] of Object.entries(toolDescriptorSchema.shape)) {
+      if (value[key] === undefined) continue;
+      const one = field.safeParse(value[key]);
+      if (one.success && one.data !== undefined) kept[key] = one.data;
+    }
+  }
+  return Object.keys(kept).length === 0 ? undefined : (kept as ToolDescriptor);
+}
+
+/**
+ * The hub organization the answer of `GET /me/apps` is for: its name and its
+ * status as the contract names them; null when the body carries none or
+ * another shape (an older hub), which the service treats as active.
+ */
+export function readOrganization(body: unknown): AppsOrganization | null {
+  const raw = (body as { organization?: unknown } | null)?.organization;
+  if (raw === null || typeof raw !== 'object') return null;
+  const org = raw as Record<string, unknown>;
+  const status = APP_ORGANIZATION_STATUSES.find((s) => s === org.status);
+  if (!status) return null;
+  return { name: text(org.name, 200) ?? '', status };
 }
 
 /** What an operator's file yields: the tools, the hub's card when an entry names it, the entries left out. */

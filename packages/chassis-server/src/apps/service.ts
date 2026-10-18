@@ -4,7 +4,7 @@ import { workspaces, type Db } from '@antasphere/chassis-db';
 import type { AppsList, Principal } from '@antasphere/chassis-contract';
 import type { GrantAccess } from '../identity/hub-grant.js';
 import type { Logger } from '../logger.js';
-import { HUB_APP_NAME, appsFromFile, safeHttpUrl, selectHubApps } from './select.js';
+import { HUB_APP_NAME, appsFromFile, readOrganization, safeHttpUrl, selectHubApps } from './select.js';
 
 /**
  * The Apps page's list (`GET /apps`, PRDCT-3493): the other tools of the
@@ -17,11 +17,15 @@ import { HUB_APP_NAME, appsFromFile, safeHttpUrl, selectHubApps } from './select
  * organization (`workspaces.central_account_id`), answers the catalogue as
  * the person sees it there (the restricted tools they may not see already
  * left out by the hub) with the access verdict per tool; the tools not open
- * are left out here. The answer is held five minutes per person and
- * workspace. A grant that is missing or dead, a hub that does not answer, a
- * malformed body, or a workspace that is no hub organization falls back to
- * the operator's file, never to an error: the page is a convenience, not an
- * access decision (each tool still asks the hub when it is opened).
+ * are left out here. A SUSPENDED organization (the hub's `organization.status`)
+ * is served as an empty list carrying the organization and its status, never
+ * as the tools: the hub's contract says a tool's Apps service never serves
+ * such a list, and the dashboard says why. The answer is held five minutes
+ * per person and workspace. A grant that is missing or dead, a hub that does
+ * not answer, a malformed body, or a workspace that is no hub organization
+ * falls back to the operator's file, never to an error: the page is a
+ * convenience, not an access decision (each tool still asks the hub when it
+ * is opened).
  *
  * On a self-hosted instance the list is the operator's file (`APPS_FILE`),
  * read on every call; without one the page lists nothing.
@@ -159,7 +163,12 @@ export class AppsService {
       this.opts.logger.warn('hub /me/apps carried no tools list — the Apps page reads the file');
       return null;
     }
-    return { apps, hub: this.cloudHub(), source: 'hub' };
+    const organization = readOrganization(res.body);
+    if (organization?.status === 'suspended') {
+      this.opts.logger.info({ hubOrgId }, 'hub organization suspended — the Apps page lists nothing');
+      return { apps: [], hub: this.cloudHub(), source: 'hub', organization };
+    }
+    return { apps, hub: this.cloudHub(), source: 'hub', ...(organization ? { organization } : {}) };
   }
 
   private async get(token: string, hubOrgId: string): Promise<HubRead> {

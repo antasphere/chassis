@@ -29,7 +29,9 @@ import { nextIp, ssoLogin } from './sso-helpers.js';
  *    the signed-in person, asked for the workspace's hub organization, the
  *    tools the organization does not open to them left out, the descriptor
  *    carried; closing a tool at the hub takes it out of the list once the
- *    five-minute hold has passed (a fresh person reads it at once).
+ *    five-minute hold has passed (a fresh person reads it at once); a person
+ *    whose organization the hub suspended reads an empty list that names the
+ *    organization and its status, never the tools.
  */
 
 const OWNER = { email: 'owner@apps.test', name: 'Apps Owner', password: 'apps-owner-password-1' };
@@ -156,6 +158,12 @@ describe('GET /apps on the cloud edition, against the hub', () => {
     email: 'omar@apps.test',
     name: 'Omar Diallo'
   };
+  const lea: HubUserFixture = {
+    ...mira,
+    sub: 'hub-user-lea',
+    email: 'lea@apps.test',
+    name: 'Léa Martin'
+  };
 
   beforeAll(async () => {
     hub = await FakeHub.start({ clientId: host.hubClientId });
@@ -213,5 +221,15 @@ describe('GET /apps on the cloud edition, against the hub', () => {
     const body = await readJson(await send(app, 'GET', '/apps', { cookie }));
     expect(body.source).toBe('hub');
     expect(body.apps.map((a: { slug: string }) => a.slug)).toEqual(['finance', host.identity.slug]);
+  });
+
+  it('a person whose organization the hub suspended reads an empty list that says so, never the tools', async () => {
+    const cookie = await ssoLogin(app, hub, lea);
+    hub.setUserOrg(lea.sub, ORG, { name: 'Acme', role: 'member', status: 'suspended' });
+    const body = await readJson(await send(app, 'GET', '/apps', { cookie }));
+    expect(body.source).toBe('hub');
+    expect(body.apps).toEqual([]);
+    expect(body.organization).toEqual({ name: 'Acme', status: 'suspended' });
+    expect(body.hub).toEqual({ url: `${hub.issuer}/`, name: 'Antasphere Account' });
   });
 });

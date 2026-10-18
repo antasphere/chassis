@@ -5,7 +5,8 @@ import {
   usageCheckSchema,
   usageEventSchema,
   usageEventsBatchSchema,
-  usageIngestResultSchema
+  usageIngestResultSchema,
+  meAppsSchema
 } from '@antasphere/chassis-contract';
 import { randomUUID } from 'node:crypto';
 import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
@@ -941,10 +942,18 @@ export class FakeHub {
       ...(tool.descriptor ? { descriptor: tool.descriptor } : {}),
       open: !(this.userToolClosed.get(`${record.sub}:${tool.slug}`)?.has(resolved) ?? false)
     }));
-    return sendJson(res, 200, {
-      organization: { id: resolved, name: orgs.get(resolved)?.name ?? '' },
+    const entry = orgs.get(resolved);
+    const body = {
+      organization: { id: resolved, name: entry?.name ?? '', status: entry?.status ?? 'active' },
       tools
-    });
+    };
+    // The fake answers the hub's published shape and nothing else: a body the
+    // real hub would never send is a test proving nothing, so it is refused here.
+    const checked = meAppsSchema.safeParse(body);
+    if (!checked.success) {
+      throw new Error(`FakeHub: /me/apps body is off the hub contract: ${checked.error.message}`);
+    }
+    return sendJson(res, 200, body);
   }
 
   private async handleOrgs(req: IncomingMessage, res: ServerResponse): Promise<void> {
