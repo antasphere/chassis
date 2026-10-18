@@ -18,7 +18,11 @@ import { nextIp, ssoLogin } from './sso-helpers.js';
 
 /**
  * The Apps page's route (`GET /apps`, `src/apps/`, PRDCT-3493) through the
- * REAL boot of the minimal tool, on both editions:
+ * REAL boot of the minimal tool, on both editions. The suite runs in every
+ * tool against its own host, so the other tools it lists carry invented slugs
+ * (ledger-tool, people-tool) that no real tool has: a real slug would be the
+ * host's own in that tool and read as "this tool" (chassis 1.5.0 named finance
+ * and hiring, and the finance and hiring tools' suites went red on it).
  *
  *  - self-hosted, with an operator's file: a browser session reads the list
  *    (this tool marked current, the account from the file's `account` entry,
@@ -75,13 +79,13 @@ describe('GET /apps on a self-hosted instance with an operator file', () => {
       JSON.stringify([
         { slug: 'account', name: 'Antasphere account', launchUrl: 'https://account.example.com' },
         {
-          slug: 'finance',
-          name: 'Antasphere Finance',
-          launchUrl: 'https://finance.example.com',
+          slug: 'ledger-tool',
+          name: 'Antasphere Ledger Tool',
+          launchUrl: 'https://ledger-tool.example.com',
           ...DESCRIPTOR
         },
         { slug: host.identity.slug, name: 'This Tool', launchUrl: 'https://thistool.example.com' },
-        { slug: 'crm', name: 'Antasphere CRM', launchUrl: 'javascript:alert(1)' }
+        { slug: 'bad-url-tool', name: 'Antasphere Bad URL Tool', launchUrl: 'javascript:alert(1)' }
       ])
     );
     app = await createTestApp(await createDatabase(container, 'apps_route_oss'), { APPS_FILE: appsFile });
@@ -115,7 +119,7 @@ describe('GET /apps on a self-hosted instance with an operator file', () => {
     expect(body.source).toBe('file');
     expect(body.hub).toEqual({ url: 'https://account.example.com/', name: 'Antasphere account' });
     expect(body.apps.map((a: { slug: string; current: boolean }) => [a.slug, a.current])).toEqual([
-      ['finance', false],
+      ['ledger-tool', false],
       [host.identity.slug, true]
     ]);
     expect(body.apps[0].descriptor).toEqual(DESCRIPTOR);
@@ -169,20 +173,20 @@ describe('GET /apps on the cloud edition, against the hub', () => {
     hub = await FakeHub.start({ clientId: host.hubClientId });
     hub.setTools([
       {
-        slug: 'finance',
-        name: 'Antasphere Finance',
-        launchUrl: 'https://finance.example.com',
+        slug: 'ledger-tool',
+        name: 'Antasphere Ledger Tool',
+        launchUrl: 'https://ledger-tool.example.com',
         descriptor: DESCRIPTOR
       },
       {
-        slug: 'hiring',
-        name: 'Antasphere Hiring',
-        launchUrl: 'https://hiring.example.com',
+        slug: 'people-tool',
+        name: 'Antasphere People Tool',
+        launchUrl: 'https://people-tool.example.com',
         descriptor: { icon: 'users' }
       },
       { slug: host.identity.slug, name: 'This Tool', launchUrl: 'https://thistool.example.com' }
     ]);
-    hub.setToolClosed(omar.sub, 'hiring', ORG);
+    hub.setToolClosed(omar.sub, 'people-tool', ORG);
     app = await createTestApp(await createDatabase(container, 'apps_route_cloud'), {
       EDITION: 'cloud',
       HUB_ISSUER_URL: hub.issuer,
@@ -204,8 +208,8 @@ describe('GET /apps on the cloud edition, against the hub', () => {
     expect(body.source).toBe('hub');
     expect(body.hub).toEqual({ url: `${hub.issuer}/`, name: 'Antasphere Account' });
     expect(body.apps.map((a: { slug: string; current: boolean }) => [a.slug, a.current])).toEqual([
-      ['finance', false],
-      ['hiring', false],
+      ['ledger-tool', false],
+      ['people-tool', false],
       [host.identity.slug, true]
     ]);
     expect(body.apps[0].descriptor).toEqual(DESCRIPTOR);
@@ -220,7 +224,7 @@ describe('GET /apps on the cloud edition, against the hub', () => {
     const cookie = await ssoLogin(app, hub, omar);
     const body = await readJson(await send(app, 'GET', '/apps', { cookie }));
     expect(body.source).toBe('hub');
-    expect(body.apps.map((a: { slug: string }) => a.slug)).toEqual(['finance', host.identity.slug]);
+    expect(body.apps.map((a: { slug: string }) => a.slug)).toEqual(['ledger-tool', host.identity.slug]);
   });
 
   it('a person whose organization the hub suspended reads an empty list that says so, never the tools', async () => {
