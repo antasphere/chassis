@@ -948,10 +948,16 @@ export class FakeHub {
       tools
     };
     // The fake answers the hub's published shape and nothing else: a body the
-    // real hub would never send is a test proving nothing, so it is refused here.
+    // real hub would never send is a test proving nothing, so it is refused
+    // here, as a 500 naming the drift (a thrown error would only hang the socket).
     const checked = meAppsSchema.safeParse(body);
     if (!checked.success) {
-      throw new Error(`FakeHub: /me/apps body is off the hub contract: ${checked.error.message}`);
+      return sendJson(res, 500, {
+        error: {
+          code: 'fake_hub_drift',
+          message: `/me/apps body is off the hub contract: ${checked.error.message}`
+        }
+      });
     }
     return sendJson(res, 200, body);
   }

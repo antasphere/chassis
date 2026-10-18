@@ -386,6 +386,14 @@ describe('AppsService on the cloud edition', () => {
     expect(hub.calls).toHaveLength(1);
   });
 
+  it('a suspended organization empties the list even when the body carries no tools', async () => {
+    const body = { organization: { id: ORG, name: 'Acme', status: 'suspended' } };
+    const list = await cloud({ fetchImpl: fakeHub({ body }).impl }).list(principal);
+    expect(list.source).toBe('hub');
+    expect(list.apps).toEqual([]);
+    expect(list.organization).toEqual({ name: 'Acme', status: 'suspended' });
+  });
+
   it('an older hub naming no organization status is read as active', async () => {
     const body = {
       organization: { id: ORG, name: 'Acme' },

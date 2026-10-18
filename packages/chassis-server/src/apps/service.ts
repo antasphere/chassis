@@ -158,15 +158,17 @@ export class AppsService {
       }
       return null;
     }
-    const apps = selectHubApps(res.body, this.opts.selfSlug);
-    if (!apps) {
-      this.opts.logger.warn('hub /me/apps carried no tools list — the Apps page reads the file');
-      return null;
-    }
+    // The organization's status first: a suspended one empties the list
+    // whatever the body's tools say (or fail to say).
     const organization = readOrganization(res.body);
     if (organization?.status === 'suspended') {
       this.opts.logger.info({ hubOrgId }, 'hub organization suspended — the Apps page lists nothing');
       return { apps: [], hub: this.cloudHub(), source: 'hub', organization };
+    }
+    const apps = selectHubApps(res.body, this.opts.selfSlug);
+    if (!apps) {
+      this.opts.logger.warn('hub /me/apps carried no tools list — the Apps page reads the file');
+      return null;
     }
     return { apps, hub: this.cloudHub(), source: 'hub', ...(organization ? { organization } : {}) };
   }

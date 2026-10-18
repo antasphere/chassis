@@ -20,7 +20,10 @@ import { toolDescriptorSchema } from '@antasphere/contract';
  * `organization` is the hub organization the list was asked for (the hub
  * source alone): its name and its status. On `suspended` the hub's contract
  * says a tool's Apps service never serves the list, so `apps` is empty and
- * the dashboard says why instead of showing the operator's empty plate.
+ * the dashboard says why instead of showing the operator's empty plate. The
+ * answer is held five minutes per person like any other, so the plate (and
+ * the list before it) may lag the hub by that much; a tool's door asks the
+ * hub live, never this list.
  *
  * Every URL is an http(s) URL the server checked before serving it, and the
  * descriptor is the hub's registry descriptor (or the file's, validated the
