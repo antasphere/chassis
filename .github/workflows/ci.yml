@@ -1,17 +1,24 @@
 name: CI
 
+# One run per change (PRDCT-3592): every job on a pull request; a push to main runs
+# the checks alone, the guard that the squash is sane; a release bump
+# (`chore(release): …`, the commit `pnpm release` makes) runs nothing here, since
+# release.yml publishes from the tag it carries; a manual run proves everything.
+
 on:
   push:
     # The chassis has one branch, main.
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   checks:
+    if: ${{ !(github.event_name == 'push' && startsWith(github.event.head_commit.message, 'chore(release)')) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,6 +46,7 @@ jobs:
   # The chassis-server integration suite starts a real Postgres through
   # testcontainers; Docker is on the ubuntu-latest runner, nothing to set up.
   integration:
+    if: ${{ github.event_name != 'push' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
