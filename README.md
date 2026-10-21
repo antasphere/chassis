@@ -49,7 +49,7 @@ publisher of each package names this repository and `release.yml`, so the file k
 
 ## Consuming
 
-The tool template (`antasphere/tool-template`) is the worked example: its `CLAUDE.md`, "The chassis
+The tool template (`antasphere/tool-template`) is the worked example: its `AGENTS.md`, "The chassis
 is a dependency", says how a tool installs, upgrades and contributes. In short:
 
 - Every package that depends on the chassis declares the same exact version (`"1.2.0"`, never a range).
