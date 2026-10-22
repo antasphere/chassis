@@ -113,7 +113,7 @@ afterAll(async () => {
   await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
 });
 
-describe('the fleet is read at boot', () => {
+describe.skipIf(!host.webhooks)('the fleet is read at boot', () => {
   it('the boot read the hub once, with no credential, and holds the registry origins', () => {
     expect(hub.toolOriginsRequests).toHaveLength(1);
     expect(hub.toolOriginsRequests[0]!.auth).toBeNull();
@@ -124,7 +124,7 @@ describe('the fleet is read at boot', () => {
   });
 });
 
-describe('a webhook on a sibling of the same hub', () => {
+describe.skipIf(!host.webhooks)('a webhook on a sibling of the same hub', () => {
   let endpointId = '';
 
   it('is accepted at registration on the cloud edition although it is http on a port', async () => {
@@ -173,7 +173,7 @@ describe('a webhook on a sibling of the same hub', () => {
   });
 });
 
-describe('the list follows the hub', () => {
+describe.skipIf(!host.webhooks)('the list follows the hub', () => {
   it('an origin the hub adds passes after a refresh, and not before', async () => {
     const late = `http://late.stack.localhost:${siblingPort}`;
     const refused = await send('POST', '/webhooks', { url: `${late}/hook`, events: ['thing.*'] });
@@ -221,7 +221,7 @@ describe('the list follows the hub', () => {
   });
 });
 
-describe('a boot with the hub down', () => {
+describe.skipIf(!host.webhooks)('a boot with the hub down', () => {
   it('opens nothing, then takes the list at the first refresh that answers', async () => {
     hub.toolOriginsMode = 'network';
     const cold = await createTestApp(await createDatabase(container, 'webhooks_fleet_cold'), cloudEnv(), {
@@ -247,7 +247,7 @@ describe('a boot with the hub down', () => {
   });
 });
 
-describe('an oss boot', () => {
+describe.skipIf(!host.webhooks)('an oss boot', () => {
   it('has no fleet', async () => {
     const oss = await createTestApp(await createDatabase(container, 'webhooks_fleet_oss'));
     try {

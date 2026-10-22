@@ -5,6 +5,7 @@ import type { ChassisTestHost } from '@antasphere/chassis-server/testing';
 import { THINGS_IDENTITY } from './identity.js';
 import {
   connectionDeliveriesSeen,
+  connectionFieldsSeen,
   MIGRATIONS_FIXTURE,
   minimalTool,
   THINGS_ROUTE,
@@ -34,5 +35,5 @@ export const host: ChassisTestHost<HostBootResult, HostBootOverrides> = {
   scopes: THINGS_SCOPES,
   probeRoute: THINGS_ROUTE,
   webhooks: true,
-  connections: { seen: connectionDeliveriesSeen }
+  connections: { seen: connectionDeliveriesSeen, fieldsSeen: connectionFieldsSeen }
 };

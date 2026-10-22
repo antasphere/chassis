@@ -146,8 +146,8 @@ function fmtValue(v: ConnectionFieldValue | undefined): string {
 }
 
 function secretState(c: Connection): string {
-  if (!c.secret.set) return 'missing';
-  return c.secret.readable ? 'set' : 'UNREADABLE';
+  if (!c.secretState.set) return 'missing';
+  return c.secretState.readable ? 'set' : 'UNREADABLE';
 }
 
 function lastDeliveryText(c: Connection): string {
@@ -172,10 +172,10 @@ function connectionLine(c: Connection): string {
 /** One source, as the human sees it. */
 function connectionLines(c: Connection): string {
   const d = c.declared;
-  const secret = !c.secret.set
+  const secret = !c.secretState.set
     ? 'missing'
-    : c.secret.readable
-      ? `set${c.secret.setAt ? ` ${c.secret.setAt}` : ''}${fmtBy(c.secret.setBy)}`
+    : c.secretState.readable
+      ? `set${c.secretState.setAt ? ` ${c.secretState.setAt}` : ''}${fmtBy(c.secretState.setBy)}`
       : 'UNREADABLE (the instance can no longer open it: set it again)';
   return (
     `${c.name} (${c.source}) · ${c.kind} · ${c.connected ? 'connected' : 'not connected'}\n` +
@@ -183,7 +183,7 @@ function connectionLines(c: Connection): string {
     (d.verifier ? `  verifier:      ${d.verifier}\n` : '') +
     (d.events.length > 0 ? `  events:        ${d.events.join(', ')}\n` : '') +
     (c.kind !== 'key'
-      ? `  url:           ${c.url ? `made ${c.url.madeAt}${fmtBy(c.url.madeBy)}` : 'not made'}\n`
+      ? `  url:           ${c.receiving ? `made ${c.receiving.madeAt}${fmtBy(c.receiving.madeBy)}` : 'not made'}\n`
       : '') +
     `  secret:        ${secret}\n` +
     d.fields.map((f) => `  ${f.label}: ${fmtValue(c.fields[f.key])}\n`).join('') +
@@ -286,7 +286,7 @@ export function registerConnectionCommands<TClient extends ChassisClient<string>
         const current = await explained(identity, 'connection', () => ctx.client.connection(source), {
           read: true
         });
-        if (current.url !== null) {
+        if (current.receiving !== null) {
           throw new CliUsageError(
             `${current.name} already has a receiving URL. Pass --rotate to make a new one: the old URL stops working at once.`
           );
@@ -300,7 +300,7 @@ export function registerConnectionCommands<TClient extends ChassisClient<string>
         (opts.rotate ? 'The previous receiving URL no longer works.\n' : '') +
           `The receiving URL of ${c.name} is shown this once, never again: only its fingerprint is kept.\n` +
           `Give it to ${c.name} as the address it posts to.\n` +
-          (c.secret.set && c.secret.readable
+          (c.secretState.set && c.secretState.readable
             ? 'The secret stays as it was.\n'
             : `Then set the secret: \`${identity.bin} connections secret ${c.source} --stdin\`.\n`)
       );

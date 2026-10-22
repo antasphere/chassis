@@ -150,8 +150,8 @@ describe.skipIf(!host.connections)('connections (PRDCT-3773)', () => {
         name: 'Partner',
         kind: 'inbound',
         connected: false,
-        url: null,
-        secret: { set: false, readable: false, setAt: null, setBy: null },
+        receiving: null,
+        secretState: { set: false, readable: false, setAt: null, setBy: null },
         fields: {},
         lastDelivery: null,
         check: null,
@@ -188,7 +188,7 @@ describe.skipIf(!host.connections)('connections (PRDCT-3773)', () => {
       partnerUrl = made.receivingUrl;
       expect(made.connection).toMatchObject({
         connected: false,
-        url: { madeBy: { email: 'admin@example.com' } }
+        receiving: { madeBy: { email: 'admin@example.com' } }
       });
       const [row] = await app.db.db
         .select()
@@ -223,7 +223,7 @@ describe.skipIf(!host.connections)('connections (PRDCT-3773)', () => {
       const c = await readJson(res);
       expect(c).toMatchObject({
         connected: true,
-        secret: { set: true, readable: true, setBy: { email: OWNER.email } }
+        secretState: { set: true, readable: true, setBy: { email: OWNER.email } }
       });
       expect(JSON.stringify(c)).not.toContain(partnerSecret);
       const [row] = await app.db.db
@@ -359,7 +359,7 @@ describe.skipIf(!host.connections)('connections (PRDCT-3773)', () => {
         body
       );
       expect(ok.status).toBe(200);
-      expect(made.connection.secret.set).toBe(true);
+      expect(made.connection.secretState.set).toBe(true);
     });
   });
 
@@ -408,14 +408,16 @@ describe.skipIf(!host.connections)('connections (PRDCT-3773)', () => {
         502,
         'source_unavailable'
       );
-      expect((await readJson(await send('GET', '/connections/vault', actors.admin!))).secret.set).toBe(false);
+      expect((await readJson(await send('GET', '/connections/vault', actors.admin!))).secretState.set).toBe(
+        false
+      );
       const res = await send('PUT', '/connections/vault/secret', actors.admin!, { secret: 'vk_good' });
       expect(res.status).toBe(200);
       const c = await readJson(res);
       expect(c).toMatchObject({
         connected: true,
-        url: null,
-        secret: { set: true, readable: true },
+        receiving: null,
+        secretState: { set: true, readable: true },
         fields: { folder: 'root' },
         check: { ok: true, detail: 'Vault answered' }
       });
@@ -457,7 +459,7 @@ describe.skipIf(!host.connections)('connections (PRDCT-3773)', () => {
         sql`UPDATE connections SET secret_sealed = ${legacy} WHERE workspace_id = ${workspaceId} AND source = 'vault'`
       );
       const before = await readJson(await send('GET', '/connections/vault', actors.member!));
-      expect(before.secret).toMatchObject({ set: true, readable: true });
+      expect(before.secretState).toMatchObject({ set: true, readable: true });
       // the tool's own read: opens through the hook and heals the row
       expect(await app.connections.secretOf(workspaceId, 'vault')).toBe('vk_good');
       const [row] = await app.db.db.select().from(connections).where(eq(connections.source, 'vault'));
@@ -465,9 +467,9 @@ describe.skipIf(!host.connections)('connections (PRDCT-3773)', () => {
       expect(await app.connections.secretOf(workspaceId, 'vault')).toBe('vk_good');
       // a value the hook does not open stays unreadable
       await app.db.db.execute(sql`UPDATE connections SET secret_sealed = 'garbage' WHERE source = 'vault'`);
-      expect((await readJson(await send('GET', '/connections/vault', actors.member!))).secret.readable).toBe(
-        false
-      );
+      expect(
+        (await readJson(await send('GET', '/connections/vault', actors.member!))).secretState.readable
+      ).toBe(false);
       expect(await app.connections.secretOf(workspaceId, 'vault')).toBeNull();
       expect(
         (await send('PUT', '/connections/vault/secret', actors.admin!, { secret: 'vk_good' })).status
@@ -483,6 +485,15 @@ describe.skipIf(!host.connections)('connections (PRDCT-3773)', () => {
         folder: 'invoices',
         labels: ['x']
       });
+      expect((host.connections?.fieldsSeen ?? []).at(-1)?.fields).toMatchObject({ labels: ['x'] });
+      // the state as the tool reads it, never the key
+      const state = await app.connections.get(workspaceId, 'vault');
+      expect(state).toMatchObject({
+        source: 'vault',
+        connected: true,
+        secretState: { set: true, readable: true, setBy: { email: 'admin@example.com' } }
+      });
+      expect(JSON.stringify(state)).not.toContain('vk_good');
       expect(await app.connections.secretOf(workspaceId, 'nowhere').catch((e: Error) => e.message)).toBe(
         'No such connection source'
       );
@@ -604,8 +615,8 @@ describe.skipIf(!host.connections)('connections (PRDCT-3773)', () => {
       expect(await readJson(res)).toMatchObject({
         source: 'partner',
         connected: false,
-        url: null,
-        secret: { set: false },
+        receiving: null,
+        secretState: { set: false },
         lastDelivery: null
       });
       const log = await readJson(await send('GET', '/connections/partner/deliveries', actors.admin!));

@@ -81,6 +81,7 @@ export type {
   ConnectionDeliveryContext,
   ConnectionDeliveryResult,
   ConnectionFieldDeclaration,
+  ConnectionFieldsChangedContext,
   ConnectionProbeContext,
   ConnectionProbeResult,
   ConnectionSourceDeclaration,

@@ -210,6 +210,7 @@ export class ConnectionService<TDomain = unknown> {
     } else {
       await this.deps.db.insert(connections).values({ workspaceId, source: key, fields });
     }
+    await this.fieldsChanged(source, workspaceId, fields);
     return fields;
   }
 
@@ -355,7 +356,28 @@ export class ConnectionService<TDomain = unknown> {
       .update(connections)
       .set({ fields, updatedAt: this.now() })
       .where(eq(connections.id, existing.id));
+    await this.fieldsChanged(source, actor.workspaceId, fields);
     return this.get(actor.workspaceId, key);
+  }
+
+  /** The tool's hook after a change of the stored fields; a hook that throws is logged and the change stands. */
+  private async fieldsChanged(
+    source: ConnectionSourceDeclaration<TDomain>,
+    workspaceId: string,
+    fields: ConnectionFields
+  ): Promise<void> {
+    if (!source.onFieldsChanged) return;
+    try {
+      await source.onFieldsChanged({
+        workspaceId,
+        source: source.key,
+        fields,
+        logger: this.deps.logger,
+        tool: this.deps.getTool
+      });
+    } catch (e) {
+      this.deps.logger.warn({ err: e, source: source.key }, 'connections: the fields hook threw');
+    }
   }
 
   /** The row and its deliveries are gone; the declared source stays on the page, disconnected. */
@@ -712,8 +734,8 @@ export class ConnectionService<TDomain = unknown> {
       kind: source.kind,
       declared: declaredToWire(source),
       connected: set && (source.kind === 'key' || url !== null),
-      url,
-      secret: {
+      receiving: url,
+      secretState: {
         set,
         readable,
         setAt: row?.secretSetAt ? iso(row.secretSetAt) : null,

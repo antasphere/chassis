@@ -104,7 +104,7 @@ export function registerConnectionTools(
       description:
         `List every connection source this instance declares, with its state in the organization. ${WHAT_IS} ${WHO} ` +
         'Returns { connections: [{ source, name, kind, declared: { description, verifier, events, secretHint, fields, sibling }, ' +
-        'connected, url: { madeAt, madeBy } | null, secret: { set, readable, setAt, setBy }, fields, lastDelivery, check, sibling }] } ' +
+        'connected, receiving: { madeAt, madeBy } | null, secretState: { set, readable, setAt, setBy }, fields, lastDelivery, check, sibling }] } ' +
         '— never a secret, never a receiving URL. `kind` is `inbound` (the source posts here), `key` (a key this instance holds) or `both`.',
       inputSchema: { workspace: workspaceInput },
       annotations: { readOnlyHint: true }

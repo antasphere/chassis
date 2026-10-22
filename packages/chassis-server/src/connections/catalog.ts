@@ -88,6 +88,15 @@ export interface ConnectionProbeContext<TDomain = unknown> {
   tool: () => TDomain | null;
 }
 
+/** What `onFieldsChanged` receives: the fields as stored after the change. */
+export interface ConnectionFieldsChangedContext<TDomain = unknown> {
+  workspaceId: string;
+  source: string;
+  fields: ConnectionFields;
+  logger: Logger;
+  tool: () => TDomain | null;
+}
+
 /** What a probe answers: whether the source accepted the key, what it said, and fields it learned (a team's name). */
 export interface ConnectionProbeResult {
   ok: boolean;
@@ -118,6 +127,13 @@ export interface ConnectionSourceDeclaration<TDomain = unknown> {
     ((ctx: ConnectionDeliveryContext<TDomain>) => Promise<ConnectionDeliveryResult | void>) | undefined;
   /** How a key is checked against the source, at set and at test; absent, a key is stored unchecked. */
   probe?: ((ctx: ConnectionProbeContext<TDomain>) => Promise<ConnectionProbeResult>) | undefined;
+  /**
+   * Called after the stored fields changed through the page, the CLI, an
+   * agent or the tool itself (a folder picked anew, inboxes chosen), with the
+   * fields as stored: what the tool resets or re-reads when they do (a
+   * sync's resume point). Not called when a probe fills fields at a key's set.
+   */
+  onFieldsChanged?: ((ctx: ConnectionFieldsChangedContext<TDomain>) => Promise<void>) | undefined;
   /** The source is a sibling tool of the same hub (PRDCT-3774): its registry slug and the events to subscribe. */
   sibling?: { toolSlug: string; events: readonly string[] } | undefined;
   /**

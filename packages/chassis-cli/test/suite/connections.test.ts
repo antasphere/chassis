@@ -80,8 +80,8 @@ const MEET = {
     sibling: null
   },
   connected: true,
-  url: { madeAt: '2026-10-01T10:00:00.000Z', madeBy: MEMBER },
-  secret: { set: true, readable: true, setAt: '2026-10-01T10:05:00.000Z', setBy: MEMBER },
+  receiving: { madeAt: '2026-10-01T10:00:00.000Z', madeBy: MEMBER },
+  secretState: { set: true, readable: true, setAt: '2026-10-01T10:05:00.000Z', setBy: MEMBER },
   fields: { calendar: 'team', rooms: ['a', 'b'] },
   connectedAt: '2026-10-01T10:00:00.000Z',
   connectedBy: MEMBER,
@@ -93,8 +93,8 @@ const MEET = {
 const FRESH = {
   ...MEET,
   connected: false,
-  url: null,
-  secret: { set: false, readable: false, setAt: null, setBy: null },
+  receiving: null,
+  secretState: { set: false, readable: false, setAt: null, setBy: null },
   fields: {},
   connectedAt: null,
   connectedBy: null,
@@ -109,7 +109,7 @@ const LEMLIST = {
   kind: 'key',
   declared: { ...MEET.declared, verifier: null, events: [], fields: [] },
   connected: true,
-  secret: { set: true, readable: false, setAt: '2026-10-01T10:00:00.000Z', setBy: MEMBER },
+  secretState: { set: true, readable: false, setAt: '2026-10-01T10:00:00.000Z', setBy: MEMBER },
   check: { at: '2026-10-02T09:00:00.000Z', ok: false, detail: 'the key was refused' }
 };
 
@@ -186,7 +186,7 @@ describe(`${bin} connections`, () => {
   it('connect reads the source, then makes the URL and prints it alone on stdout, the notes on stderr', async () => {
     const h = harness([
       { body: FRESH },
-      { body: { connection: { ...FRESH, url: MEET.url }, receivingUrl: RECEIVING_URL } }
+      { body: { connection: { ...FRESH, receiving: MEET.receiving }, receivingUrl: RECEIVING_URL } }
     ]);
     expect(await run(['connections', 'connect', 'meet', ...WIRED], h.io)).toBe(0);
     expect(h.calls).toEqual([
