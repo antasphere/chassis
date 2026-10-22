@@ -623,7 +623,7 @@ export class ConnectionService<TDomain = unknown> {
       this.deps.logger.warn({ err: e, source: key, type }, 'connections: a delivery handler failed');
       // Recorded outside the rolled-back transaction: the log shows the failure, and the sender's retry runs again.
       const now = this.now();
-      await this.deps.db
+      const [after] = await this.deps.db
         .insert(connectionDeliveries)
         .values({
           connectionId: row.id,
@@ -643,7 +643,12 @@ export class ConnectionService<TDomain = unknown> {
           set: { outcome: 'failed', error: failure, receivedAt: now },
           // A retry that landed meanwhile keeps its `processed`: a late failure never overwrites it.
           setWhere: sql`${connectionDeliveries.outcome} <> 'processed'`
-        });
+        })
+        .returning({ outcome: connectionDeliveries.outcome });
+      if (after?.outcome === 'processed') {
+        // Another retry won the race and the row is processed: this one was a repeat after all, and the card says so.
+        return { status: 200, body: { ok: true, duplicate: true } };
+      }
       await this.deps.db
         .update(connections)
         .set({ lastDeliveryAt: now, lastDeliveryType: type, lastDeliveryOutcome: 'failed', updatedAt: now })

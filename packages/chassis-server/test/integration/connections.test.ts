@@ -574,7 +574,7 @@ describe.skipIf(!host.connections)('connections (PRDCT-3773)', () => {
       const writeKey = await mintKey(actors.admin!.cookie, [host.scopes.read, host.scopes.write]);
       const manageKey = await mintKey(actors.admin!.cookie, [host.scopes.read, WEBHOOKS_SCOPE]);
       expect((await send('GET', '/connections', { key: readKey })).status).toBe(200);
-      // the log is a read: the read scope opens it, the handler's role rule still applies (an admin's key here)
+      // the log is a read: the read scope opens it, every member but a guest (an admin's key here)
       expect((await send('GET', '/connections/partner/deliveries', { key: readKey })).status).toBe(200);
       // the log is every member's read, like the list
       expect((await send('GET', '/connections/partner/deliveries', actors.member!)).status).toBe(200);

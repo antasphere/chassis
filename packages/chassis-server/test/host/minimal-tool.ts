@@ -144,9 +144,13 @@ export const minimalTool: ToolDefinition<NoEnv, NoDomain> = {
           });
           if (delivery.type === 'thing.explode') throw new Error('the handler exploded');
           // Fails the first time an id is seen, succeeds after (the retry of a transient failure).
-          if (delivery.type === 'thing.flaky' && !flakySeen.has(delivery.id)) {
-            flakySeen.add(delivery.id);
-            throw new Error('the handler failed once');
+          if (delivery.type === 'thing.flaky') {
+            if (!flakySeen.has(delivery.id)) {
+              flakySeen.add(delivery.id);
+              throw new Error('the handler failed once');
+            }
+            // The retry holds inside the transaction, so two retries at once overlap on the row's lock.
+            await new Promise((r) => setTimeout(r, 300));
           }
           return { detail: `took ${delivery.type}` };
         }
