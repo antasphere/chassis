@@ -52,7 +52,7 @@ import { createOtel } from './observability/index.js';
 import { bindEditionSeams } from './platform/index.js';
 import { AllowAllEntitlements } from './platform/index.js';
 import { EventBus } from './platform/index.js';
-import { buildWebhookCatalog, WebhookService, webhookJobs } from './webhooks/index.js';
+import { buildWebhookCatalog, FleetOrigins, WebhookService, webhookJobs } from './webhooks/index.js';
 import { bindMembershipRemoval } from './members/removal.js';
 import { LocalIdentityProvider } from './platform/index.js';
 import { createRegistry } from './platform/index.js';
@@ -547,13 +547,28 @@ export async function bootPlatform<
   // own) and attached to it right after; a tool's `services` slot receives
   // the emitter, the API app the service, the bus the chassis's own events.
   const webhookCatalog = buildWebhookCatalog(tool.webhooks);
+  // The fleet (PRDCT-3772): the origins of the hub's registry tools, read
+  // once here (bounded, never fatal: a hub that does not answer leaves the
+  // list empty and opens nothing) and refreshed hourly; the policy reads the
+  // live list, so the guard never holds a stale copy. An oss boot has none.
+  const fleetOrigins = hub
+    ? new FleetOrigins({ issuerUrl: hub.issuerUrl, logger, dials: overrides.fleetOriginsDials })
+    : null;
+  if (fleetOrigins) {
+    await fleetOrigins.refresh();
+    fleetOrigins.start({ isDraining: () => state.draining });
+  }
   const webhooks = new WebhookService({
     db: db.db,
     logger,
     authSecret,
     identity: tool.identity,
     version: tool.runtime.version,
-    policy: { allowPrivateNetworks: env.WEBHOOKS_ALLOW_PRIVATE_NETWORKS, httpsOnly: env.EDITION === 'cloud' },
+    policy: {
+      allowPrivateNetworks: env.WEBHOOKS_ALLOW_PRIVATE_NETWORKS,
+      httpsOnly: env.EDITION === 'cloud',
+      ...(fleetOrigins ? { fleetOrigins: () => fleetOrigins.get() } : {})
+    },
     email,
     brand: { name: tool.identity.displayName, tagline: tool.copy.mail.tagline },
     publicBaseUrl: env.PUBLIC_BASE_URL,
@@ -1000,6 +1015,7 @@ export async function bootPlatform<
     otel,
     authSecret,
     webhooks,
+    fleetOrigins,
     tool: domain
   };
 }

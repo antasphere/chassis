@@ -13,7 +13,15 @@ export {
 } from './catalog.js';
 export { endpointWants, matchesEventType, matchesFilters } from './match.js';
 export {
+  DEFAULT_FLEET_ORIGINS_DIALS,
+  FleetOrigins,
+  type FleetOriginsDials,
+  type FleetOriginsOptions,
+  type FleetOriginsRead
+} from './fleet-origins.js';
+export {
   checkWebhookUrl,
+  isFleetOrigin,
   isPublicAddress,
   safePost,
   WebhookUrlRefusedError,
