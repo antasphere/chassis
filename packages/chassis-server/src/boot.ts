@@ -53,6 +53,12 @@ import { bindEditionSeams } from './platform/index.js';
 import { AllowAllEntitlements } from './platform/index.js';
 import { EventBus } from './platform/index.js';
 import { buildWebhookCatalog, FleetOrigins, WebhookService, webhookJobs } from './webhooks/index.js';
+import {
+  buildConnectionCatalog,
+  connectionDoor,
+  connectionJobs,
+  ConnectionService
+} from './connections/index.js';
 import { bindMembershipRemoval } from './members/removal.js';
 import { LocalIdentityProvider } from './platform/index.js';
 import { createRegistry } from './platform/index.js';
@@ -696,6 +702,18 @@ export async function bootPlatform<
   // The usage queue's retry budget and its hold (PRDCT-2635): stated once,
   // shared by the sink that sends and the held queue that re-drives.
   const usageRetry: UsageRetry = { ...DEFAULT_USAGE_RETRY, ...overrides.usageRetry };
+  // The connections (PRDCT-3773): the tool's declared sources checked once,
+  // the service built before the job runtime (its purge joins the queues)
+  // and before the services slot (a handler reads the domain lazily).
+  const connectionCatalog = buildConnectionCatalog(tool.connections);
+  const connections = new ConnectionService<TDomain>({
+    db: db.db,
+    logger,
+    authSecret,
+    publicBaseUrl: env.PUBLIC_BASE_URL,
+    catalog: connectionCatalog,
+    getTool: () => domainRef.current
+  });
   const jobs = await createJobs(
     env,
     db.db,
@@ -706,6 +724,7 @@ export async function bootPlatform<
     audit,
     [
       ...webhookJobs(webhooks, logger, env.WEBHOOK_DELIVERY_RETENTION_DAYS),
+      ...connectionJobs(connections, logger, env.WEBHOOK_DELIVERY_RETENTION_DAYS),
       ...(tool.jobs?.({ env, db: db.db, logger, getTool: () => domainRef.current }) ?? [])
     ],
     usageRetry
@@ -854,6 +873,13 @@ export async function bootPlatform<
     authSecret,
     timers: jobs.timers,
     webhooks,
+    connections: {
+      secret: (workspaceId, source) => connections.secretOf(workspaceId, source),
+      fields: (workspaceId, source) => connections.fieldsOf(workspaceId, source),
+      setFields: (workspaceId, source, patch) => connections.setFieldsOf(workspaceId, source, patch),
+      recordCheck: (workspaceId, source, ok, detail) =>
+        connections.recordCheck(workspaceId, source, ok, detail)
+    },
     overrides: overrides.tool
   };
   const domain = tool.services(serviceCore);
@@ -898,6 +924,7 @@ export async function bootPlatform<
     entitlements,
     entitlementCloud,
     webhooks,
+    connections,
     // Cloud only (PRDCT-2443): POST /workspaces creates the organization at
     // the hub AS THE CALLER, then forces their reconcile. undefined on oss —
     // the route creates locally there.
@@ -961,7 +988,7 @@ export async function bootPlatform<
     resolveApiKey: (token) => apiKeys.resolve(token, null),
     isApiKeyToken: apiKeys.isToken,
     limiter: rateLimit(limiters.mcp, makeClientIp(env.TRUST_PROXY)),
-    tool: tool.mcp,
+    tool: { ...tool.mcp, hasConnections: connectionCatalog.sources.size > 0 },
     identity: tool.identity.mcp,
     instanceName: async () => {
       if (cachedName) return cachedName;
@@ -980,6 +1007,11 @@ export async function bootPlatform<
     mcp,
     wellKnown: wellKnownRoutes({ auth, publicBaseUrl: env.PUBLIC_BASE_URL, oauthScopes: tool.scopes.oauth }),
     publicRoutes,
+    // The connections door (PRDCT-3773): only when the tool declares a source that takes deliveries.
+    connectionDoor:
+      connectionCatalog.sources.size > 0
+        ? connectionDoor(connections, rateLimit(limiters.connectionDoor, makeClientIp(env.TRUST_PROXY)))
+        : undefined,
     metricsMiddleware: metrics.middleware,
     metricsRoutes: metrics.routes(env.METRICS_TOKEN),
     otelMiddleware: otel.middleware,
@@ -1016,6 +1048,7 @@ export async function bootPlatform<
     authSecret,
     webhooks,
     fleetOrigins,
+    connections,
     tool: domain
   };
 }

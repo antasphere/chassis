@@ -71,6 +71,8 @@ export interface RateLimiters {
    * audience it would cap. Mounted only while DEMO_SIGN_IN is on.
    */
   demoRedeem: RateLimiterAbstract;
+  /** The connections door `POST /hooks/*` (PRDCT-3773): public, the signature is the credential, so a wall per address. */
+  connectionDoor: RateLimiterAbstract;
   /**
    * Shared factory riding the same backend (Redis when REDIS_URL is set,
    * memory otherwise) for buckets sized at runtime — the per-principal
@@ -139,7 +141,8 @@ export async function createRateLimiters<TBucket extends string = never>(
     workspaceCreate: make('ws-create', WORKSPACE_CREATE_PER_PERSON, 60 * 60),
     workspaceCreateAddress: make('ws-create-ip', WORKSPACE_CREATE_PER_PERSON * 10, 60 * 60),
     openapiDoc: make('openapi', 60, 60),
-    demoRedeem: make('demo-redeem', 20, 15 * 60)
+    demoRedeem: make('demo-redeem', 20, 15 * 60),
+    connectionDoor: make('conn-door', 600, 60)
   } satisfies Omit<RateLimiters, 'make'>;
   // The tool's buckets are built after the chassis ones, in declaration order.
   const tool = {} as Record<TBucket, RateLimiterAbstract>;

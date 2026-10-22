@@ -68,6 +68,13 @@ import type {
   WebhooksList,
   WebhookSecretRotated,
   WebhookTestResult,
+  Connection,
+  ConnectionDeliveriesList,
+  ConnectionFieldsUpdate,
+  ConnectionSecret,
+  ConnectionsList,
+  ConnectionTestResult,
+  ConnectionUrlMade,
   WorkspaceCreated,
   WorkspaceLook,
   WorkspaceRole,
@@ -716,6 +723,56 @@ export class ChassisClient<TScope extends string> {
     return this.request(
       'GET',
       `/webhooks/${encodeURIComponent(id)}/deliveries/${encodeURIComponent(deliveryId)}`
+    );
+  }
+
+  // ── Connections ───────────────────────────────────────────────────────────
+  // Every inbound webhook source and outbound key the tool declares, with its
+  // state in the workspace (PRDCT-3773). The reads are every non-guest
+  // member's; the writes an owner's or an admin's, and for a machine
+  // credential under the tool's webhooks scope. No answer carries a secret;
+  // the receiving URL is answered once, by `connectSource`.
+
+  connections(): Promise<ConnectionsList> {
+    return this.request('GET', '/connections');
+  }
+
+  connection(source: string): Promise<Connection> {
+    return this.request('GET', `/connections/${encodeURIComponent(source)}`);
+  }
+
+  /** Makes or rotates the receiving URL of an inbound source: answered this once. */
+  connectSource(source: string, opts: IdempotentRequestOptions = {}): Promise<ConnectionUrlMade> {
+    return this.request(
+      'POST',
+      `/connections/${encodeURIComponent(source)}`,
+      undefined,
+      idempotencyHeader(opts)
+    );
+  }
+
+  /** Stores the source's secret or key, sealed; a key source is probed first. */
+  setConnectionSecret(source: string, req: ConnectionSecret): Promise<Connection> {
+    return this.request('PUT', `/connections/${encodeURIComponent(source)}/secret`, req);
+  }
+
+  setConnectionFields(source: string, req: ConnectionFieldsUpdate): Promise<Connection> {
+    return this.request('PATCH', `/connections/${encodeURIComponent(source)}`, req);
+  }
+
+  testConnection(source: string): Promise<ConnectionTestResult> {
+    return this.request('POST', `/connections/${encodeURIComponent(source)}/test`);
+  }
+
+  disconnectSource(source: string): Promise<Connection> {
+    return this.request('DELETE', `/connections/${encodeURIComponent(source)}`);
+  }
+
+  /** The deliveries the door took for a source, newest first. */
+  connectionDeliveries(source: string, params: ListParams = {}): Promise<ConnectionDeliveriesList> {
+    return this.request(
+      'GET',
+      this.pathWithQuery(`/connections/${encodeURIComponent(source)}/deliveries`, params)
     );
   }
 

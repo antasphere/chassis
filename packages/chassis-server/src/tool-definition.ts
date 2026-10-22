@@ -1,5 +1,5 @@
 import type { Db, DbHandle } from '@antasphere/chassis-db';
-import type { ToolIdentity, UsageDownstream } from '@antasphere/chassis-contract';
+import type { ConnectionFields, ToolIdentity, UsageDownstream } from '@antasphere/chassis-contract';
 import type { OpenAPIHono } from '@hono/zod-openapi';
 import type { Hono, MiddlewareHandler, Context } from 'hono';
 import type { RateLimiterAbstract } from 'rate-limiter-flexible';
@@ -37,6 +37,7 @@ import type {
 } from './webhooks/index.js';
 import type { SafeFetchOptions } from './webhooks/safe-fetch.js';
 import type { FleetOrigins, FleetOriginsDials } from './webhooks/fleet-origins.js';
+import type { ConnectionCatalogDeclaration, ConnectionService } from './connections/index.js';
 import type { PlatformRegistry } from './platform/registry.js';
 import type { RuntimeState } from './state.js';
 import type { StorageDriver } from './storage/driver.js';
@@ -81,8 +82,26 @@ export interface ServiceCore<TEnvShape extends z.ZodRawShape, TEvents, TToolOver
    * no endpoint of the workspace listens.
    */
   webhooks: WebhookEmitter;
+  /**
+   * The tool's own connections (PRDCT-3773): what a sync reads of a source
+   * the tool declared, through the chassis's store and never a table of its
+   * own: the key opened, the stored fields, and a check the tool made itself.
+   */
+  connections: ToolConnections;
   /** The tool's own test seams (`BootOverrides.tool`); undefined in production. */
   overrides: TToolOverrides | undefined;
+}
+
+/** What a tool's services read and record of the connections the chassis stores for it. */
+export interface ToolConnections {
+  /** The source's secret or key, opened; null when none is set or it no longer opens. */
+  secret(workspaceId: string, source: string): Promise<string | null>;
+  /** The stored fields of the source; empty when nothing is connected. */
+  fields(workspaceId: string, source: string): Promise<ConnectionFields>;
+  /** Store declared fields the tool learned or changed (a key absent keeps its value, null clears it). */
+  setFields(workspaceId: string, source: string, patch: ConnectionFields): Promise<ConnectionFields>;
+  /** A check the tool made (a sync's read of the source), kept as the card's last check. */
+  recordCheck(workspaceId: string, source: string, ok: boolean, detail: string): Promise<void>;
 }
 
 /** The same, once the rate limiters exist: what the `publicRoutes` slot receives. */
@@ -352,6 +371,16 @@ export interface ToolDefinition<
    * = the chassis events alone; the routes exist on every instance.
    */
   webhooks?: WebhookCatalogDeclaration;
+  /**
+   * The connections slot (PRDCT-3773): every inbound webhook source the tool
+   * receives from and every key it holds, declared once (a key, a name, a
+   * kind, a verifier, the fields, a handler, a probe). The chassis stores
+   * them, serves Settings › Connections, the `connections` CLI group, the
+   * MCP tools and the door `POST /hooks/<source>/<token>`; what a delivery
+   * means stays the tool's handler, read lazily through `tool()` at request
+   * time. Absent: no source, no door.
+   */
+  connections?: ConnectionCatalogDeclaration<TDomain>;
 }
 
 /**
@@ -448,6 +477,8 @@ export interface BootResult<
   webhooks: WebhookService;
   /** The fleet (PRDCT-3772): the hub's registry origins the delivery guard reads; null on an oss boot. */
   fleetOrigins: FleetOrigins | null;
+  /** The connections (PRDCT-3773): the store, the door's logic and the log, for a suite to drive directly. */
+  connections: ConnectionService<TDomain>;
 }
 
 /**

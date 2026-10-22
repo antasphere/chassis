@@ -110,6 +110,10 @@
       "types": "./dist/webhooks/index.d.ts",
       "default": "./dist/webhooks/index.js"
     },
+    "./connections": {
+      "types": "./dist/connections/index.d.ts",
+      "default": "./dist/connections/index.js"
+    },
     "./apps": {
       "types": "./dist/apps/index.d.ts",
       "default": "./dist/apps/index.js"
