@@ -119,6 +119,20 @@ describe('FleetOrigins', () => {
     expect(reads.every((r) => r.ok)).toBe(true);
   });
 
+  it('a reader started again after a stop reads again', async () => {
+    const { fleet, calls } = reader(() => ({ status: 200, body: GOOD }), {
+      refreshMs: 30,
+      retryMs: 30,
+      timeoutMs: 1000
+    });
+    fleet.start();
+    fleet.stop();
+    fleet.start();
+    await sleep(150);
+    fleet.stop();
+    expect(calls.length).toBeGreaterThan(0);
+  });
+
   it('a stop with a read in flight is final: the read’s continuation re-arms nothing', async () => {
     const { fleet, calls } = reader(() => ({ delayMs: 100, body: GOOD }), {
       refreshMs: 150,
