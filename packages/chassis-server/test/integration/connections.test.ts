@@ -144,7 +144,7 @@ describe.skipIf(!host.connections)('connections (PRDCT-3773)', () => {
       const res = await send('GET', '/connections', actors.member!);
       expect(res.status).toBe(200);
       const { connections: list } = await readJson(res);
-      expect(list.map((c: { source: string }) => c.source)).toEqual(['partner', 'ledger', 'vault']);
+      expect(list.map((c: { source: string }) => c.source)).toEqual(['partner', 'twin', 'ledger', 'vault']);
       expect(list[0]).toMatchObject({
         source: 'partner',
         name: 'Partner',
@@ -162,8 +162,8 @@ describe.skipIf(!host.connections)('connections (PRDCT-3773)', () => {
           secretHint: 'whsec_…'
         }
       });
-      expect(list[1].declared.verifier).toBe('stripe');
-      expect(list[2]).toMatchObject({
+      expect(list[2].declared.verifier).toBe('stripe');
+      expect(list[3]).toMatchObject({
         kind: 'key',
         declared: {
           verifier: null,
@@ -608,6 +608,36 @@ describe.skipIf(!host.connections)('connections (PRDCT-3773)', () => {
       );
       await expectError(await send('PATCH', '/connections/vault', demo, { fields: {} }), 403, 'demo_session');
       await expectError(await send('DELETE', '/connections/vault', demo), 403, 'demo_session');
+      // The sibling connect (PRDCT-3774) is a write of the same family.
+      await expectError(await send('POST', '/connections/twin/sibling', demo), 403, 'demo_session');
+      await expectError(await send('DELETE', '/connections/twin/sibling', demo), 403, 'demo_session');
+    });
+
+    it('18b. off a hub, the sibling connect is not available, and a source without a sibling has none', async () => {
+      // This suite boots the oss edition: no hub, no grant, no fleet, so the sibling connect says so and changes nothing.
+      await expectError(
+        await send('POST', '/connections/twin/sibling', actors.owner!),
+        409,
+        'sibling_unavailable'
+      );
+      await expectError(
+        await send('DELETE', '/connections/twin/sibling', actors.owner!),
+        409,
+        'sibling_unavailable'
+      );
+      await expectError(
+        await send('POST', '/connections/partner/sibling', actors.owner!),
+        409,
+        'not_sibling'
+      );
+      await expectError(await send('POST', '/connections/vault/sibling', actors.owner!), 409, 'not_sibling');
+      await expectError(await send('POST', '/connections/twin/sibling', actors.member!), 403, 'forbidden');
+      const card = await readJson(await send('GET', '/connections/twin', actors.member!));
+      expect(card).toMatchObject({
+        connected: false,
+        sibling: { endpointId: null },
+        declared: { sibling: { toolSlug: 'twin', events: ['thing.created'] } }
+      });
     });
 
     it('19. the deliveries page by cursor, newest first', async () => {
@@ -661,6 +691,7 @@ describe.skipIf(!host.connections)('connections (PRDCT-3773)', () => {
       const list = await readJson(await send('GET', '/connections', actors.member!));
       expect(list.connections.map((c: { source: string }) => c.source)).toEqual([
         'partner',
+        'twin',
         'ledger',
         'vault'
       ]);

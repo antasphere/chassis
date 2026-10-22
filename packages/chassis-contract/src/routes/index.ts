@@ -1369,6 +1369,70 @@ export const connectionDeliveriesRoute = createRoute({
   }
 });
 
+/**
+ * The sibling connect (PRDCT-3774): a source that declares a sibling tool of
+ * the same hub is connected AS THE PERSON, in one call. The instance turns
+ * the person's own hub grant into a two-minute token audienced to the
+ * sibling (`POST /sso/connect-token` on the hub, scope `sso:connect`),
+ * presents it at the sibling's `/sso/cli-connect` for a key of the person
+ * there, registers its receiving URL as a webhook endpoint of the sibling
+ * workspace that projects the same hub organization, stores the returned
+ * signing secret sealed and the endpoint id, and revokes the key. Nothing of
+ * the person outlives the call on the sibling; the person never sees a URL
+ * or a secret. A re-run replaces the endpoint, the URL and the secret.
+ */
+const siblingRefusals = jsonBody(
+  apiErrorSchema,
+  'sibling_unknown (the hub lists no tool of that slug), sibling_scope_missing (the person must sign in again so their grant carries sso:connect), ' +
+    'sibling_grant_missing (the person never opened the sibling: open it once, then retry), sibling_access_denied (the hub does not let this account use the sibling), ' +
+    'sibling_workspace_missing (no workspace of the sibling projects this organization), sibling_refused (the sibling refused the endpoint: its message says why)'
+);
+
+export const connectionSiblingConnectRoute = createRoute({
+  method: 'post',
+  path: '/connections/{source}/sibling',
+  tags: ['connections'],
+  summary:
+    'Connect a sibling tool as the person (owner or admin): the endpoint is registered on the sibling and the secret stored, nothing shown; a re-run replaces them',
+  request: { params: connectionParamsSchema },
+  responses: {
+    200: jsonBody(connectionSchema, 'The connection, with the endpoint registered on the sibling'),
+    400: siblingRefusals,
+    401: jsonBody(apiErrorSchema, 'unauthenticated, or hub_reauth_required (the person must sign in again)'),
+    403: connectionErrors[403],
+    404: connectionErrors[404],
+    409: jsonBody(
+      apiErrorSchema,
+      'not_sibling (the source declares no sibling), not_inbound, or sibling_unavailable (this instance is not on a hub)'
+    ),
+    502: jsonBody(
+      apiErrorSchema,
+      'source_unavailable: the hub or the sibling did not answer; nothing changed'
+    )
+  }
+});
+
+export const connectionSiblingDisconnectRoute = createRoute({
+  method: 'delete',
+  path: '/connections/{source}/sibling',
+  tags: ['connections'],
+  summary:
+    "Disconnect a sibling source as the person (owner or admin): the endpoint is deleted on the sibling, then the connection's secret, URL and log here",
+  request: { params: connectionParamsSchema },
+  responses: {
+    200: jsonBody(connectionSchema, 'The connection, disconnected on both sides'),
+    400: siblingRefusals,
+    401: jsonBody(apiErrorSchema, 'unauthenticated, or hub_reauth_required (the person must sign in again)'),
+    403: connectionErrors[403],
+    404: connectionErrors[404],
+    409: jsonBody(apiErrorSchema, 'not_sibling, or sibling_unavailable (this instance is not on a hub)'),
+    502: jsonBody(
+      apiErrorSchema,
+      'source_unavailable: the hub or the sibling did not answer; nothing changed'
+    )
+  }
+});
+
 export function defineChassisRoutes<TScope extends string>(
   contract: ChassisContract<TScope>,
   identity: Pick<ToolIdentity, 'cliKeyScopesLabel'> & { scopes: Pick<ToolIdentity['scopes'], 'dataExport'> },

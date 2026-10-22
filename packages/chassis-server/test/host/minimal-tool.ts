@@ -156,6 +156,27 @@ export const minimalTool: ToolDefinition<NoEnv, NoDomain> = {
         }
       },
       {
+        // A sibling tool of the same hub (PRDCT-3774): the suite boots a second
+        // instance of this very tool as the sibling the fake hub lists under
+        // the slug `twin`, and connects it as the person.
+        key: 'twin',
+        name: 'Twin',
+        description: 'A sibling tool of this hub whose things are mirrored here.',
+        kind: 'inbound',
+        events: ['thing.created'],
+        secretHint: 'whsec_…',
+        sibling: { toolSlug: 'twin', events: ['thing.created'] },
+        handler: async ({ workspaceId, source, delivery, fields }) => {
+          connectionDeliveriesSeen.push({
+            workspaceId,
+            source,
+            id: delivery.id,
+            type: delivery.type,
+            fields
+          });
+        }
+      },
+      {
         key: 'ledger',
         name: 'Ledger',
         kind: 'inbound',

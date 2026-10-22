@@ -14,7 +14,7 @@ import {
 import type { McpIdentity } from './server.js';
 
 /**
- * The seven CONNECTION tools (PRDCT-3773), registered by the chassis right
+ * The nine CONNECTION tools (PRDCT-3773, PRDCT-3774), registered by the chassis right
  * after the webhook tools and only when the tool declares at least one
  * connection source: a connection is a chassis concept (an inbound webhook
  * source the instance receives from, or a key it holds), so the tools over
@@ -24,6 +24,12 @@ import type { McpIdentity } from './server.js';
  * scope, the writes under the tool's webhooks scope), its owner-or-admin
  * rule and its 404 for an undeclared source apply unchanged. Nothing here
  * names a tool or a source: the sources are the instance's own list.
+ *
+ * The last two connect and disconnect a SIBLING source (PRDCT-3774), another
+ * tool of the same Antasphere hub, as the person behind the credential: this
+ * instance registers its receiving URL on the sibling and stores the signing
+ * secret itself, so nothing is copied and nothing is answered but the
+ * connection.
  */
 
 const WHAT_IS =
@@ -41,7 +47,22 @@ export function connectionErrorHints(toolPrefix: string): ErrorHints {
     source_unavailable: 'The source did not answer the probe. Nothing was stored; try again later.',
     unknown_field:
       'That is not a field this source declares: the keys are in `declared.fields` of the connection.',
-    field_required: 'A required field of this source is missing: the keys are in `declared.fields`.'
+    field_required: 'A required field of this source is missing: the keys are in `declared.fields`.',
+    // The sibling connect (PRDCT-3774).
+    not_sibling: `This source is not a sibling tool: make its receiving URL with ${toolPrefix}connect_source and set its secret with ${toolPrefix}set_connection_secret.`,
+    sibling_unavailable: `This instance is not on a hub; connect the source by hand (${toolPrefix}connect_source, then ${toolPrefix}set_connection_secret).`,
+    sibling_unknown:
+      'The hub lists no tool of that slug: the sibling is not installed on this hub. Nothing changed.',
+    sibling_scope_missing:
+      'The person must sign out and sign in again to this tool so their grant carries the connect scope, then retry.',
+    sibling_grant_missing: 'The person must open the sibling tool once with their account, then retry.',
+    sibling_access_denied:
+      'The hub does not let this person use the sibling tool: an administrator of the hub must give them access, then retry.',
+    sibling_workspace_missing:
+      'No workspace of the sibling tool belongs to this organization: the person must open the sibling in it once, then retry.',
+    sibling_refused:
+      'The sibling tool refused the endpoint (its reason is in the message). Nothing changed here.',
+    hub_reauth_required: 'The person must sign in again, then retry.'
   };
 }
 
@@ -105,7 +126,9 @@ export function registerConnectionTools(
         `List every connection source this instance declares, with its state in the organization. ${WHAT_IS} ${WHO} ` +
         'Returns { connections: [{ source, name, kind, declared: { description, verifier, events, secretHint, fields, sibling }, ' +
         'connected, receiving: { madeAt, madeBy } | null, secretState: { set, readable, setAt, setBy }, fields, lastDelivery, check, sibling }] } ' +
-        '— never a secret, never a receiving URL. `kind` is `inbound` (the source posts here), `key` (a key this instance holds) or `both`.',
+        '— never a secret, never a receiving URL. `kind` is `inbound` (the source posts here), `key` (a key this instance holds) or `both`. ' +
+        '`declared.sibling` is { toolSlug, events } when the source is a sibling tool of the same hub (connected as the person with ' +
+        `${t('connect_sibling')}), and \`sibling\` is then { endpointId }, null until connected.`,
       inputSchema: { workspace: workspaceInput },
       annotations: { readOnlyHint: true }
     },
@@ -191,5 +214,37 @@ export function registerConnectionTools(
     },
     async ({ workspace, source, limit, cursor }) =>
       run(scopes.read, workspace, (c) => callApi(c, pageQuery(at(source, '/deliveries'), { cursor, limit })))
+  );
+
+  server.registerTool(
+    t('connect_sibling'),
+    {
+      description:
+        'Connect a sibling source — another tool of the same Antasphere hub (`declared.sibling` non-null in the list) — AS THE PERSON behind this credential; confirm with the user first. ' +
+        'This instance registers its receiving URL as an endpoint on the sibling and stores the signing secret: nobody copies anything. ' +
+        'A re-run replaces the endpoint, the URL and the secret. ' +
+        `${WHO} Returns the connection (its \`sibling.endpointId\` set) — never a URL, never a secret. ` +
+        'The person must have opened the sibling once and signed in to this tool since it asks the hub for the connect scope. ' +
+        'Refusals: not_sibling (the source is not a sibling: connect it by hand), sibling_unavailable (this instance is not on a hub), ' +
+        'sibling_unknown (the hub lists no such tool), sibling_scope_missing (the person must sign in again), sibling_grant_missing (the person never opened the sibling), ' +
+        'sibling_access_denied (the hub does not let the person use the sibling), sibling_workspace_missing (no workspace of the sibling belongs to this organization), ' +
+        'sibling_refused (the sibling refused the endpoint), hub_reauth_required (the person must sign in again), source_unavailable (the hub or the sibling did not answer; nothing changed).',
+      inputSchema: { workspace: workspaceInput, source: sourceInput }
+    },
+    async ({ workspace, source }) =>
+      run(writeScope, workspace, (c) => callApi(c, at(source, '/sibling'), send('POST')))
+  );
+
+  server.registerTool(
+    t('disconnect_sibling'),
+    {
+      description:
+        'Disconnect a sibling source as the person — confirm with the user first: the endpoint is deleted on the sibling first, then the connection here (its secret, its receiving URL and its delivery log). ' +
+        `${WHO} Returns the connection — never a URL, never a secret. The refusals are those of ${t('connect_sibling')}. ` +
+        `To drop the connection here only and leave the endpoint on the sibling, use ${t('disconnect_source')}.`,
+      inputSchema: { workspace: workspaceInput, source: sourceInput }
+    },
+    async ({ workspace, source }) =>
+      run(writeScope, workspace, (c) => callApi(c, at(source, '/sibling'), send('DELETE')))
   );
 }

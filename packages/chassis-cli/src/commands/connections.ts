@@ -37,7 +37,7 @@ export type ConnectionLookup = 'connection' | 'delivery';
 export function explainConnectionRefusal(
   e: PlatformApiError,
   lookup: ConnectionLookup,
-  identity: Pick<CliIdentity, 'displayName' | 'webhooksScope'>
+  identity: Pick<CliIdentity, 'bin' | 'displayName' | 'webhooksScope'>
 ): string | null {
   switch (e.code) {
     case 'forbidden':
@@ -56,6 +56,21 @@ export function explainConnectionRefusal(
     case 'unknown_field':
     case 'field_required':
     case 'demo_session':
+      return e.message;
+    // The sibling connect (PRDCT-3774).
+    case 'not_sibling':
+      return 'This source is not a sibling tool of this hub: `connections connect` makes its receiving URL and `connections secret` sets its secret.';
+    case 'sibling_unavailable':
+      return 'This instance is not on a hub: connect the source by hand with `connections connect` and `connections secret`.';
+    case 'hub_reauth_required':
+      return `Sign in again (\`${identity.bin} login\`), then retry.`;
+    case 'sibling_unknown':
+    case 'sibling_scope_missing':
+    case 'sibling_grant_missing':
+    case 'sibling_access_denied':
+    case 'sibling_workspace_missing':
+    case 'sibling_refused':
+      // The server's sentence names the sibling and says what to do.
       return e.message;
     case 'insufficient_scope':
     case 'endpoint_not_allowed':
@@ -79,7 +94,7 @@ const SCOPE_CODES = new Set(['insufficient_scope', 'endpoint_not_allowed']);
  * the read scope, which the webhooks wording would get wrong.
  */
 async function explained<T>(
-  identity: Pick<CliIdentity, 'displayName' | 'webhooksScope'>,
+  identity: Pick<CliIdentity, 'bin' | 'displayName' | 'webhooksScope'>,
   lookup: ConnectionLookup,
   run: () => Promise<T>,
   opts: { read?: boolean } = {}
@@ -189,8 +204,12 @@ function connectionLines(c: Connection): string {
     d.fields.map((f) => `  ${f.label}: ${fmtValue(c.fields[f.key])}\n`).join('') +
     `  last delivery: ${c.lastDelivery ? `${lastDeliveryText(c)} (${c.lastDelivery.outcome})` : 'none'}\n` +
     `  last check:    ${c.check ? `${c.check.ok ? 'ok' : 'failed'} at ${fmtWhen(c.check.at)}: ${c.check.detail}` : 'none'}\n` +
-    (c.sibling
-      ? `  sibling:       ${c.sibling.endpointId ? `endpoint ${c.sibling.endpointId}` : 'no endpoint registered yet'}${d.sibling ? ` on ${d.sibling.toolSlug}` : ''}\n`
+    (d.sibling
+      ? `  Sibling: ${d.sibling.toolSlug} — ${
+          c.sibling?.endpointId
+            ? 'endpoint registered'
+            : `not registered yet (connections connect ${c.source} connects it as you)`
+        }\n`
       : '')
   );
 }
@@ -225,6 +244,32 @@ async function readConnectionSecret(
   return value;
 }
 
+/** The sibling connect, or null when this instance is not on a hub (`sibling_unavailable`): the caller takes the manual path. */
+async function connectSiblingOrNull(
+  client: ChassisClient<string>,
+  source: string
+): Promise<Connection | null> {
+  try {
+    return await client.connectSibling(source);
+  } catch (e) {
+    if (e instanceof PlatformApiError && e.code === 'sibling_unavailable') return null;
+    throw e;
+  }
+}
+
+/** The sibling disconnect, or null when this instance is not on a hub: the caller drops the local half. */
+async function disconnectSiblingOrNull(
+  client: ChassisClient<string>,
+  source: string
+): Promise<Connection | null> {
+  try {
+    return await client.disconnectSibling(source);
+  } catch (e) {
+    if (e instanceof PlatformApiError && e.code === 'sibling_unavailable') return null;
+    throw e;
+  }
+}
+
 export function registerConnectionCommands<TClient extends ChassisClient<string>>(
   kit: CliKit<TClient>,
   program: Command,
@@ -243,7 +288,8 @@ export function registerConnectionCommands<TClient extends ChassisClient<string>
       '\nEvery member reads the connections; an owner or an admin changes them.\n' +
         `${scopeLine}\n` +
         'The receiving URL is printed once, by `connect`: give it to the source then.\n' +
-        'The secret is read from --stdin or --secret-file, never from an argument, and never shown.\n'
+        'The secret is read from --stdin or --secret-file, never from an argument, and never shown.\n' +
+        'A source that is a sibling tool of this hub is connected as you by `connect`: nothing to copy.\n'
     );
 
   // ── connections list ──────────────────────────────────────────────────────
@@ -277,20 +323,40 @@ export function registerConnectionCommands<TClient extends ChassisClient<string>
   // ── connections connect ───────────────────────────────────────────────────
   connections
     .command('connect <source>')
-    .description('Make the receiving URL of a source (owner or admin); printed once, alone on stdout')
+    .description(
+      'Make the receiving URL of a source (owner or admin); printed once, alone on stdout. A sibling tool of this hub is connected as you instead: nothing to copy'
+    )
     .option('--rotate', 'replace the current URL: the old one stops working at once', false)
     .action(async (source: string, opts: { rotate: boolean }, cmd: Command) => {
       const ctx = resolveContext(cmd, io);
       await requireApiKey(ctx);
-      if (!opts.rotate) {
-        const current = await explained(identity, 'connection', () => ctx.client.connection(source), {
-          read: true
-        });
-        if (current.receiving !== null) {
-          throw new CliUsageError(
-            `${current.name} already has a receiving URL. Pass --rotate to make a new one: the old URL stops working at once.`
+      const current = await explained(identity, 'connection', () => ctx.client.connection(source), {
+        read: true
+      });
+      if (current.declared.sibling !== null) {
+        // A sibling is connected as the person: its endpoint is registered on
+        // the sibling and the secret stored here, nothing shown. A re-run is
+        // the rotation, with or without --rotate. An instance that is not on
+        // a hub (sibling_unavailable) falls back to the manual path below: the
+        // URL is made here and the person carries it, as for any source.
+        const c = await explained(identity, 'connection', () => connectSiblingOrNull(ctx.client, source));
+        if (c !== null) {
+          if (ctx.json) return printJson(io, c);
+          io.out.write(
+            opts.rotate
+              ? `Reconnected ${c.name} as you: the previous endpoint, URL and secret are replaced.\n`
+              : `Connected ${c.name} as you: its endpoint is registered on ${c.name} and the signing secret is stored here. Nothing to copy.\n`
           );
+          return;
         }
+        io.err.write(
+          `This instance is not on a hub, so ${current.name} is connected by hand: the receiving URL is made here.\n`
+        );
+      }
+      if (!opts.rotate && current.receiving !== null) {
+        throw new CliUsageError(
+          `${current.name} already has a receiving URL. Pass --rotate to make a new one: the old URL stops working at once.`
+        );
       }
       const made = await explained(identity, 'connection', () => ctx.client.connectSource(source));
       if (ctx.json) return printJson(io, made);
@@ -367,16 +433,41 @@ export function registerConnectionCommands<TClient extends ChassisClient<string>
   // ── connections disconnect ────────────────────────────────────────────────
   connections
     .command('disconnect <source>')
-    .description('Disconnect the source (owner or admin): its secret, URL and delivery log are gone')
+    .description(
+      'Disconnect the source (owner or admin): its secret, URL and delivery log are gone; a sibling tool also loses its endpoint there'
+    )
     .option('--yes', 'confirm: the secret, the receiving URL and the delivery log are deleted', false)
-    .action(async (source: string, opts: { yes: boolean }, cmd: Command) => {
+    .option(
+      '--local',
+      'a sibling source: drop the connection here only; the endpoint stays on the sibling',
+      false
+    )
+    .action(async (source: string, opts: { yes: boolean; local: boolean }, cmd: Command) => {
+      // Refused before any request: whether the source is a sibling is not
+      // known yet, so the sentence names both.
       if (!opts.yes) {
         throw new CliUsageError(
-          `Disconnecting ${source} deletes its secret, its receiving URL and its delivery log in this workspace: pass --yes to confirm.`
+          `Disconnecting ${source} deletes its secret, its receiving URL and its delivery log in this workspace` +
+            `${opts.local ? '' : ', and for a sibling tool of this hub its endpoint on the sibling too (--local keeps it there)'}: pass --yes to confirm.`
         );
       }
       const ctx = resolveContext(cmd, io);
       await requireApiKey(ctx);
+      const current = await explained(identity, 'connection', () => ctx.client.connection(source), {
+        read: true
+      });
+      // A source that is not a sibling ignores --local: there is nothing elsewhere to keep.
+      // An instance that is not on a hub has nothing on the sibling either: the local disconnect below.
+      if (current.declared.sibling !== null && !opts.local) {
+        const c = await explained(identity, 'connection', () => disconnectSiblingOrNull(ctx.client, source));
+        if (c !== null) {
+          if (ctx.json) return printJson(io, c);
+          io.out.write(
+            `Disconnected ${c.name} (${c.source}): its endpoint on ${c.name} is deleted, and its secret, URL and log here are gone.\n`
+          );
+          return;
+        }
+      }
       const c = await explained(identity, 'connection', () => ctx.client.disconnectSource(source));
       if (ctx.json) return printJson(io, c);
       io.out.write(

@@ -459,6 +459,8 @@ export interface BootOverrides<TToolOverrides = never> {
   webhookFetch?: SafeFetchOptions | undefined;
   /** Shrinks the fleet origins' refresh, retry and read budget (webhooks/fleet-origins.ts) for the cloud tests. */
   fleetOriginsDials?: Partial<FleetOriginsDials> | undefined;
+  /** The sibling connect's transport to the hub and the sibling (connections/sibling.ts), for a suite that stands in for either. */
+  siblingFetch?: typeof fetch | undefined;
 }
 
 export interface BootResult<

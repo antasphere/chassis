@@ -21,7 +21,7 @@ import {
 } from './email/index.js';
 import { hubConfig, parseEnv } from './env.js';
 import { createAuth, mcpResourceUrl, type AccountEvent } from './identity/index.js';
-import { HubSsoService } from './identity/index.js';
+import { HUB_SSO_CONNECT_SCOPE, HubSsoService } from './identity/index.js';
 import { HubGrantService } from './identity/index.js';
 import { HubLogoutService } from './identity/index.js';
 import { hubApiResource, HubUserClient } from './identity/index.js';
@@ -57,7 +57,8 @@ import {
   buildConnectionCatalog,
   connectionDoor,
   connectionJobs,
-  ConnectionService
+  ConnectionService,
+  SiblingConnector
 } from './connections/index.js';
 import { bindMembershipRemoval } from './members/removal.js';
 import { LocalIdentityProvider } from './platform/index.js';
@@ -347,6 +348,10 @@ export async function bootPlatform<
   // are HUB-audienced and callable at hub /api/v1 as the user. Flipping it
   // to null (if the hub ever accepts opaque tokens) is this one line.
   const hubTokenResource = hub ? hubApiResource(hub.issuerUrl) : null;
+  // The sibling connect scope (PRDCT-3774) is asked of the hub ONLY by a tool
+  // that declares a sibling connection source: a tool without one asks the
+  // hub nothing new, and the constant HUB_SSO_SCOPES stays pure.
+  const declaresSibling = (tool.connections?.sources ?? []).some((source) => source.sibling !== undefined);
   const hubSso = hub
     ? new HubSsoService({
         db: db.db,
@@ -359,7 +364,8 @@ export async function bootPlatform<
         // hub-audienced via tokenResource.
         resourceUrl: mcpResourceUrl(env.PUBLIC_BASE_URL),
         tokenResource: hubTokenResource,
-        publicBaseUrl: env.PUBLIC_BASE_URL
+        publicBaseUrl: env.PUBLIC_BASE_URL,
+        extraScopes: declaresSibling ? [HUB_SSO_CONNECT_SCOPE] : []
       })
     : undefined;
 
@@ -706,13 +712,29 @@ export async function bootPlatform<
   // the service built before the job runtime (its purge joins the queues)
   // and before the services slot (a handler reads the domain lazily).
   const connectionCatalog = buildConnectionCatalog(tool.connections);
+  // The sibling connect (PRDCT-3774) reads the hub as the person (the grant
+  // service) and the fleet list for the sibling's address: both exist on a
+  // cloud boot alone, so an oss instance answers `sibling_unavailable`.
+  const siblingConnector =
+    hub && hubGrant && fleetOrigins
+      ? new SiblingConnector({
+          grant: hubGrant,
+          issuerUrl: hub.issuerUrl,
+          fleet: fleetOrigins,
+          logger,
+          timeoutMs: hubDials.tokenTimeoutMs,
+          fetchImpl: overrides.siblingFetch
+        })
+      : null;
   const connections = new ConnectionService<TDomain>({
     db: db.db,
     logger,
     authSecret,
     publicBaseUrl: env.PUBLIC_BASE_URL,
     catalog: connectionCatalog,
-    getTool: () => domainRef.current
+    getTool: () => domainRef.current,
+    instanceName: tool.identity.displayName,
+    sibling: siblingConnector
   });
   const jobs = await createJobs(
     env,

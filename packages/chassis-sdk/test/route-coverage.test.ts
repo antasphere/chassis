@@ -96,6 +96,8 @@ const INVOKERS: Record<string, (c: Client) => Promise<unknown>> = {
   'PATCH /connections/{source}': (c) => c.setConnectionFields('partner', { fields: { folder: 'root' } }),
   'POST /connections/{source}/test': (c) => c.testConnection('partner'),
   'DELETE /connections/{source}': (c) => c.disconnectSource('partner'),
+  'POST /connections/{source}/sibling': (c) => c.connectSibling('partner'),
+  'DELETE /connections/{source}/sibling': (c) => c.disconnectSibling('partner'),
   'GET /connections/{source}/deliveries': (c) => c.connectionDeliveries('partner'),
   'GET /webhooks/{id}/deliveries/{deliveryId}': (c) => c.webhookDelivery(SAMPLE_ID, SAMPLE_DELIVERY_ID),
   'POST /webhooks/{id}/deliveries/{deliveryId}/redeliver': (c) =>

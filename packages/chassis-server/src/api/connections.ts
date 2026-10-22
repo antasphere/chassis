@@ -7,6 +7,8 @@ import {
   connectionFieldsRoute,
   connectionGetRoute,
   connectionSecretRoute,
+  connectionSiblingConnectRoute,
+  connectionSiblingDisconnectRoute,
   connectionsListRoute,
   connectionTestRoute
 } from '@antasphere/chassis-contract/routes';
@@ -27,6 +29,12 @@ import { ConnectionRefusedError, type AnyConnectionService } from '../connection
  *
  * The receiving URL is answered ONCE, at its making and at a rotation; the
  * secret never; neither reaches the audit row.
+ *
+ * The sibling connect (PRDCT-3774, `POST` and `DELETE /connections/{source}/sibling`)
+ * is a write like the others, and the one connection write where NOTHING is
+ * ever answered: the URL and the secret travel to the sibling and the store,
+ * never to the caller. Its refusals are the service's sibling codes, each a
+ * sentence the person can act on (sign in again, open the sibling once).
  */
 export interface ConnectionRouteDeps {
   service: AnyConnectionService;
@@ -37,15 +45,19 @@ const FORBIDDEN = err('forbidden', 'Only an owner or an admin manages connection
 
 const canManage = (principal: Principal) => principal.role === 'owner' || principal.role === 'admin';
 
-const statusOf = (code: ConnectionRefusedError['code']): 400 | 404 | 409 | 502 => {
+const statusOf = (code: ConnectionRefusedError['code']): 400 | 401 | 404 | 409 | 502 => {
   switch (code) {
     case 'not_found':
       return 404;
     case 'not_inbound':
     case 'not_connected':
+    case 'not_sibling':
+    case 'sibling_unavailable':
       return 409;
     case 'source_unavailable':
       return 502;
+    case 'hub_reauth_required':
+      return 401;
     default:
       return 400;
   }
@@ -170,6 +182,49 @@ export function registerConnectionRoutes(api: OpenAPIHono, deps: ConnectionRoute
     } catch (e) {
       const r = refused(e);
       return c.json(r.body, r.status as 404);
+    }
+  });
+
+  api.openapi(connectionSiblingConnectRoute, async (c) => {
+    const principal = c.get('principal')!;
+    if (!canManage(principal)) return c.json(FORBIDDEN, 403);
+    const { source } = c.req.valid('param');
+    try {
+      const connection = await service.connectSibling(
+        { workspaceId: principal.workspaceId, userId: principal.userId },
+        source
+      );
+      // The audit row says the sibling was connected as the person; never the URL, the secret or the key.
+      c.set('audit', {
+        action: 'connection.sibling_connect',
+        resourceType: 'connection',
+        resourceId: source
+      });
+      return c.json(connection, 200);
+    } catch (e) {
+      const r = refused(e);
+      return c.json(r.body, r.status as 400 | 401 | 404 | 409 | 502);
+    }
+  });
+
+  api.openapi(connectionSiblingDisconnectRoute, async (c) => {
+    const principal = c.get('principal')!;
+    if (!canManage(principal)) return c.json(FORBIDDEN, 403);
+    const { source } = c.req.valid('param');
+    try {
+      const connection = await service.disconnectSibling(
+        { workspaceId: principal.workspaceId, userId: principal.userId },
+        source
+      );
+      c.set('audit', {
+        action: 'connection.sibling_disconnect',
+        resourceType: 'connection',
+        resourceId: source
+      });
+      return c.json(connection, 200);
+    } catch (e) {
+      const r = refused(e);
+      return c.json(r.body, r.status as 400 | 401 | 404 | 409 | 502);
     }
   });
 

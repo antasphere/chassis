@@ -104,6 +104,8 @@ export interface ChassisTestHost<TResult extends BootResultLike, TOverrides> {
     seen: Array<{ workspaceId: string; source: string; id: string; type: string }>;
     /** What the key source's fields hook saw. */
     fieldsSeen: Array<{ workspaceId: string; fields: Record<string, string | string[] | null> }>;
+    /** The host declares a sibling source (PRDCT-3774), so its sign-in asks the hub for `sso:connect` too. */
+    sibling: boolean;
   };
   /**
    * The host's tool is the chassis's minimal test tool, which declares the
