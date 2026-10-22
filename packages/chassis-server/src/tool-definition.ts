@@ -1,5 +1,10 @@
 import type { Db, DbHandle } from '@antasphere/chassis-db';
-import type { ConnectionFields, ToolIdentity, UsageDownstream } from '@antasphere/chassis-contract';
+import type {
+  Connection,
+  ConnectionFields,
+  ToolIdentity,
+  UsageDownstream
+} from '@antasphere/chassis-contract';
 import type { OpenAPIHono } from '@hono/zod-openapi';
 import type { Hono, MiddlewareHandler, Context } from 'hono';
 import type { RateLimiterAbstract } from 'rate-limiter-flexible';
@@ -94,6 +99,8 @@ export interface ServiceCore<TEnvShape extends z.ZodRawShape, TEvents, TToolOver
 
 /** What a tool's services read and record of the connections the chassis stores for it. */
 export interface ToolConnections {
+  /** The source's state as the page reads it (connected, who set the key and when, the fields, the last check); never a secret. */
+  connection(workspaceId: string, source: string): Promise<Connection>;
   /** The source's secret or key, opened; null when none is set or it no longer opens. */
   secret(workspaceId: string, source: string): Promise<string | null>;
   /** The stored fields of the source; empty when nothing is connected. */

@@ -42,6 +42,11 @@ export const connectionDeliveriesSeen: Array<{
   type: string;
   fields: Record<string, string | string[] | null>;
 }> = [];
+/** What the vault source's fields hook saw (PRDCT-3773). */
+export const connectionFieldsSeen: Array<{
+  workspaceId: string;
+  fields: Record<string, string | string[] | null>;
+}> = [];
 const THINGS_EXPORT_ROUTE = '/api/v1/things/export';
 
 const contract = defineChassisContract({
@@ -171,6 +176,9 @@ export const minimalTool: ToolDefinition<NoEnv, NoDomain> = {
           sealed.startsWith('legacy:')
             ? Buffer.from(sealed.slice('legacy:'.length), 'base64').toString('utf8')
             : null,
+        onFieldsChanged: async ({ workspaceId, fields }) => {
+          connectionFieldsSeen.push({ workspaceId, fields });
+        },
         probe: async ({ secret, fields }) => {
           if (secret === 'vk_down') return { ok: false, detail: 'Vault did not answer', unavailable: true };
           if (secret !== 'vk_good') return { ok: false, detail: 'Vault refused the key' };

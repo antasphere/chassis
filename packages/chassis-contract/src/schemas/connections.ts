@@ -87,9 +87,10 @@ export const connectionSchema = z.object({
   declared: connectionDeclaredSchema,
   /** An inbound source: the URL is made and the secret set; a key source: the key is set. */
   connected: z.boolean(),
-  /** The receiving URL's state (an inbound source): when the current one was made and by whom; null until made. */
-  url: z.object({ madeAt: z.string(), madeBy: member.nullable() }).nullable(),
-  secret: z.object({
+  /** The receiving URL's state (an inbound source): when the current one was made and by whom; null until made. Never the URL. */
+  receiving: z.object({ madeAt: z.string(), madeBy: member.nullable() }).nullable(),
+  /** The secret's state: never the secret. */
+  secretState: z.object({
     set: z.boolean(),
     /** False when the stored value no longer opens (the instance's auth secret changed): set it again. */
     readable: z.boolean(),

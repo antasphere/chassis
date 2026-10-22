@@ -888,6 +888,7 @@ export async function bootPlatform<
     timers: jobs.timers,
     webhooks,
     connections: {
+      connection: (workspaceId, source) => connections.get(workspaceId, source),
       secret: (workspaceId, source) => connections.secretOf(workspaceId, source),
       fields: (workspaceId, source) => connections.fieldsOf(workspaceId, source),
       setFields: (workspaceId, source, patch) => connections.setFieldsOf(workspaceId, source, patch),

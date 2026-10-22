@@ -7,6 +7,7 @@ export {
   type ConnectionCatalogIndex,
   type ConnectionDeliveryContext,
   type ConnectionDeliveryResult,
+  type ConnectionFieldsChangedContext,
   type ConnectionFieldDeclaration,
   type ConnectionProbeContext,
   type ConnectionProbeResult,
