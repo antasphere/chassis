@@ -28,6 +28,7 @@ import {
   type ConnectionVerifier
 } from './catalog.js';
 import { NAMED_VERIFIERS } from './verifiers.js';
+import { webhookSecretKey } from '../webhooks/signing.js';
 
 /**
  * The connections of a workspace (PRDCT-3773): the generic machinery over the
@@ -47,8 +48,10 @@ import { NAMED_VERIFIERS } from './verifiers.js';
  *    source, the sender's id) (a repeat answers 200 `duplicate` and writes
  *    nothing; a delivery whose handler FAILED is taken again), the row's
  *    last delivery stamped, the handler run. A handler that throws rolls its
- *    writes back and the delivery is recorded `failed` outside the
- *    transaction, so the sender's retry runs it again.
+ *    writes back, the delivery is recorded `failed` outside the
+ *    transaction, and the door answers 500 so the sender retries (every
+ *    Standard Webhooks sender, the chassis's own delivery included, takes a
+ *    2xx as delivered and retries nothing else); the retry runs it again.
  */
 
 export const CONNECTION_SECRET_BOX_INFO = 'chassis:connection';
@@ -93,7 +96,7 @@ export interface ConnectionActor {
 
 /** What the door answers: a status and a short body naming no secret. */
 export interface ConnectionReceipt {
-  status: 200 | 400 | 401 | 404;
+  status: 200 | 400 | 401 | 404 | 500;
   body: {
     ok: boolean;
     code?: string;
@@ -300,6 +303,18 @@ export class ConnectionService<TDomain = unknown> {
           ? `The secret does not look like ${source.secretHint}`
           : 'The secret has not the expected shape'
       );
+    }
+    // The standard scheme's verifier takes a `whsec_` key of 24 to 64 bytes and nothing else: a value it
+    // could never verify is refused here rather than stored and answered 401 at every delivery.
+    if (takesDeliveries(source.kind) && (source.verifier ?? 'standard-webhooks') === 'standard-webhooks') {
+      try {
+        webhookSecretKey(secret);
+      } catch {
+        throw new ConnectionRefusedError(
+          'secret_invalid',
+          'A Standard Webhooks secret is whsec_ followed by base64 of 24 to 64 bytes'
+        );
+      }
     }
     const existing = await this.row(actor.workspaceId, key);
     if (source.kind === 'inbound' && !existing?.tokenHash) {
@@ -561,6 +576,8 @@ export class ConnectionService<TDomain = unknown> {
         let deliveryRowId = taken?.id ?? null;
         if (!deliveryRowId) {
           // A repeat of a delivery already taken: 200, nothing written, unless the handler had failed.
+          // Locked: two retries of a failed delivery arriving together run the
+          // handler once; the second waits, reads `processed`, and is a repeat.
           const [previous] = await tx
             .select({ id: connectionDeliveries.id, outcome: connectionDeliveries.outcome })
             .from(connectionDeliveries)
@@ -570,7 +587,8 @@ export class ConnectionService<TDomain = unknown> {
                 eq(connectionDeliveries.source, key),
                 eq(connectionDeliveries.deliveryId, deliveryId)
               )
-            );
+            )
+            .for('update');
           if (!previous || previous.outcome !== 'failed') return { kind: 'duplicate' };
           deliveryRowId = previous.id;
         }
@@ -622,13 +640,15 @@ export class ConnectionService<TDomain = unknown> {
             connectionDeliveries.source,
             connectionDeliveries.deliveryId
           ],
-          set: { outcome: 'failed', error: failure, receivedAt: now }
+          set: { outcome: 'failed', error: failure, receivedAt: now },
+          // A retry that landed meanwhile keeps its `processed`: a late failure never overwrites it.
+          setWhere: sql`${connectionDeliveries.outcome} <> 'processed'`
         });
       await this.deps.db
         .update(connections)
         .set({ lastDeliveryAt: now, lastDeliveryType: type, lastDeliveryOutcome: 'failed', updatedAt: now })
         .where(eq(connections.id, row.id));
-      return { status: 200, body: { ok: false, code: 'handler_failed', outcome: 'failed' } };
+      return { status: 500, body: { ok: false, code: 'handler_failed', outcome: 'failed' } };
     }
     if (result.kind === 'duplicate') return { status: 200, body: { ok: true, duplicate: true } };
     return {

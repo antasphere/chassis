@@ -209,11 +209,21 @@ describe.skipIf(!host.connections)('connections (PRDCT-3773)', () => {
       expect((await knock('/hooks/partner/not-a-token', {}, body)).status).toBe(404);
       expect((await knock('/hooks/nowhere/x', {}, body)).status).toBe(404);
       expect((await knock('/hooks/vault/x', {}, body)).status).toBe(404);
+      // the token is bound to its source: partner's token under another source's door is 404
+      expect((await knock(`/hooks/ledger/${tokenOf(partnerUrl)}`, {}, body)).status).toBe(404);
     });
 
     it('4. a secret off the declared shape is refused; a good one is stored sealed, never answered', async () => {
       await expectError(
         await send('PUT', '/connections/partner/secret', actors.admin!, { secret: 'nope' }),
+        400,
+        'secret_invalid'
+      );
+      // a whsec_ value the standard verifier could never use (16 bytes) is refused too
+      await expectError(
+        await send('PUT', '/connections/partner/secret', actors.admin!, {
+          secret: `whsec_${Buffer.alloc(16, 7).toString('base64')}`
+        }),
         400,
         'secret_invalid'
       );
@@ -283,11 +293,12 @@ describe.skipIf(!host.connections)('connections (PRDCT-3773)', () => {
       expect(await app.db.db.select().from(connectionDeliveries)).toHaveLength(1);
     });
 
-    it('7. a handler that fails: the writes roll back, the delivery is logged failed, and the retry runs it again', async () => {
+    it('7. a handler that fails: 500, the writes roll back, the delivery is logged failed, and the retry runs it again', async () => {
       const path = new URL(partnerUrl).pathname;
       const body = JSON.stringify({ type: 'thing.explode' });
       const res = await knock(path, standardHeaders(partnerSecret, 'msg-boom', body), body);
-      expect(res.status).toBe(200);
+      // 500: a Standard Webhooks sender retries a non-2xx and nothing else (the chassis's own delivery included)
+      expect(res.status).toBe(500);
       expect(await readJson(res)).toEqual({ ok: false, code: 'handler_failed', outcome: 'failed' });
       const log = await readJson(await send('GET', '/connections/partner/deliveries', actors.admin!));
       expect(log.deliveries[0]).toMatchObject({
@@ -300,9 +311,31 @@ describe.skipIf(!host.connections)('connections (PRDCT-3773)', () => {
       // the sender retries the same id: not a duplicate, the handler runs again
       const seen = connectionDeliveriesSeen.length;
       const again = await knock(path, standardHeaders(partnerSecret, 'msg-boom', body), body);
+      expect(again.status).toBe(500);
       expect(await readJson(again)).toEqual({ ok: false, code: 'handler_failed', outcome: 'failed' });
       expect(connectionDeliveriesSeen.length).toBe(seen + 1);
       expect(await app.db.db.select().from(connectionDeliveries)).toHaveLength(2);
+    });
+
+    it('7b. two retries of a failed delivery arriving together run the handler once: the second waits and is a repeat', async () => {
+      const path = new URL(partnerUrl).pathname;
+      const body = JSON.stringify({ type: 'thing.flaky' });
+      const first = await knock(path, standardHeaders(partnerSecret, 'msg-flaky', body), body);
+      expect(first.status).toBe(500);
+      const seen = connectionDeliveriesSeen.length;
+      const [a, b] = await Promise.all([
+        knock(path, standardHeaders(partnerSecret, 'msg-flaky', body), body),
+        knock(path, standardHeaders(partnerSecret, 'msg-flaky', body), body)
+      ]);
+      const bodies = [await readJson(a), await readJson(b)];
+      expect(bodies.filter((x) => x.outcome === 'processed')).toHaveLength(1);
+      expect(bodies.filter((x) => x.duplicate === true)).toHaveLength(1);
+      expect(connectionDeliveriesSeen.length).toBe(seen + 1);
+      const log = await readJson(await send('GET', '/connections/partner/deliveries', actors.admin!));
+      expect(log.deliveries.find((d: { deliveryId: string }) => d.deliveryId === 'msg-flaky')).toMatchObject({
+        outcome: 'processed',
+        error: null
+      });
     });
 
     it('8. a ping is taken, logged ignored and stamps the card without reaching the handler; a stale timestamp is refused', async () => {
@@ -543,6 +576,8 @@ describe.skipIf(!host.connections)('connections (PRDCT-3773)', () => {
       expect((await send('GET', '/connections', { key: readKey })).status).toBe(200);
       // the log is a read: the read scope opens it, the handler's role rule still applies (an admin's key here)
       expect((await send('GET', '/connections/partner/deliveries', { key: readKey })).status).toBe(200);
+      // the log is every member's read, like the list
+      expect((await send('GET', '/connections/partner/deliveries', actors.member!)).status).toBe(200);
       expect((await send('POST', '/connections/partner/test', { key: readKey })).status).toBe(403);
       expect((await send('POST', '/connections/partner/test', { key: writeKey })).status).toBe(403);
       expect((await send('POST', '/connections/partner/test', { key: manageKey })).status).toBe(200);

@@ -16,7 +16,7 @@ import { ConnectionRefusedError, type AnyConnectionService } from '../connection
 /**
  * The connection routes (PRDCT-3773), the same on both editions and never
  * hub-managed: a connection is the tool's, like a webhook. The reads (the
- * list, one source) are every non-guest member's: the page shows every
+ * list, one source, the deliveries log) are every non-guest member's: the page shows every
  * member what the workspace is connected to, never a secret. The writes
  * (the URL, the secret, the fields, the test, the disconnect) are an OWNER's
  * or an ADMIN's act, checked inside each handler. A guest is refused flat; a
@@ -173,9 +173,9 @@ export function registerConnectionRoutes(api: OpenAPIHono, deps: ConnectionRoute
     }
   });
 
+  // The log is a read like the list: every non-guest member's (the page shows it to everyone).
   api.openapi(connectionDeliveriesRoute, async (c) => {
     const principal = c.get('principal')!;
-    if (!canManage(principal)) return c.json(FORBIDDEN, 403);
     const { source } = c.req.valid('param');
     const { cursor, limit } = c.req.valid('query');
     try {

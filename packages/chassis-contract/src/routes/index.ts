@@ -1359,7 +1359,8 @@ export const connectionDeliveriesRoute = createRoute({
   method: 'get',
   path: '/connections/{source}/deliveries',
   tags: ['connections'],
-  summary: 'The deliveries the door took for this source, newest first (owner or admin; cursor-paginated)',
+  summary:
+    'The deliveries the door took for this source, newest first (every member but a guest; cursor-paginated)',
   request: { params: connectionParamsSchema, query: connectionDeliveriesListQuerySchema },
   responses: {
     200: jsonBody(connectionDeliveriesListSchema, 'Deliveries, newest first'),
