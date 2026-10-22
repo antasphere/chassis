@@ -59,6 +59,8 @@ export class FleetOrigins {
   private readonly dials: FleetOriginsDials;
   private readonly fetchImpl: typeof fetch;
   private timer: NodeJS.Timeout | null = null;
+  /** Set by `stop()`: a read in flight never re-arms the timer afterwards (verifier round 1, F1). */
+  private stopped = false;
   private inFlight: Promise<FleetOriginsRead> | null = null;
   private isDraining: () => boolean = () => false;
   /** When the list was last read successfully; null until the first success. */
@@ -92,8 +94,10 @@ export class FleetOrigins {
 
   private async read(): Promise<FleetOriginsRead> {
     try {
+      // No redirect followed, like the delivery itself: a 3xx is a failed read, the list stays.
       const res = await this.fetchImpl(this.url, {
         headers: { accept: 'application/json' },
+        redirect: 'error',
         signal: AbortSignal.timeout(this.dials.timeoutMs)
       });
       if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
@@ -121,10 +125,12 @@ export class FleetOrigins {
   /** The timer: `refreshMs` after a success, `retryMs` after a failure; never holding the process open. */
   start(opts: { isDraining?: () => boolean } = {}): void {
     if (opts.isDraining) this.isDraining = opts.isDraining;
+    this.stopped = false;
     this.schedule(this.fetchedAt ? this.dials.refreshMs : this.dials.retryMs);
   }
 
   private schedule(ms: number): void {
+    if (this.stopped) return;
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => {
       this.timer = null;
@@ -135,6 +141,7 @@ export class FleetOrigins {
   }
 
   stop(): void {
+    this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
   }
