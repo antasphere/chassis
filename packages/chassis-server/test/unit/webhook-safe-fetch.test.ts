@@ -403,7 +403,7 @@ describe('safePost through the lookup seam', () => {
 });
 
 describe('safePost to a fleet origin (PRDCT-3772): the address rule inside the socket lookup is lifted for the sibling alone', () => {
-  it('a fleet origin resolving to a private address is delivered, the same address on a stranger is refused, through the default transport', async () => {
+  it('a literal fleet address is delivered through the default transport (the up-front check; the socket lookup never runs for a literal), the same address on a stranger is refused in its lookup', async () => {
     // The receiver is the loopback server; the fleet names its origin, so the
     // socket's own lookup (no transport seam) connects to the private address.
     const origin = base;
