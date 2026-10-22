@@ -5,6 +5,17 @@ import { apiErrorSchema, cursorPageQuerySchema } from '../schemas/common.js';
 import { instanceInfoSchema } from '../schemas/instance.js';
 import { appsListSchema } from '../schemas/apps.js';
 import { setupRequestSchema, setupResponseSchema } from '../schemas/setup.js';
+import {
+  connectionDeliveriesListQuerySchema,
+  connectionDeliveriesListSchema,
+  connectionFieldsUpdateSchema,
+  connectionParamsSchema,
+  connectionSchema,
+  connectionSecretSchema,
+  connectionsListSchema,
+  connectionTestResultSchema,
+  connectionUrlMadeSchema
+} from '../schemas/connections.js';
 import { onboardingDismissedSchema } from '../schemas/me.js';
 import {
   defaultWorkspaceSchema,
@@ -1232,6 +1243,131 @@ export interface ChassisRoutesCopy {
  * from its wording of the document — no module-level state, one instantiation
  * per tool, and no route object that no tool serves.
  */
+// ── Connections (PRDCT-3773) ──────────────────────────────────────────────────
+// Every inbound webhook source and outbound key a tool holds, declared by the
+// tool and stored by the chassis: one card per source on Settings › Connections.
+// The reads are every non-guest member's; the writes an owner's or an admin's.
+// No answer carries a secret; the receiving URL is answered once, when made.
+
+/** The refusals every connection route shares. */
+const connectionErrors = {
+  401: errorResponses[401],
+  403: jsonBody(apiErrorSchema, 'guest_forbidden, forbidden (not an owner or admin), or demo_session'),
+  404: jsonBody(apiErrorSchema, 'not_found: no such source is declared by this instance')
+};
+
+export const connectionsListRoute = createRoute({
+  method: 'get',
+  path: '/connections',
+  tags: ['connections'],
+  summary: 'Every connection source this instance declares, with its state in the workspace (never a secret)',
+  responses: {
+    200: jsonBody(connectionsListSchema, 'One entry per declared source, in the declared order'),
+    401: errorResponses[401],
+    403: jsonBody(apiErrorSchema, 'guest_forbidden')
+  }
+});
+
+export const connectionGetRoute = createRoute({
+  method: 'get',
+  path: '/connections/{source}',
+  tags: ['connections'],
+  summary: 'One connection source and its state in the workspace (never a secret, never the receiving URL)',
+  request: { params: connectionParamsSchema },
+  responses: { 200: jsonBody(connectionSchema, 'The connection'), ...connectionErrors }
+});
+
+export const connectionConnectRoute = createRoute({
+  method: 'post',
+  path: '/connections/{source}',
+  tags: ['connections'],
+  summary:
+    'Make the receiving URL of an inbound source, or rotate it (owner or admin): the URL is answered this once; the previous one answers 404 from now on; the secret stays',
+  request: { params: connectionParamsSchema },
+  responses: {
+    200: jsonBody(connectionUrlMadeSchema, 'The connection and the receiving URL, shown once'),
+    ...connectionErrors,
+    409: jsonBody(apiErrorSchema, 'not_inbound: a key source has no receiving URL')
+  }
+});
+
+export const connectionSecretRoute = createRoute({
+  method: 'put',
+  path: '/connections/{source}/secret',
+  tags: ['connections'],
+  summary:
+    "Set the source's signing secret or key (owner or admin): stored sealed, never read back; a key source is probed first and refused when the source refuses the key",
+  request: {
+    params: connectionParamsSchema,
+    body: jsonRequestBody(connectionSecretSchema, 'The secret or the key, as the source showed it')
+  },
+  responses: {
+    200: jsonBody(connectionSchema, 'The connection'),
+    400: jsonBody(
+      apiErrorSchema,
+      'Validation error, secret_invalid (not the shape the source declares) or secret_refused (the source refused the key; the detail says what it answered)'
+    ),
+    ...connectionErrors,
+    409: jsonBody(apiErrorSchema, 'not_connected: make the receiving URL first'),
+    502: jsonBody(apiErrorSchema, 'source_unavailable: the source did not answer the probe')
+  }
+});
+
+export const connectionFieldsRoute = createRoute({
+  method: 'patch',
+  path: '/connections/{source}',
+  tags: ['connections'],
+  summary:
+    "Store the source's declared fields (owner or admin): a key absent keeps its value, null clears it",
+  request: {
+    params: connectionParamsSchema,
+    body: jsonRequestBody(connectionFieldsUpdateSchema, 'The fields, by declared key')
+  },
+  responses: {
+    200: jsonBody(connectionSchema, 'The connection'),
+    400: jsonBody(apiErrorSchema, 'Validation error, unknown_field or field_required'),
+    ...connectionErrors,
+    409: jsonBody(apiErrorSchema, 'not_connected: connect the source first')
+  }
+});
+
+export const connectionTestRoute = createRoute({
+  method: 'post',
+  path: '/connections/{source}/test',
+  tags: ['connections'],
+  summary:
+    'Test the connection (owner or admin): a key source is probed with the stored key, an inbound source checks that its URL is made and its secret opens; the result is kept as the last check',
+  request: { params: connectionParamsSchema },
+  responses: {
+    200: jsonBody(connectionTestResultSchema, 'What the test found'),
+    ...connectionErrors,
+    409: jsonBody(apiErrorSchema, 'not_connected: nothing to test yet')
+  }
+});
+
+export const connectionDisconnectRoute = createRoute({
+  method: 'delete',
+  path: '/connections/{source}',
+  tags: ['connections'],
+  summary:
+    'Disconnect the source (owner or admin): the secret, the receiving URL and the delivery log of the workspace are gone',
+  request: { params: connectionParamsSchema },
+  responses: { 200: jsonBody(connectionSchema, 'The connection, disconnected'), ...connectionErrors }
+});
+
+export const connectionDeliveriesRoute = createRoute({
+  method: 'get',
+  path: '/connections/{source}/deliveries',
+  tags: ['connections'],
+  summary: 'The deliveries the door took for this source, newest first (owner or admin; cursor-paginated)',
+  request: { params: connectionParamsSchema, query: connectionDeliveriesListQuerySchema },
+  responses: {
+    200: jsonBody(connectionDeliveriesListSchema, 'Deliveries, newest first'),
+    400: errorResponses[400],
+    ...connectionErrors
+  }
+});
+
 export function defineChassisRoutes<TScope extends string>(
   contract: ChassisContract<TScope>,
   identity: Pick<ToolIdentity, 'cliKeyScopesLabel'> & { scopes: Pick<ToolIdentity['scopes'], 'dataExport'> },

@@ -144,6 +144,14 @@ export function createScopeAllowlist<S extends string>({
     // closes entirely when the tool declares none.
     if (path === '/api/v1/webhooks/events' && isRead) return read;
     if (path === '/api/v1/webhooks' || path.startsWith('/api/v1/webhooks/')) return webhooks ?? null;
+    // Connections (PRDCT-3773): the reads (the list, one source, a source's
+    // deliveries) under the read scope; the writes (the URL, the secret, the
+    // fields, the test, the disconnect) ride the tool's webhooks scope, a
+    // credential of the workspace like a webhook's, and close when the tool
+    // declares none.
+    if (path === '/api/v1/connections' || path.startsWith('/api/v1/connections/')) {
+      return isRead ? read : (webhooks ?? null);
+    }
     for (const rule of rules) {
       const needed = rule(path, method, isRead);
       if (needed !== null) return needed;

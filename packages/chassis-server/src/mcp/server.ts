@@ -5,6 +5,7 @@ import { jsonText, mergeErrorHints, wrapToolErrors, type ErrorHints } from './er
 import { projectErrorHints, registerProjectTools } from './projects.js';
 import { registerTeamTools } from './teams.js';
 import { registerWebhookTools, webhookErrorHints } from './webhooks.js';
+import { connectionErrorHints, registerConnectionTools } from './connections.js';
 import {
   callApi,
   createScopeCheck,
@@ -51,6 +52,8 @@ export interface McpToolDefinition {
   instructions: (info: McpServerInfo) => string;
   errorHints: ErrorHints;
   scopes: McpScopes;
+  /** The tool declares at least one connection source (PRDCT-3773): the connection tools are registered. */
+  hasConnections?: boolean | undefined;
 }
 
 /** The MCP half of the tool's identity (`ToolIdentity['mcp']`): the server's name and the tool names' prefix. */
@@ -67,6 +70,7 @@ export function composeErrorHints(toolHints: ErrorHints, toolPrefix: string): Er
   return mergeErrorHints({
     ...projectErrorHints(toolPrefix),
     ...webhookErrorHints(toolPrefix),
+    ...connectionErrorHints(toolPrefix),
     ...toolHints
   });
 }
@@ -174,6 +178,8 @@ export function buildMcpServer(
   // Webhooks (PRDCT-3482): a chassis concept, registered only when the tool
   // declares the webhooks scope (a tool without one serves no webhook tool).
   if (tool.scopes.webhooks) registerWebhookTools(server, ctx, identity, tool.scopes, checkScope, hints);
+  // Connections (PRDCT-3773): a chassis concept, registered only when the tool declares a source.
+  if (tool.hasConnections) registerConnectionTools(server, ctx, identity, tool.scopes, checkScope, hints);
 
   // The product surface: the tool's own set, after the chassis tools.
   tool.registerTools(server, ctx);
