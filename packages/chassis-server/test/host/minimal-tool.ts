@@ -42,6 +42,7 @@ export const connectionDeliveriesSeen: Array<{
   type: string;
   fields: Record<string, string | string[] | null>;
 }> = [];
+const flakySeen = new Set<string>();
 /** What the vault source's fields hook saw (PRDCT-3773). */
 export const connectionFieldsSeen: Array<{
   workspaceId: string;
@@ -142,6 +143,11 @@ export const minimalTool: ToolDefinition<NoEnv, NoDomain> = {
             fields
           });
           if (delivery.type === 'thing.explode') throw new Error('the handler exploded');
+          // Fails the first time an id is seen, succeeds after (the retry of a transient failure).
+          if (delivery.type === 'thing.flaky' && !flakySeen.has(delivery.id)) {
+            flakySeen.add(delivery.id);
+            throw new Error('the handler failed once');
+          }
           return { detail: `took ${delivery.type}` };
         }
       },

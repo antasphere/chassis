@@ -183,12 +183,13 @@ export function registerConnectionTools(
     t('connection_deliveries'),
     {
       description:
-        `The deliveries the instance took for a source, newest first. ${WHO} Returns { deliveries: [{ id, source, deliveryId, type, receivedAt, outcome, detail, error }], nextCursor } ` +
+        'The deliveries the instance took for a source, newest first. A read, open to every member under the read scope; ' +
+        'the API’s own role rule on the delivery log still applies. Returns { deliveries: [{ id, source, deliveryId, type, receivedAt, outcome, detail, error }], nextCursor } ' +
         '— `outcome` is processed, ignored (a ping, or no handler) or failed. When nextCursor is non-null, call again with cursor set to it.',
       inputSchema: { workspace: workspaceInput, source: sourceInput, limit: limitInput, cursor: cursorInput },
       annotations: { readOnlyHint: true }
     },
     async ({ workspace, source, limit, cursor }) =>
-      run(writeScope, workspace, (c) => callApi(c, pageQuery(at(source, '/deliveries'), { cursor, limit })))
+      run(scopes.read, workspace, (c) => callApi(c, pageQuery(at(source, '/deliveries'), { cursor, limit })))
   );
 }
