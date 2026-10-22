@@ -768,6 +768,20 @@ export class ChassisClient<TScope extends string> {
     return this.request('DELETE', `/connections/${encodeURIComponent(source)}`);
   }
 
+  /**
+   * Connects a sibling tool of the same hub AS THE PERSON (PRDCT-3774): the
+   * receiving URL is registered on the sibling and the secret stored, in one
+   * call, nothing answered but the connection; a re-run replaces both.
+   */
+  connectSibling(source: string): Promise<Connection> {
+    return this.request('POST', `/connections/${encodeURIComponent(source)}/sibling`);
+  }
+
+  /** Disconnects a sibling source as the person: the endpoint deleted on the sibling, then the connection here. */
+  disconnectSibling(source: string): Promise<Connection> {
+    return this.request('DELETE', `/connections/${encodeURIComponent(source)}/sibling`);
+  }
+
   /** The deliveries the door took for a source, newest first. */
   connectionDeliveries(source: string, params: ListParams = {}): Promise<ConnectionDeliveriesList> {
     return this.request(

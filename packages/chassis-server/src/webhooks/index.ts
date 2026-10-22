@@ -17,7 +17,8 @@ export {
   FleetOrigins,
   type FleetOriginsDials,
   type FleetOriginsOptions,
-  type FleetOriginsRead
+  type FleetOriginsRead,
+  type FleetTool
 } from './fleet-origins.js';
 export {
   checkWebhookUrl,

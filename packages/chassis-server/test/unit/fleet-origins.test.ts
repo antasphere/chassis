@@ -10,7 +10,14 @@ import { FleetOrigins } from '../../src/webhooks/fleet-origins.js';
  */
 
 const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as never;
-const GOOD = { tools: [{ clientId: 'tool-crm', name: 'CRM', origin: 'https://crm.example.com' }] };
+const CRM = {
+  slug: 'crm',
+  clientId: 'tool-crm',
+  name: 'CRM',
+  origin: 'https://crm.example.com',
+  resourceUrl: 'https://crm.example.com/mcp'
+};
+const GOOD = { tools: [CRM] };
 
 type Answer = { status: number; body: unknown } | 'network' | { delayMs: number; body: unknown };
 
@@ -47,6 +54,53 @@ describe('FleetOrigins', () => {
     expect(calls[0]!.redirect).toBe('error');
     expect((calls[0]!.headers as Record<string, string>).authorization).toBeUndefined();
     expect([...fleet.get()]).toEqual(['https://crm.example.com']);
+  });
+
+  it('keeps the tools by slug for the sibling connect, and drops a slug the hub dropped on the next read', async () => {
+    const { fleet } = reader([
+      {
+        status: 200,
+        body: {
+          tools: [
+            CRM,
+            {
+              ...CRM,
+              slug: 'meet',
+              clientId: 'tool-meet',
+              name: 'Meet',
+              origin: 'https://meet.example.com:8443',
+              resourceUrl: 'https://meet.example.com:8443/mcp'
+            }
+          ]
+        }
+      },
+      { status: 200, body: GOOD }
+    ]);
+    await fleet.refresh();
+    expect(fleet.tool('meet')).toEqual({
+      slug: 'meet',
+      clientId: 'tool-meet',
+      name: 'Meet',
+      origin: 'https://meet.example.com:8443',
+      resourceUrl: 'https://meet.example.com:8443/mcp'
+    });
+    expect(fleet.tool('crm')).toEqual(CRM);
+    expect(fleet.tool('nobody')).toBeNull();
+    await fleet.refresh();
+    expect(fleet.tool('meet')).toBeNull();
+    expect(fleet.tool('crm')).toEqual(CRM);
+  });
+
+  it('an answer without the slug or the resource URL is off the hub contract: a failed read, the list stays', async () => {
+    const { fleet } = reader([
+      { status: 200, body: GOOD },
+      { status: 200, body: { tools: [{ clientId: 'tool-x', name: 'X', origin: 'https://x.example' }] } }
+    ]);
+    await fleet.refresh();
+    const read = await fleet.refresh();
+    expect(read.ok).toBe(false);
+    expect(read.error).toMatch(/off the hub contract/);
+    expect(fleet.tool('crm')).toEqual(CRM);
   });
 
   it('an answer off the hub contract is a failed read: the list stays as it was', async () => {

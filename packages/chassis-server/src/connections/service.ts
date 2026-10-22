@@ -4,6 +4,7 @@ import {
   connectionDeliveries,
   connections,
   user as userTable,
+  workspaces,
   type ConnectionDeliveryRow,
   type ConnectionRow,
   type Db
@@ -28,6 +29,7 @@ import {
   type ConnectionVerifier
 } from './catalog.js';
 import { NAMED_VERIFIERS } from './verifiers.js';
+import type { SiblingConnector, SiblingOutcome } from './sibling.js';
 import { webhookSecretKey } from '../webhooks/signing.js';
 
 /**
@@ -52,6 +54,17 @@ import { webhookSecretKey } from '../webhooks/signing.js';
  *    transaction, and the door answers 500 so the sender retries (every
  *    Standard Webhooks sender, the chassis's own delivery included, takes a
  *    2xx as delivered and retries nothing else); the retry runs it again.
+ *  - THE SIBLING CONNECT (`connectSibling`, PRDCT-3774): a source that
+ *    declares a sibling tool of the same hub is connected as the person in
+ *    one call. A fresh receiving token is minted here but NOTHING is written
+ *    until the sibling has registered the URL: the hub turns the person's
+ *    grant into a two-minute token for the sibling, the sibling mints the
+ *    person a key, the endpoint of the previous run (if any) is deleted,
+ *    the new URL is registered with the declared events, and the key is
+ *    revoked; then ONE write stores the token's hash, the secret sealed and
+ *    the endpoint id. A failure anywhere leaves the row as it was: the
+ *    previous URL and secret keep answering. `disconnectSibling` deletes
+ *    the endpoint on the sibling first, then the row.
  */
 
 export const CONNECTION_SECRET_BOX_INFO = 'chassis:connection';
@@ -68,7 +81,17 @@ export class ConnectionRefusedError extends Error {
       | 'secret_refused'
       | 'source_unavailable'
       | 'unknown_field'
-      | 'field_required',
+      | 'field_required'
+      // The sibling connect (PRDCT-3774).
+      | 'not_sibling'
+      | 'sibling_unavailable'
+      | 'sibling_unknown'
+      | 'sibling_scope_missing'
+      | 'sibling_grant_missing'
+      | 'sibling_access_denied'
+      | 'sibling_workspace_missing'
+      | 'sibling_refused'
+      | 'hub_reauth_required',
     message: string
   ) {
     super(message);
@@ -85,6 +108,10 @@ export interface ConnectionServiceDeps<TDomain = unknown> {
   catalog: ConnectionCatalogIndex<TDomain>;
   /** The tool's `services` result, read lazily (a handler runs at request time). */
   getTool: () => TDomain | null;
+  /** The instance's display name: what the endpoint registered on a sibling is described as. */
+  instanceName: string;
+  /** The sibling connect's conversations (PRDCT-3774); null on an instance that is not on a hub. */
+  sibling?: SiblingConnector | null | undefined;
   now?: () => Date;
 }
 
@@ -285,6 +312,187 @@ export class ConnectionService<TDomain = unknown> {
       connection: await this.get(actor.workspaceId, key),
       receivingUrl: `${base}${CONNECTION_HOOK_PATH}/${key}/${token}`
     };
+  }
+
+  // ── The sibling connect (PRDCT-3774) ──────────────────────────────────────
+
+  /** The sibling's declaration and the connector, or the refusal that says why there is none. */
+  private siblingOf(key: string): {
+    source: ConnectionSourceDeclaration<TDomain>;
+    declared: NonNullable<ConnectionSourceDeclaration<TDomain>['sibling']>;
+    connector: SiblingConnector;
+  } {
+    const source = this.source(key);
+    if (!source.sibling) {
+      throw new ConnectionRefusedError('not_sibling', `${source.name} is not a sibling tool of this hub`);
+    }
+    if (!takesDeliveries(source.kind)) {
+      throw new ConnectionRefusedError('not_inbound', 'A key source has no receiving URL');
+    }
+    if (!this.deps.sibling) {
+      throw new ConnectionRefusedError(
+        'sibling_unavailable',
+        'This instance is not on a hub: connect the source by hand with its URL and its secret'
+      );
+    }
+    return { source, declared: source.sibling, connector: this.deps.sibling };
+  }
+
+  /** Our workspace's hub organization id, or the refusal: a local workspace projects nothing a sibling could match. */
+  private async centralAccountOf(workspaceId: string): Promise<string> {
+    const [row] = await this.deps.db
+      .select({ centralAccountId: workspaces.centralAccountId })
+      .from(workspaces)
+      .where(eq(workspaces.id, workspaceId));
+    if (!row?.centralAccountId) {
+      throw new ConnectionRefusedError(
+        'sibling_workspace_missing',
+        'This workspace is not an organization of the hub, so no workspace of the sibling can be its twin'
+      );
+    }
+    return row.centralAccountId;
+  }
+
+  /** An outcome's value, or the refusal as the route's error. */
+  private unwrap<T>(outcome: SiblingOutcome<T>, siblingName: string): T {
+    switch (outcome.kind) {
+      case 'ok':
+        return outcome.value;
+      case 'hub_reauth_required':
+        throw new ConnectionRefusedError('hub_reauth_required', 'Sign in again, then retry the connect');
+      case 'sibling_unknown':
+        throw new ConnectionRefusedError('sibling_unknown', outcome.message);
+      case 'sibling_scope_missing':
+        throw new ConnectionRefusedError(
+          'sibling_scope_missing',
+          'Your sign-in predates this connection: sign out, sign in again, then retry'
+        );
+      case 'sibling_access_denied':
+        throw new ConnectionRefusedError(
+          'sibling_access_denied',
+          `Your Antasphere account is not let into ${siblingName}`
+        );
+      case 'sibling_grant_missing':
+        throw new ConnectionRefusedError(
+          'sibling_grant_missing',
+          `Open ${siblingName} once with your account, then retry: it does not know you yet`
+        );
+      case 'sibling_workspace_missing':
+        throw new ConnectionRefusedError(
+          'sibling_workspace_missing',
+          `No workspace of ${siblingName} belongs to this organization: open ${siblingName} in it once, then retry`
+        );
+      case 'sibling_refused':
+        throw new ConnectionRefusedError('sibling_refused', outcome.message);
+      case 'unavailable':
+        throw new ConnectionRefusedError('source_unavailable', `Nothing changed: ${outcome.message}`);
+    }
+  }
+
+  /**
+   * Connect a sibling source AS THE PERSON: the receiving URL registered on
+   * the sibling and the signing secret stored, in one call, nothing shown.
+   * A re-run replaces the endpoint, the URL and the secret; the stored
+   * fields stay. Nothing is written here until the sibling has accepted.
+   */
+  async connectSibling(actor: ConnectionActor, key: string): Promise<Connection> {
+    const { declared, connector } = this.siblingOf(key);
+    const tool = connector.resolve(declared.toolSlug);
+    if (!tool) {
+      throw new ConnectionRefusedError(
+        'sibling_unknown',
+        `The hub lists no tool named "${declared.toolSlug}" in its fleet`
+      );
+    }
+    const centralAccountId = await this.centralAccountOf(actor.workspaceId);
+    const existing = await this.row(actor.workspaceId, key);
+    const token = randomBytes(32).toString('base64url');
+    const base = this.deps.publicBaseUrl.replace(/\/+$/, '');
+    const receivingUrl = `${base}${CONNECTION_HOOK_PATH}/${key}/${token}`;
+
+    const connectToken = this.unwrap(await connector.connectToken(actor.userId, tool.resourceUrl), tool.name);
+    const created = this.unwrap(
+      await connector.withPersonKey(tool, connectToken, async (personKey) => {
+        const twin = await connector.workspaceOf(tool, personKey, centralAccountId);
+        if (twin.kind !== 'ok') return twin;
+        if (existing?.siblingEndpointId) {
+          // The previous run's endpoint goes first, so the sibling never holds two of ours.
+          const gone = await connector.deleteEndpoint(
+            tool,
+            personKey,
+            twin.value,
+            existing.siblingEndpointId
+          );
+          if (gone.kind !== 'ok') return gone;
+        }
+        return connector.createEndpoint(tool, personKey, twin.value, {
+          url: receivingUrl,
+          events: declared.events,
+          description: `${this.deps.instanceName}: connected from Settings › Connections`
+        });
+      }),
+      tool.name
+    );
+
+    const now = this.now();
+    const sealed = this.box.seal(created.secret);
+    const written = {
+      tokenHash: hashToken(token),
+      urlMadeAt: now,
+      urlMadeBy: actor.userId,
+      secretSealed: sealed,
+      secretSetAt: now,
+      secretSetBy: actor.userId,
+      siblingEndpointId: created.id,
+      updatedAt: now
+    };
+    await this.deps.db
+      .insert(connections)
+      .values({ workspaceId: actor.workspaceId, source: key, connectedBy: actor.userId, ...written })
+      .onConflictDoUpdate({ target: [connections.workspaceId, connections.source], set: written });
+    this.deps.logger.info(
+      { source: key, sibling: tool.slug },
+      'connections: a sibling was connected as the person'
+    );
+    return this.get(actor.workspaceId, key);
+  }
+
+  /**
+   * Disconnect a sibling source as the person: the endpoint deleted on the
+   * sibling (one already gone counts), then the row and its log here. A
+   * sibling that cannot be reached leaves the row as it is, so the plain
+   * disconnect stays the way to drop the local half alone.
+   */
+  async disconnectSibling(actor: ConnectionActor, key: string): Promise<Connection> {
+    const { declared, connector } = this.siblingOf(key);
+    const existing = await this.row(actor.workspaceId, key);
+    if (existing?.siblingEndpointId) {
+      const tool = connector.resolve(declared.toolSlug);
+      if (!tool) {
+        throw new ConnectionRefusedError(
+          'sibling_unknown',
+          `The hub lists no tool named "${declared.toolSlug}" in its fleet`
+        );
+      }
+      const centralAccountId = await this.centralAccountOf(actor.workspaceId);
+      const endpointId = existing.siblingEndpointId;
+      const connectToken = this.unwrap(
+        await connector.connectToken(actor.userId, tool.resourceUrl),
+        tool.name
+      );
+      this.unwrap(
+        await connector.withPersonKey(tool, connectToken, async (personKey) => {
+          const twin = await connector.workspaceOf(tool, personKey, centralAccountId);
+          if (twin.kind !== 'ok') return twin;
+          return connector.deleteEndpoint(tool, personKey, twin.value, endpointId);
+        }),
+        tool.name
+      );
+    }
+    if (existing) {
+      await this.deps.db.delete(connections).where(eq(connections.id, existing.id));
+    }
+    return this.get(actor.workspaceId, key);
   }
 
   /**

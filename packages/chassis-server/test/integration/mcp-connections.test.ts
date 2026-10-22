@@ -14,8 +14,8 @@ import {
 } from './helpers.js';
 
 /**
- * The seven CONNECTION tools the chassis registers after the webhook tools
- * (PRDCT-3773), driven as a real MCP client would: raw JSON-RPC POSTs against
+ * The nine CONNECTION tools the chassis registers after the webhook tools
+ * (PRDCT-3773, PRDCT-3774), driven as a real MCP client would: raw JSON-RPC POSTs against
  * the stateless /mcp, authenticated with the host's own API keys.
  *
  * A read-only key lists the sources and reads a source's deliveries, and is
@@ -25,10 +25,13 @@ import {
  * signed delivery taken at the door and read back, a key source's refused and
  * accepted keys, its fields, the tests, the disconnect. An undeclared source
  * answers not_found and a key source has no receiving URL (not_inbound).
+ * The sibling connect runs on the oss edition here, so it answers
+ * sibling_unavailable for the sibling source and not_sibling for any other;
+ * the cloud end-to-end is connections-sibling.test.ts.
  *
  * Nothing here spells a tool's prefix or scope names: they come from `host`.
- * The sources are the chassis's minimal test tool's (`partner`, `ledger`,
- * `vault`); a host that declares none skips the file.
+ * The sources are the chassis's minimal test tool's (`partner`, `twin`,
+ * `ledger`, `vault`); a host that declares none skips the file.
  */
 const PASSWORD = 'a-long-mcp-connections-password-1';
 const OWNER = { email: 'owner@mcp-connections.test', name: 'Cora Owner', password: PASSWORD };
@@ -44,7 +47,9 @@ const CONNECTION_TOOLS = [
   'set_connection_fields',
   'test_connection',
   'disconnect_source',
-  'connection_deliveries'
+  'connection_deliveries',
+  'connect_sibling',
+  'disconnect_sibling'
 ].map((name) => `${PREFIX}${name}`);
 
 const TOOL = {
@@ -54,7 +59,9 @@ const TOOL = {
   fields: `${PREFIX}set_connection_fields`,
   test: `${PREFIX}test_connection`,
   disconnect: `${PREFIX}disconnect_source`,
-  deliveries: `${PREFIX}connection_deliveries`
+  deliveries: `${PREFIX}connection_deliveries`,
+  connectSibling: `${PREFIX}connect_sibling`,
+  disconnectSibling: `${PREFIX}disconnect_sibling`
 };
 
 let container: StartedPostgreSqlContainer;
@@ -177,7 +184,7 @@ describe.skipIf(!WEBHOOKS_SCOPE || !host.connections)('the connection tools', ()
   });
 
   describe('they are served under the host prefix', () => {
-    it('tools/list carries the seven right after the webhook tools, the reads flagged read-only', async () => {
+    it('tools/list carries the nine right after the webhook tools, the reads flagged read-only', async () => {
       interface ToolInfo {
         name: string;
         description: string;
@@ -197,18 +204,34 @@ describe.skipIf(!WEBHOOKS_SCOPE || !host.connections)('the connection tools', ()
       for (const name of [TOOL.list, TOOL.deliveries]) {
         expect(byName.get(name)!.annotations?.readOnlyHint, `${name} readOnlyHint`).toBe(true);
       }
-      for (const name of [TOOL.connect, TOOL.secret, TOOL.fields, TOOL.test, TOOL.disconnect]) {
+      for (const name of [
+        TOOL.connect,
+        TOOL.secret,
+        TOOL.fields,
+        TOOL.test,
+        TOOL.disconnect,
+        TOOL.connectSibling,
+        TOOL.disconnectSibling
+      ]) {
         expect(byName.get(name)!.annotations?.readOnlyHint, `${name} readOnlyHint`).not.toBe(true);
       }
       expect(byName.get(TOOL.connect)!.description).toContain('receivingUrl');
       expect(byName.get(TOOL.deliveries)!.description).toContain('read scope');
+      expect(byName.get(TOOL.connectSibling)!.description).toContain('AS THE PERSON');
+      expect(byName.get(TOOL.connectSibling)!.description).toContain('never a URL, never a secret');
+      expect(byName.get(TOOL.disconnectSibling)!.description).toContain('deleted on the sibling first');
     });
   });
 
   describe('a read-only key', () => {
     it('lists the declared sources, every one disconnected', async () => {
       const { connections } = await ok(readKey, TOOL.list);
-      expect(connections.map((c: { source: string }) => c.source)).toEqual(['partner', 'ledger', 'vault']);
+      expect(connections.map((c: { source: string }) => c.source)).toEqual([
+        'partner',
+        'twin',
+        'ledger',
+        'vault'
+      ]);
       for (const c of connections) {
         expect(c).toMatchObject({ connected: false, receiving: null, secretState: { set: false } });
       }
@@ -217,7 +240,7 @@ describe.skipIf(!WEBHOOKS_SCOPE || !host.connections)('the connection tools', ()
         events: ['thing.created', 'thing.deleted'],
         secretHint: 'whsec_…'
       });
-      expect(connections[2]).toMatchObject({ kind: 'key' });
+      expect(connections[3]).toMatchObject({ kind: 'key' });
     });
 
     it('is refused every write with the webhooks scope sentence, and nothing changes', async () => {
@@ -226,7 +249,9 @@ describe.skipIf(!WEBHOOKS_SCOPE || !host.connections)('the connection tools', ()
         [TOOL.secret, { source: 'vault', secret: 'vk_good' }],
         [TOOL.fields, { source: 'vault', fields: { folder: 'x' } }],
         [TOOL.test, { source: 'vault' }],
-        [TOOL.disconnect, { source: 'partner' }]
+        [TOOL.disconnect, { source: 'partner' }],
+        [TOOL.connectSibling, { source: 'twin' }],
+        [TOOL.disconnectSibling, { source: 'twin' }]
       ];
       for (const [name, args] of writes) {
         const res = await callTool(readKey, name, args);
@@ -361,7 +386,12 @@ describe.skipIf(!WEBHOOKS_SCOPE || !host.connections)('the connection tools', ()
       const log = await ok(readKey, TOOL.deliveries, { source: 'partner' });
       expect(log.deliveries).toEqual([]);
       const { connections } = await ok(readKey, TOOL.list);
-      expect(connections.map((x: { source: string }) => x.source)).toEqual(['partner', 'ledger', 'vault']);
+      expect(connections.map((x: { source: string }) => x.source)).toEqual([
+        'partner',
+        'twin',
+        'ledger',
+        'vault'
+      ]);
     });
   });
 
@@ -376,6 +406,32 @@ describe.skipIf(!WEBHOOKS_SCOPE || !host.connections)('the connection tools', ()
     it('a key source is refused a receiving URL (not_inbound), told to set its key instead', async () => {
       const { text, hint } = await refused(manageKey, TOOL.connect, { source: 'vault' }, 'not_inbound');
       expect(hint, `no "Next:" sentence in: ${text}`).toContain('set its key instead');
+    });
+
+    it('the sibling connect on an instance off any hub answers sibling_unavailable, and nothing changes', async () => {
+      const before = await ok(readKey, TOOL.list);
+      for (const name of [TOOL.connectSibling, TOOL.disconnectSibling]) {
+        const { text, hint } = await refused(manageKey, name, { source: 'twin' }, 'sibling_unavailable');
+        expect(text).toContain('HTTP 409');
+        expect(hint, `no "Next:" sentence in: ${text}`).toContain('not on a hub');
+      }
+      const after = await ok(readKey, TOOL.list);
+      expect(after).toEqual(before);
+      const twin = after.connections.find((c: { source: string }) => c.source === 'twin');
+      expect(twin.declared.sibling).toEqual({ toolSlug: 'twin', events: ['thing.created'] });
+      expect(twin).toMatchObject({ connected: false, receiving: null, secretState: { set: false } });
+    });
+
+    it('a source that is not a sibling answers not_sibling, told to connect it by hand', async () => {
+      const { text, hint } = await refused(
+        manageKey,
+        TOOL.connectSibling,
+        { source: 'partner' },
+        'not_sibling'
+      );
+      expect(text).toContain('HTTP 409');
+      expect(hint, `no "Next:" sentence in: ${text}`).toContain(`${PREFIX}connect_source`);
+      expect(hint).toContain(`${PREFIX}set_connection_secret`);
     });
   });
 });

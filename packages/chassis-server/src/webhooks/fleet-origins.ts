@@ -53,8 +53,20 @@ export interface FleetOriginsRead {
   error?: string;
 }
 
+/** One tool of the fleet, as the hub lists it: what a sibling connect resolves a declared slug to (PRDCT-3774). */
+export interface FleetTool {
+  slug: string;
+  clientId: string;
+  name: string;
+  /** The launch URL's origin, as `URL.origin` spells it. */
+  origin: string;
+  /** The tool's RFC 8707 resource identifier (`<origin>/mcp` by convention): the audience of a connect token. */
+  resourceUrl: string;
+}
+
 export class FleetOrigins {
   private origins: ReadonlySet<string> = new Set();
+  private tools: ReadonlyMap<string, FleetTool> = new Map();
   private readonly url: string;
   private readonly dials: FleetOriginsDials;
   private readonly fetchImpl: typeof fetch;
@@ -77,6 +89,11 @@ export class FleetOrigins {
   /** The current list: what the policy reads at every check. */
   get(): ReadonlySet<string> {
     return this.origins;
+  }
+
+  /** The fleet tool of a registry slug, or null when the hub's list (as last read) names none. */
+  tool(slug: string): FleetTool | null {
+    return this.tools.get(slug) ?? null;
   }
 
   /**
@@ -105,8 +122,23 @@ export class FleetOrigins {
       if (!parsed.success)
         throw new Error(`off the hub contract: ${parsed.error.issues[0]?.message ?? 'invalid'}`);
       const next = new Set<string>();
-      for (const tool of parsed.data.tools) next.add(new URL(tool.origin).origin);
+      const tools = new Map<string, FleetTool>();
+      for (const tool of parsed.data.tools) {
+        const origin = new URL(tool.origin).origin;
+        next.add(origin);
+        // The first entry of a slug wins; the hub's registry refuses a duplicate anyway.
+        if (!tools.has(tool.slug)) {
+          tools.set(tool.slug, {
+            slug: tool.slug,
+            clientId: tool.clientId,
+            name: tool.name,
+            origin,
+            resourceUrl: tool.resourceUrl
+          });
+        }
+      }
       this.origins = next;
+      this.tools = tools;
       this.fetchedAt = new Date();
       this.lastError = null;
       this.opts.logger.info({ origins: next.size }, 'webhooks: the fleet origins were read from the hub');

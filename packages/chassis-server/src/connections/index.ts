@@ -34,5 +34,12 @@ export {
   type ConnectionReceipt,
   type ConnectionServiceDeps
 } from './service.js';
+export {
+  DEFAULT_SIBLING_TIMEOUT_MS,
+  SiblingConnector,
+  type SiblingConnectorDeps,
+  type SiblingOutcome,
+  type SiblingRefusal
+} from './sibling.js';
 export { CONNECTION_BODY_MAX, connectionDoor } from './door.js';
 export { connectionJobs } from './jobs.js';
