@@ -36,6 +36,7 @@ import type {
   WebhookService
 } from './webhooks/index.js';
 import type { SafeFetchOptions } from './webhooks/safe-fetch.js';
+import type { FleetOrigins, FleetOriginsDials } from './webhooks/fleet-origins.js';
 import type { PlatformRegistry } from './platform/registry.js';
 import type { RuntimeState } from './state.js';
 import type { StorageDriver } from './storage/driver.js';
@@ -420,6 +421,8 @@ export interface BootOverrides<TToolOverrides = never> {
   webhookDials?: Partial<WebhookDials> | undefined;
   /** The guarded fetch's seams (a lookup, a transport) so a suite delivers to a loopback receiver. */
   webhookFetch?: SafeFetchOptions | undefined;
+  /** Shrinks the fleet origins' refresh, retry and read budget (webhooks/fleet-origins.ts) for the cloud tests. */
+  fleetOriginsDials?: Partial<FleetOriginsDials> | undefined;
 }
 
 export interface BootResult<
@@ -443,6 +446,8 @@ export interface BootResult<
   authSecret: string;
   /** The outbound webhooks (PRDCT-3482): the emitter, the fan-out and the delivery, for a suite to drive directly. */
   webhooks: WebhookService;
+  /** The fleet (PRDCT-3772): the hub's registry origins the delivery guard reads; null on an oss boot. */
+  fleetOrigins: FleetOrigins | null;
 }
 
 /**

@@ -20,6 +20,13 @@ import {
 const CLOSED: SafeFetchPolicy = { allowPrivateNetworks: false, httpsOnly: false };
 const OPEN: SafeFetchPolicy = { allowPrivateNetworks: true, httpsOnly: false };
 const CLOUD: SafeFetchPolicy = { allowPrivateNetworks: false, httpsOnly: true };
+/** The cloud edition inside a stack: two siblings of the same hub, one of them on http and a port (a laptop stack). */
+const FLEET = new Set(['https://crm.example.com', 'http://crm.stack.localhost:3750']);
+const CLOUD_FLEET: SafeFetchPolicy = {
+  allowPrivateNetworks: false,
+  httpsOnly: true,
+  fleetOrigins: () => FLEET
+};
 
 interface Seen {
   method: string | undefined;
@@ -164,6 +171,72 @@ describe('checkWebhookUrl', () => {
 
   it('refuses what is not a URL', () => {
     expect(refusedSync(() => checkWebhookUrl('not a url', CLOSED))).toBe('malformed');
+  });
+
+  describe('the fleet (PRDCT-3772): a sibling of the same hub is reached as the hub names it', () => {
+    it('a fleet origin passes the https rule and the port rule on the cloud edition', () => {
+      expect(checkWebhookUrl('http://crm.stack.localhost:3750/hooks/meet/t', CLOUD_FLEET).port).toBe('3750');
+      expect(checkWebhookUrl('https://crm.example.com/hooks/meet/t', CLOUD_FLEET).hostname).toBe(
+        'crm.example.com'
+      );
+    });
+
+    it('a fleet origin passes the literal private address rule', () => {
+      const policy: SafeFetchPolicy = { ...CLOUD, fleetOrigins: () => new Set(['http://10.0.0.7:3752']) };
+      expect(checkWebhookUrl('http://10.0.0.7:3752/hooks', policy).hostname).toBe('10.0.0.7');
+    });
+
+    it('the same host off the fleet keeps the public-only rule: the origin is the whole of the scheme, the host and the port', () => {
+      // another port on a fleet host
+      expect(refusedSync(() => checkWebhookUrl('http://crm.stack.localhost:3751/hooks', CLOUD_FLEET))).toBe(
+        'https_required'
+      );
+      // the fleet host on the other scheme
+      expect(refusedSync(() => checkWebhookUrl('http://crm.example.com/hooks', CLOUD_FLEET))).toBe(
+        'https_required'
+      );
+      // a port on the https sibling
+      expect(refusedSync(() => checkWebhookUrl('https://crm.example.com:8443/hooks', CLOUD_FLEET))).toBe(
+        'port'
+      );
+      // a stranger beside the fleet
+      expect(refusedSync(() => checkWebhookUrl('http://other.stack.localhost:3750/hooks', CLOUD_FLEET))).toBe(
+        'https_required'
+      );
+      expect(refusedSync(() => checkWebhookUrl('http://127.0.0.1/', CLOUD_FLEET))).toBe('https_required');
+      expect(refusedSync(() => checkWebhookUrl('https://127.0.0.1/', CLOUD_FLEET))).toBe('private_address');
+    });
+
+    it('the scheme and userinfo rules hold on a fleet origin too', () => {
+      expect(
+        refusedSync(() => checkWebhookUrl('http://u:p@crm.stack.localhost:3750/hooks', CLOUD_FLEET))
+      ).toBe('userinfo');
+      expect(refusedSync(() => checkWebhookUrl('ftp://crm.example.com/', CLOUD_FLEET))).toBe('scheme');
+    });
+
+    it('the list is read live: an origin the hub drops is refused at the next check, one it adds passes', () => {
+      let live = new Set<string>();
+      const policy: SafeFetchPolicy = { ...CLOUD, fleetOrigins: () => live };
+      expect(refusedSync(() => checkWebhookUrl('http://late.stack.localhost:3750/', policy))).toBe(
+        'https_required'
+      );
+      live = new Set(['http://late.stack.localhost:3750']);
+      expect(checkWebhookUrl('http://late.stack.localhost:3750/', policy).host).toBe(
+        'late.stack.localhost:3750'
+      );
+      live = new Set();
+      expect(refusedSync(() => checkWebhookUrl('http://late.stack.localhost:3750/', policy))).toBe(
+        'https_required'
+      );
+    });
+
+    it('an absent or empty fleet changes nothing', () => {
+      const empty: SafeFetchPolicy = { ...CLOUD, fleetOrigins: () => new Set() };
+      expect(refusedSync(() => checkWebhookUrl('http://crm.stack.localhost:3750/', empty))).toBe(
+        'https_required'
+      );
+      expect(refusedSync(() => checkWebhookUrl('https://127.0.0.1/', CLOUD))).toBe('private_address');
+    });
   });
 });
 
@@ -326,5 +399,59 @@ describe('safePost through the lookup seam', () => {
     });
     expect(result).toMatchObject({ status: 200, bodyText: 'ok' });
     expect(transportCalls).toBe(1);
+  });
+});
+
+describe('safePost to a fleet origin (PRDCT-3772): the address rule inside the socket lookup is lifted for the sibling alone', () => {
+  it('a fleet origin resolving to a private address is delivered, the same address on a stranger is refused, through the default transport', async () => {
+    // The receiver is the loopback server; the fleet names its origin, so the
+    // socket's own lookup (no transport seam) connects to the private address.
+    const origin = base;
+    const fleet: SafeFetchPolicy = {
+      allowPrivateNetworks: false,
+      httpsOnly: false,
+      fleetOrigins: () => new Set([origin])
+    };
+    const before = seen.length;
+    const res = await safePost(
+      `${origin}/sibling`,
+      { 'content-type': 'application/json' },
+      '{"ping":1}',
+      fleet
+    );
+    expect(res.status).toBe(200);
+    expect(seen.length).toBe(before + 1);
+    expect(seen.at(-1)).toMatchObject({ method: 'POST', url: '/sibling', body: '{"ping":1}' });
+
+    // A stranger resolving to the same loopback address: refused by the lookup, the receiver never sees it.
+    const asked: string[] = [];
+    expect(
+      await refusal(
+        safePost('http://stranger.test/hook', {}, '{}', fleet, {
+          lookup: async (host) => {
+            asked.push(host);
+            return [{ address: '127.0.0.1', family: 4 }];
+          }
+        })
+      )
+    ).toBe('private_address');
+    expect(asked).toEqual(['stranger.test']);
+    expect(seen.length).toBe(before + 1);
+  });
+
+  it('a fleet origin named by a host name resolving privately is delivered through the test transport seam too', async () => {
+    const fleet: SafeFetchPolicy = {
+      allowPrivateNetworks: false,
+      httpsOnly: true,
+      fleetOrigins: () => new Set(['http://crm.stack.localhost:3750'])
+    };
+    const before = seen.length;
+    const res = await safePost('http://crm.stack.localhost:3750/hooks/meet/t', {}, '{}', fleet, {
+      lookup: async () => [{ address: '172.18.0.5', family: 4 }],
+      transport: viaLocalServer()
+    });
+    expect(res.status).toBe(200);
+    expect(seen.length).toBe(before + 1);
+    expect(seen.at(-1)!.url).toBe('/hooks/meet/t');
   });
 });

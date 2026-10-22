@@ -6,7 +6,8 @@ import {
   usageEventSchema,
   usageEventsBatchSchema,
   usageIngestResultSchema,
-  meAppsSchema
+  meAppsSchema,
+  toolOriginsSchema
 } from '@antasphere/chassis-contract';
 import { randomUUID } from 'node:crypto';
 import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
@@ -194,6 +195,10 @@ export class FakeHub {
   /** Per user and tool, the organizations that do NOT open the tool to them (absent = open everywhere). */
   private readonly userToolClosed = new Map<string, Set<string>>();
   readonly meAppsRequests: Array<{ auth: string | null; orgId: string | null }> = [];
+  /** GET /api/v1/tool-origins (PRDCT-3772): `ok` answers the registry's origins, `http500` a 500, `network` destroys the socket. */
+  toolOriginsMode: 'ok' | 'http500' | 'network' = 'ok';
+  /** Every read of GET /api/v1/tool-origins: the authorization header presented (the chassis sends none). */
+  readonly toolOriginsRequests: Array<{ auth: string | null }> = [];
   /** Every JWT access token this fake minted (bearer lookup for /api/v1). */
   private readonly accessTokens = new Map<string, AccessTokenRecord>();
   /** Live + rotated-out refresh tokens (rotation families). */
@@ -566,6 +571,9 @@ export class FakeHub {
     }
     if (req.method === 'GET' && url.pathname === '/api/v1/me/apps') {
       return this.handleMeApps(req, res);
+    }
+    if (req.method === 'GET' && url.pathname === '/api/v1/tool-origins') {
+      return this.handleToolOrigins(req, res);
     }
     if (req.method === 'POST' && url.pathname === '/api/v1/orgs') {
       return this.handleOrgCreate(req, res);
@@ -956,6 +964,38 @@ export class FakeHub {
         error: {
           code: 'fake_hub_drift',
           message: `/me/apps body is off the hub contract: ${checked.error.message}`
+        }
+      });
+    }
+    return sendJson(res, 200, body);
+  }
+
+  // ── GET /api/v1/tool-origins: the registry's origins, public (PRDCT-3772) ─
+  // Mirrors the hub's handler: no credential read, every registered tool's
+  // client id, name and launch URL ORIGIN, in registry order, validated
+  // against the hub's contract before it is sent.
+  private handleToolOrigins(req: IncomingMessage, res: ServerResponse): void {
+    this.toolOriginsRequests.push({ auth: req.headers.authorization ?? null });
+    if (this.toolOriginsMode === 'network') {
+      res.socket?.destroy();
+      return;
+    }
+    if (this.toolOriginsMode === 'http500') {
+      return sendJson(res, 500, { error: { code: 'internal', message: 'boom' } });
+    }
+    const body = {
+      tools: this.tools.map((tool) => ({
+        clientId: `tool-${tool.slug}`,
+        name: tool.name,
+        origin: new URL(tool.launchUrl).origin
+      }))
+    };
+    const checked = toolOriginsSchema.safeParse(body);
+    if (!checked.success) {
+      return sendJson(res, 500, {
+        error: {
+          code: 'fake_hub_drift',
+          message: `/tool-origins body is off the hub contract: ${checked.error.message}`
         }
       });
     }
