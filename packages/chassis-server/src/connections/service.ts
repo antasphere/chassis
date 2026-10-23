@@ -7,7 +7,8 @@ import {
   workspaces,
   type ConnectionDeliveryRow,
   type ConnectionRow,
-  type Db
+  type Db,
+  type DbConn
 } from '@antasphere/chassis-db';
 import type {
   Connection,
@@ -30,6 +31,7 @@ import {
 } from './catalog.js';
 import { NAMED_VERIFIERS } from './verifiers.js';
 import type { SiblingConnector, SiblingOutcome } from './sibling.js';
+import type { FleetTool } from '../webhooks/fleet-origins.js';
 import { webhookSecretKey } from '../webhooks/signing.js';
 
 /**
@@ -68,6 +70,13 @@ import { webhookSecretKey } from '../webhooks/signing.js';
  */
 
 export const CONNECTION_SECRET_BOX_INFO = 'chassis:connection';
+/**
+ * The sibling connect's lock, two-int advisory form `(classid, hashtext(workspace:source))`
+ * (PRDCT-3774, verifier round 5 F1): two connects of one source at once would both
+ * register an endpoint on the sibling and the row would point at one of them. 7432007 is
+ * free in this repository (7432006 is the workspace creation's).
+ */
+export const CONNECTION_SIBLING_LOCK_NAMESPACE = 7432007;
 export const CONNECTION_DELIVERIES_PURGE_QUEUE = 'connection-deliveries-purge';
 const MAX_ERROR_TEXT = 500;
 
@@ -389,67 +398,95 @@ export class ConnectionService<TDomain = unknown> {
     }
   }
 
+  /** The sibling as the hub lists it, or the refusal: unknown once the fleet was read, unavailable before. */
+  private siblingTool(connector: SiblingConnector, slug: string): FleetTool {
+    const tool = connector.resolve(slug);
+    if (tool) return tool;
+    if (!connector.fleetRead()) {
+      throw new ConnectionRefusedError(
+        'source_unavailable',
+        'Nothing changed: the hub has not answered the fleet list yet, try again in a minute'
+      );
+    }
+    throw new ConnectionRefusedError('sibling_unknown', `The hub lists no tool named "${slug}" in its fleet`);
+  }
+
+  /**
+   * One connect or disconnect of a source at a time per workspace: the
+   * transaction-scoped advisory lock, held across the conversations with
+   * the hub and the sibling, so a second caller reads the row the first one
+   * wrote and the sibling never holds two endpoints of ours (verifier round
+   * 5, F1). The lock cannot leak: it ends with the transaction.
+   */
+  private async serialized<T>(
+    workspaceId: string,
+    key: string,
+    work: (tx: DbConn) => Promise<T>
+  ): Promise<T> {
+    return this.deps.db.transaction(async (tx) => {
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(${CONNECTION_SIBLING_LOCK_NAMESPACE}, hashtext(${`${workspaceId}:${key}`}))`
+      );
+      return work(tx);
+    });
+  }
+
   /**
    * Connect a sibling source AS THE PERSON: the receiving URL registered on
    * the sibling and the signing secret stored, in one call, nothing shown.
    * A re-run replaces the endpoint, the URL and the secret; the stored
-   * fields stay. Nothing is written here until the sibling has accepted.
+   * fields stay. Nothing is written here until the sibling has accepted,
+   * and two connects of one source at once run one after the other.
    */
   async connectSibling(actor: ConnectionActor, key: string): Promise<Connection> {
     const { declared, connector } = this.siblingOf(key);
-    const tool = connector.resolve(declared.toolSlug);
-    if (!tool) {
-      throw new ConnectionRefusedError(
-        'sibling_unknown',
-        `The hub lists no tool named "${declared.toolSlug}" in its fleet`
-      );
-    }
+    const tool = this.siblingTool(connector, declared.toolSlug);
     const centralAccountId = await this.centralAccountOf(actor.workspaceId);
-    const existing = await this.row(actor.workspaceId, key);
-    const token = randomBytes(32).toString('base64url');
-    const base = this.deps.publicBaseUrl.replace(/\/+$/, '');
-    const receivingUrl = `${base}${CONNECTION_HOOK_PATH}/${key}/${token}`;
+    await this.serialized(actor.workspaceId, key, async (tx) => {
+      // The row is not read here: every previous endpoint of ours is found on the sibling itself.
+      const token = randomBytes(32).toString('base64url');
+      const base = this.deps.publicBaseUrl.replace(/\/+$/, '');
+      const doorPrefix = `${base}${CONNECTION_HOOK_PATH}/${key}/`;
+      const receivingUrl = `${doorPrefix}${token}`;
 
-    const connectToken = this.unwrap(await connector.connectToken(actor.userId, tool.resourceUrl), tool.name);
-    const created = this.unwrap(
-      await connector.withPersonKey(tool, connectToken, async (personKey) => {
-        const twin = await connector.workspaceOf(tool, personKey, centralAccountId);
-        if (twin.kind !== 'ok') return twin;
-        if (existing?.siblingEndpointId) {
-          // The previous run's endpoint goes first, so the sibling never holds two of ours.
-          const gone = await connector.deleteEndpoint(
-            tool,
-            personKey,
-            twin.value,
-            existing.siblingEndpointId
-          );
+      const connectToken = this.unwrap(
+        await connector.connectToken(actor.userId, tool.resourceUrl),
+        tool.name
+      );
+      const created = this.unwrap(
+        await connector.withPersonKey(tool, connectToken, async (personKey) => {
+          const twin = await connector.workspaceOf(tool, personKey, centralAccountId);
+          if (twin.kind !== 'ok') return twin;
+          // Every previous endpoint of ours for this source goes first (the tracked one, and any
+          // left by hand or by a lost race): after this connect they would only deliver to a URL
+          // that answers 404, and the sibling never holds two of ours.
+          const gone = await connector.deleteOurEndpoints(tool, personKey, twin.value, doorPrefix);
           if (gone.kind !== 'ok') return gone;
-        }
-        return connector.createEndpoint(tool, personKey, twin.value, {
-          url: receivingUrl,
-          events: declared.events,
-          description: `${this.deps.instanceName}: connected from Settings › Connections`
-        });
-      }),
-      tool.name
-    );
+          return connector.createEndpoint(tool, personKey, twin.value, {
+            url: receivingUrl,
+            events: declared.events,
+            description: `${this.deps.instanceName}: connected from Settings › Connections`
+          });
+        }),
+        tool.name
+      );
 
-    const now = this.now();
-    const sealed = this.box.seal(created.secret);
-    const written = {
-      tokenHash: hashToken(token),
-      urlMadeAt: now,
-      urlMadeBy: actor.userId,
-      secretSealed: sealed,
-      secretSetAt: now,
-      secretSetBy: actor.userId,
-      siblingEndpointId: created.id,
-      updatedAt: now
-    };
-    await this.deps.db
-      .insert(connections)
-      .values({ workspaceId: actor.workspaceId, source: key, connectedBy: actor.userId, ...written })
-      .onConflictDoUpdate({ target: [connections.workspaceId, connections.source], set: written });
+      const now = this.now();
+      const written = {
+        tokenHash: hashToken(token),
+        urlMadeAt: now,
+        urlMadeBy: actor.userId,
+        secretSealed: this.box.seal(created.secret),
+        secretSetAt: now,
+        secretSetBy: actor.userId,
+        siblingEndpointId: created.id,
+        updatedAt: now
+      };
+      await tx
+        .insert(connections)
+        .values({ workspaceId: actor.workspaceId, source: key, connectedBy: actor.userId, ...written })
+        .onConflictDoUpdate({ target: [connections.workspaceId, connections.source], set: written });
+    });
     this.deps.logger.info(
       { source: key, sibling: tool.slug },
       'connections: a sibling was connected as the person'
@@ -465,33 +502,33 @@ export class ConnectionService<TDomain = unknown> {
    */
   async disconnectSibling(actor: ConnectionActor, key: string): Promise<Connection> {
     const { declared, connector } = this.siblingOf(key);
-    const existing = await this.row(actor.workspaceId, key);
-    if (existing?.siblingEndpointId) {
-      const tool = connector.resolve(declared.toolSlug);
-      if (!tool) {
-        throw new ConnectionRefusedError(
-          'sibling_unknown',
-          `The hub lists no tool named "${declared.toolSlug}" in its fleet`
+    await this.serialized(actor.workspaceId, key, async (tx) => {
+      const [existing] = await tx
+        .select()
+        .from(connections)
+        .where(and(eq(connections.workspaceId, actor.workspaceId), eq(connections.source, key)));
+      if (existing?.siblingEndpointId) {
+        const tool = this.siblingTool(connector, declared.toolSlug);
+        const centralAccountId = await this.centralAccountOf(actor.workspaceId);
+        const doorPrefix = `${this.deps.publicBaseUrl.replace(/\/+$/, '')}${CONNECTION_HOOK_PATH}/${key}/`;
+        const connectToken = this.unwrap(
+          await connector.connectToken(actor.userId, tool.resourceUrl),
+          tool.name
+        );
+        this.unwrap(
+          await connector.withPersonKey(tool, connectToken, async (personKey) => {
+            const twin = await connector.workspaceOf(tool, personKey, centralAccountId);
+            if (twin.kind !== 'ok') return twin;
+            // The tracked endpoint and any other of ours for this source.
+            return connector.deleteOurEndpoints(tool, personKey, twin.value, doorPrefix);
+          }),
+          tool.name
         );
       }
-      const centralAccountId = await this.centralAccountOf(actor.workspaceId);
-      const endpointId = existing.siblingEndpointId;
-      const connectToken = this.unwrap(
-        await connector.connectToken(actor.userId, tool.resourceUrl),
-        tool.name
-      );
-      this.unwrap(
-        await connector.withPersonKey(tool, connectToken, async (personKey) => {
-          const twin = await connector.workspaceOf(tool, personKey, centralAccountId);
-          if (twin.kind !== 'ok') return twin;
-          return connector.deleteEndpoint(tool, personKey, twin.value, endpointId);
-        }),
-        tool.name
-      );
-    }
-    if (existing) {
-      await this.deps.db.delete(connections).where(eq(connections.id, existing.id));
-    }
+      if (existing) {
+        await tx.delete(connections).where(eq(connections.id, existing.id));
+      }
+    });
     return this.get(actor.workspaceId, key);
   }
 

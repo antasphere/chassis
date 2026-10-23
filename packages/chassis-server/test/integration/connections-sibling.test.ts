@@ -57,6 +57,13 @@ const MEMBER: HubUserFixture = {
   name: 'Mem Ber',
   role: 'member'
 };
+/** An admin whose grant on this tool the hub tears down before the connect. */
+const DEAD: HubUserFixture = {
+  ...ADMIN,
+  sub: 'hub-user-sibling-dead',
+  email: 'sibling-dead@example.com',
+  name: 'Dee Ad'
+};
 
 let container: StartedPostgreSqlContainer;
 let hub: FakeHub;
@@ -173,14 +180,16 @@ beforeAll(async () => {
     ['admin', ADMIN],
     ['legacy', LEGACY],
     ['stranger', STRANGER],
-    ['member', MEMBER]
+    ['member', MEMBER],
+    ['dead', DEAD]
   ] as const) {
     cookies[name] = await sso.ssoLogin(here, hub, fixture);
   }
   for (const [name, fixture] of [
     ['admin', ADMIN],
     ['legacy', LEGACY],
-    ['member', MEMBER]
+    ['member', MEMBER],
+    ['dead', DEAD]
   ] as const) {
     twinCookies[name] = await sso.ssoLogin(twin, hub, fixture);
   }
@@ -372,6 +381,66 @@ describe.skipIf(!host.connections)('connecting the twin as the person', () => {
     expect((await twin.db.db.select().from(apiKeys)).length).toBe(before);
     expect((await twin.db.db.select().from(apiKeys).where(isNull(apiKeys.revokedAt))).length).toBe(0);
     expect((await twinEndpoints()).map((e) => e.id)).toEqual([endpointId]);
+    // And nothing was written here: the hub had answered, the sibling had not accepted (round 5, F4).
+    const card = await readJson(await hereCall('GET', '/connections/twin'));
+    expect(card.sibling.endpointId).toBe(endpointId);
+    expect(card.receiving.madeAt).toBe(madeAt);
+  });
+
+  it('9b. an admin whose grant the hub tore down is told to sign in again, 401; nothing changed', async () => {
+    hub.revokeGrants(DEAD.sub);
+    const body = (await expectError(
+      await hereCall('POST', '/connections/twin/sibling', 'dead'),
+      401,
+      'hub_reauth_required'
+    )) as { error: { message: string } };
+    expect(body.error.message).toMatch(/sign in again/i);
+    expect((await twinEndpoints()).map((e) => e.id)).toEqual([endpointId]);
+    const card = await readJson(await hereCall('GET', '/connections/twin'));
+    expect(card.sibling.endpointId).toBe(endpointId);
+  });
+
+  it('9d. an endpoint of ours left on the twin by hand (an old URL of this source) is removed by the next connect', async () => {
+    const stale = await twinCall('POST', '/webhooks', {
+      url: `${hereBase}/hooks/twin/stale-token-from-an-earlier-walk-0000000000`,
+      events: ['thing.created'],
+      description: 'made by hand'
+    });
+    expect(stale.status).toBe(201);
+    const staleId = (await readJson(stale)).id;
+    // Another tool's endpoint in the same workspace is not ours: it stays.
+    const other = await twinCall('POST', '/webhooks', {
+      url: `${hereBase}/hooks/partner/another-source-of-this-tool-00000000000`,
+      events: ['thing.created'],
+      description: 'another source'
+    });
+    expect(other.status).toBe(201);
+    const otherId = (await readJson(other)).id;
+    expect((await twinEndpoints()).map((e) => e.id).sort()).toEqual([endpointId, staleId, otherId].sort());
+    const res = await hereCall('POST', '/connections/twin/sibling');
+    expect(res.status, await res.clone().text()).toBe(200);
+    const body = await readJson(res);
+    const after = await twinEndpoints();
+    expect(after.map((e) => e.id).sort()).toEqual([body.sibling.endpointId, otherId].sort());
+    endpointId = body.sibling.endpointId;
+    madeAt = body.receiving.madeAt;
+    // Clean the other source's endpoint by hand, so the disconnect scenario reads an empty list.
+    expect((await twinCall('DELETE', `/webhooks/${otherId}`)).status).toBe(200);
+  });
+
+  it('9c. two connects of the same source at once run one after the other: ONE endpoint on the twin, the row points at it', async () => {
+    const [a, b] = await Promise.all([
+      hereCall('POST', '/connections/twin/sibling'),
+      hereCall('POST', '/connections/twin/sibling')
+    ]);
+    expect([a.status, b.status]).toEqual([200, 200]);
+    const endpoints = await twinEndpoints();
+    expect(endpoints).toHaveLength(1);
+    const card = await readJson(await hereCall('GET', '/connections/twin'));
+    expect(card.sibling.endpointId).toBe(endpoints[0]!.id);
+    expect((await twin.db.db.select().from(apiKeys).where(isNull(apiKeys.revokedAt))).length).toBe(0);
+    endpointId = card.sibling.endpointId;
+    madeAt = card.receiving.madeAt;
   });
 
   it('10. a member is refused flat, and a source that declares no sibling is 409', async () => {
