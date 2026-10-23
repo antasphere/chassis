@@ -341,6 +341,10 @@ describe('SiblingConnector · the sibling, as the person', () => {
       'DELETE /api/v1/webhooks/ours-1',
       'DELETE /api/v1/webhooks/ours-2'
     ]);
+    // Every call in the sibling workspace, as the key.
+    expect(
+      calls.every((c) => c.headers['x-workspace-id'] === 'w' && c.headers.authorization === `Bearer ${KEY}`)
+    ).toBe(true);
     const refused = harness({
       'GET /api/v1/webhooks': [{ status: 403, body: err('forbidden', 'Only an owner') }]
     });
@@ -348,6 +352,61 @@ describe('SiblingConnector · the sibling, as the person', () => {
       kind: 'sibling_refused',
       message: 'Twin would not list its endpoints: Only an owner'
     });
+  });
+
+  it('keeps the endpoint just made, deletes the tracked one by id whatever its URL, and never one of a source whose key merely starts the same', async () => {
+    const page = {
+      webhooks: [
+        { id: 'new', url: 'https://things.example.com/hooks/twin/tok-new' },
+        { id: 'stale', url: 'https://things.example.com/hooks/twin/tok-old' },
+        { id: 'twin-other', url: 'https://things.example.com/hooks/twin-other/tok' },
+        { id: 'tracked-legacy', url: 'https://things.example.com/legacy/hooks/twin/tok' }
+      ],
+      nextCursor: null
+    };
+    const { connector, calls } = harness({
+      'GET /api/v1/webhooks': [{ status: 200, body: page }],
+      'DELETE /api/v1/webhooks/stale': [{ status: 200, body: { id: 'stale' } }],
+      'DELETE /api/v1/webhooks/tracked-legacy': [{ status: 200, body: { id: 'tracked-legacy' } }]
+    });
+    const out = await connector.deleteOurEndpoints(TWIN, KEY, 'w', 'https://things.example.com/hooks/twin/', {
+      keep: 'new',
+      also: 'tracked-legacy'
+    });
+    expect(out).toEqual({ kind: 'ok', value: 2 });
+    expect(
+      calls
+        .filter((c) => c.method === 'DELETE')
+        .map((c) => new URL(c.url).pathname)
+        .sort()
+    ).toEqual(['/api/v1/webhooks/stale', '/api/v1/webhooks/tracked-legacy']);
+    // `also` equal to `keep` deletes nothing.
+    const same = harness({
+      'GET /api/v1/webhooks': [{ status: 200, body: { webhooks: [], nextCursor: null } }]
+    });
+    expect(await same.connector.deleteOurEndpoints(TWIN, KEY, 'w', 'x/', { keep: 'n', also: 'n' })).toEqual({
+      kind: 'ok',
+      value: 0
+    });
+  });
+
+  it('a connect has one budget: a call past its deadline is unavailable without reaching the sibling', async () => {
+    const { connector, calls } = harness({ 'GET /api/v1/me': [{ status: 200, body: { workspaces: [] } }] });
+    const budget = { deadlineAt: Date.now() - 1 };
+    expect(await connector.workspaceOf(TWIN, KEY, 'org-1', budget)).toEqual({
+      kind: 'unavailable',
+      message: 'the connect took too long'
+    });
+    expect(await connector.connectToken('u1', TWIN.resourceUrl, budget)).toEqual({
+      kind: 'unavailable',
+      message: 'the connect took too long'
+    });
+    expect(calls).toHaveLength(0);
+    // Inside the budget the call goes through.
+    expect(await connector.workspaceOf(TWIN, KEY, 'org-1', connector.budget())).toEqual({
+      kind: 'sibling_workspace_missing'
+    });
+    expect(calls).toHaveLength(1);
   });
 
   it('deletes the endpoint, one already gone counting as deleted; a refusal is the twin’s', async () => {

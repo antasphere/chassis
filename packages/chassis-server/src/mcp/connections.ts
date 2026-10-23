@@ -62,6 +62,7 @@ export function connectionErrorHints(toolPrefix: string): ErrorHints {
       'No workspace of the sibling tool belongs to this organization: the person must open the sibling in it once, then retry.',
     sibling_refused:
       'The sibling tool refused the endpoint (its reason is in the message). Nothing changed here.',
+    sibling_busy: 'Another connect of this source is running right now: wait for it to finish, then retry.',
     hub_reauth_required: 'The person must sign in again, then retry.'
   };
 }
@@ -228,7 +229,7 @@ export function registerConnectionTools(
         'Refusals: not_sibling (the source is not a sibling: connect it by hand), sibling_unavailable (this instance is not on a hub), ' +
         'sibling_unknown (the hub lists no such tool), sibling_scope_missing (the person must sign in again), sibling_grant_missing (the person never opened the sibling), ' +
         'sibling_access_denied (the hub does not let the person use the sibling), sibling_workspace_missing (no workspace of the sibling belongs to this organization), ' +
-        'sibling_refused (the sibling refused the endpoint), hub_reauth_required (the person must sign in again), source_unavailable (the hub or the sibling did not answer; nothing changed).',
+        'sibling_refused (the sibling refused the endpoint), sibling_busy (another connect of this source is running: retry in a moment), hub_reauth_required (the person must sign in again), source_unavailable (the hub or the sibling did not answer; nothing changed).',
       inputSchema: { workspace: workspaceInput, source: sourceInput }
     },
     async ({ workspace, source }) =>

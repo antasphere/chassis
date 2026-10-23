@@ -748,7 +748,8 @@ export async function bootPlatform<
     catalog: connectionCatalog,
     getTool: () => domainRef.current,
     instanceName: tool.identity.displayName,
-    sibling: siblingConnector
+    sibling: siblingConnector,
+    connectionString: env.DATABASE_URL
   });
   const jobs = await createJobs(
     env,

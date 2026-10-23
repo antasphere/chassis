@@ -53,6 +53,7 @@ const statusOf = (code: ConnectionRefusedError['code']): 400 | 401 | 404 | 409 |
     case 'not_connected':
     case 'not_sibling':
     case 'sibling_unavailable':
+    case 'sibling_busy':
       return 409;
     case 'source_unavailable':
       return 502;
