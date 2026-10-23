@@ -40,7 +40,11 @@ const KEY = 'tk_keyid_secretsecretsecret';
 type Call = { url: string; method: string; headers: Record<string, string>; body: unknown };
 type Reply = { status: number; body?: unknown } | 'network';
 
-function harness(script: Record<string, Reply[] | ((call: Call) => Reply)>, grant: Partial<GrantLike> = {}) {
+function harness(
+  script: Record<string, Reply[] | ((call: Call) => Reply)>,
+  grant: Partial<GrantLike> = {},
+  fleet: { fetchedAt?: Date | null } = {}
+) {
   const calls: Call[] = [];
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
@@ -82,7 +86,10 @@ function harness(script: Record<string, Reply[] | ((call: Call) => Reply)>, gran
   const connector = new SiblingConnector({
     grant: grantImpl,
     issuerUrl: 'https://hub.example/',
-    fleet: { tool: (slug) => (slug === 'twin' ? TWIN : null) },
+    fleet: {
+      tool: (slug) => (slug === 'twin' ? TWIN : null),
+      fetchedAt: fleet.fetchedAt === undefined ? new Date() : fleet.fetchedAt
+    },
     logger: logger as never,
     fetchImpl,
     timeoutMs: 1000
@@ -305,6 +312,44 @@ describe('SiblingConnector · the sibling, as the person', () => {
     expect((await one({ status: 201, body: { id: 'ep', nosecret: 1 } })).kind).toBe('unavailable');
   });
 
+  it('deletes every endpoint of ours for a source, page by page, leaving the others; a refused page is the twin’s', async () => {
+    const page1 = {
+      webhooks: [
+        { id: 'ours-1', url: 'https://things.example.com/hooks/twin/tok-1' },
+        { id: 'theirs', url: 'https://elsewhere.example.com/hook' },
+        { id: 'another-source', url: 'https://things.example.com/hooks/partner/tok' }
+      ],
+      nextCursor: 'c2'
+    };
+    const page2 = {
+      webhooks: [{ id: 'ours-2', url: 'https://things.example.com/hooks/twin/tok-2' }],
+      nextCursor: null
+    };
+    const { connector, calls } = harness({
+      'GET /api/v1/webhooks': [
+        { status: 200, body: page1 },
+        { status: 200, body: page2 }
+      ],
+      'DELETE /api/v1/webhooks/ours-1': [{ status: 200, body: { id: 'ours-1' } }],
+      'DELETE /api/v1/webhooks/ours-2': [{ status: 404, body: err('not_found') }]
+    });
+    const out = await connector.deleteOurEndpoints(TWIN, KEY, 'w', 'https://things.example.com/hooks/twin/');
+    expect(out).toEqual({ kind: 'ok', value: 2 });
+    expect(calls.map((c) => `${c.method} ${new URL(c.url).pathname}${new URL(c.url).search}`)).toEqual([
+      'GET /api/v1/webhooks?limit=100',
+      'GET /api/v1/webhooks?limit=100&cursor=c2',
+      'DELETE /api/v1/webhooks/ours-1',
+      'DELETE /api/v1/webhooks/ours-2'
+    ]);
+    const refused = harness({
+      'GET /api/v1/webhooks': [{ status: 403, body: err('forbidden', 'Only an owner') }]
+    });
+    expect(await refused.connector.deleteOurEndpoints(TWIN, KEY, 'w', 'x')).toEqual({
+      kind: 'sibling_refused',
+      message: 'Twin would not list its endpoints: Only an owner'
+    });
+  });
+
   it('deletes the endpoint, one already gone counting as deleted; a refusal is the twin’s', async () => {
     const { connector, calls } = harness({
       'DELETE /api/v1/webhooks/ep-1': [
@@ -322,9 +367,26 @@ describe('SiblingConnector · the sibling, as the person', () => {
     expect(calls.every((c) => c.headers['x-workspace-id'] === 'w')).toBe(true);
   });
 
-  it('resolves a declared slug through the fleet list, null for a slug the hub does not list', () => {
+  it('resolves a declared slug through the fleet list, null for a slug the hub does not list; says whether the fleet was ever read', () => {
     const { connector } = harness({});
     expect(connector.resolve('twin')).toEqual(TWIN);
     expect(connector.resolve('nobody')).toBeNull();
+    expect(connector.fleetRead()).toBe(true);
+    const unread = harness({}, {}, { fetchedAt: null });
+    expect(unread.connector.fleetRead()).toBe(false);
+  });
+
+  it('addresses the sibling’s API at the origin of its RESOURCE URL, not of its launch URL (round 5, F5)', async () => {
+    const branded: FleetTool = {
+      slug: 'branded',
+      clientId: 'tool-branded',
+      name: 'Branded',
+      origin: 'https://app.branded.example.com',
+      resourceUrl: 'https://branded.example.com/mcp'
+    };
+    expect(SiblingConnector.apiOrigin(branded)).toBe('https://branded.example.com');
+    const { connector, calls } = harness({ 'GET /api/v1/me': [{ status: 200, body: { workspaces: [] } }] });
+    expect(await connector.workspaceOf(branded, KEY, 'org-1')).toEqual({ kind: 'sibling_workspace_missing' });
+    expect(calls[0]!.url).toBe('https://branded.example.com/api/v1/me');
   });
 });

@@ -59,7 +59,7 @@ export interface SiblingConnectorDeps {
   grant: Pick<HubGrantService, 'accessToken' | 'invalidateAccess' | 'refresh'>;
   /** The hub's issuer URL (`HUB_ISSUER_URL`): the connect-token route lives under its `/api/v1`. */
   issuerUrl: string;
-  fleet: Pick<FleetOrigins, 'tool'>;
+  fleet: Pick<FleetOrigins, 'tool' | 'fetchedAt'>;
   logger: Logger;
   /** Per-call budget for the hub and the sibling; a connect is one deliberate human act, awaited once. */
   timeoutMs?: number | undefined;
@@ -76,6 +76,10 @@ const meWorkspaces = z.object({
   workspaces: z.array(z.object({ id: z.string(), centralAccountId: z.string().nullable() }))
 });
 const endpointCreated = z.object({ id: z.string().min(1), secret: z.string().min(1) });
+const endpointsPage = z.object({
+  webhooks: z.array(z.object({ id: z.string(), url: z.string() })),
+  nextCursor: z.string().nullable()
+});
 
 /** The sibling's error code and message, when the body is the chassis's error shape; else nothing. */
 async function readError(res: Response): Promise<{ code: string | null; message: string }> {
@@ -104,6 +108,22 @@ export class SiblingConnector {
   /** The sibling as the hub lists it, by registry slug; null when the fleet list (as last read) names none. */
   resolve(slug: string): FleetTool | null {
     return this.deps.fleet.tool(slug);
+  }
+
+  /** Whether the hub's fleet list was ever read: before the first success an absent slug says nothing about the sibling. */
+  fleetRead(): boolean {
+    return this.deps.fleet.fetchedAt !== null;
+  }
+
+  /**
+   * The sibling's API base: the ORIGIN OF ITS RESOURCE URL, not of its launch
+   * URL. A chassis instance derives its resource as `<PUBLIC_BASE_URL>/mcp`
+   * and pins the connect token's audience to it, so the resource's origin is
+   * where its `/api/v1` answers; a registry tool may launch its browser
+   * entrance on another host (verifier round 5, F5).
+   */
+  static apiOrigin(tool: Pick<FleetTool, 'resourceUrl'>): string {
+    return new URL(tool.resourceUrl).origin;
   }
 
   // ── The hub, as the person ────────────────────────────────────────────────
@@ -267,6 +287,43 @@ export class SiblingConnector {
     return { kind: 'ok', value: { id: body.data.id, secret: body.data.secret } };
   }
 
+  /**
+   * Delete every endpoint of OURS for a source in the sibling workspace: the
+   * ones whose URL starts with our door's prefix for that source (nobody
+   * else's URL points at our door), the tracked one among them. A connect
+   * replaces every previous receiving address of the source, so what stays
+   * on the sibling would only deliver to a URL that answers 404 (the
+   * laptop proof of round 5 found one left by hand); a disconnect leaves
+   * none. The list is read page by page; one already gone counts as deleted.
+   */
+  async deleteOurEndpoints(
+    tool: FleetTool,
+    key: string,
+    workspaceId: string,
+    urlPrefix: string
+  ): Promise<SiblingOutcome<number>> {
+    const ours: string[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 20; page++) {
+      const query = `?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+      const res = await this.call(tool, 'GET', `/webhooks${query}`, { key, workspaceId });
+      if (res.kind !== 'ok') return res;
+      if (res.response.status !== 200) return this.refusal(tool, res.response, 'list its endpoints');
+      const body = endpointsPage.safeParse(await res.response.json().catch(() => null));
+      if (!body.success) {
+        return { kind: 'unavailable', message: `${tool.name}’s endpoint list was off the contract` };
+      }
+      for (const e of body.data.webhooks) if (e.url.startsWith(urlPrefix)) ours.push(e.id);
+      cursor = body.data.nextCursor;
+      if (!cursor) break;
+    }
+    for (const id of ours) {
+      const gone = await this.deleteEndpoint(tool, key, workspaceId, id);
+      if (gone.kind !== 'ok') return gone;
+    }
+    return { kind: 'ok', value: ours.length };
+  }
+
   /** Delete an endpoint on the sibling; one already gone (404) counts as deleted. */
   async deleteEndpoint(
     tool: FleetTool,
@@ -305,7 +362,7 @@ export class SiblingConnector {
     if (opts.workspaceId) headers['x-workspace-id'] = opts.workspaceId;
     if (opts.body !== undefined) headers['content-type'] = 'application/json';
     try {
-      const response = await this.fetchImpl(`${tool.origin}/api/v1${path}`, {
+      const response = await this.fetchImpl(`${SiblingConnector.apiOrigin(tool)}/api/v1${path}`, {
         method,
         headers,
         ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
