@@ -89,6 +89,16 @@ const INVOKERS: Record<string, (c: Client) => Promise<unknown>> = {
   'POST /webhooks/{id}/rotate-secret': (c) => c.rotateWebhookSecret(SAMPLE_ID),
   'POST /webhooks/{id}/test': (c) => c.testWebhook(SAMPLE_ID),
   'GET /webhooks/{id}/deliveries': (c) => c.webhookDeliveries(SAMPLE_ID),
+  'GET /connections': (c) => c.connections(),
+  'GET /connections/{source}': (c) => c.connection('partner'),
+  'POST /connections/{source}': (c) => c.connectSource('partner'),
+  'PUT /connections/{source}/secret': (c) => c.setConnectionSecret('partner', { secret: 'whsec_x' }),
+  'PATCH /connections/{source}': (c) => c.setConnectionFields('partner', { fields: { folder: 'root' } }),
+  'POST /connections/{source}/test': (c) => c.testConnection('partner'),
+  'DELETE /connections/{source}': (c) => c.disconnectSource('partner'),
+  'POST /connections/{source}/sibling': (c) => c.connectSibling('partner'),
+  'DELETE /connections/{source}/sibling': (c) => c.disconnectSibling('partner'),
+  'GET /connections/{source}/deliveries': (c) => c.connectionDeliveries('partner'),
   'GET /webhooks/{id}/deliveries/{deliveryId}': (c) => c.webhookDelivery(SAMPLE_ID, SAMPLE_DELIVERY_ID),
   'POST /webhooks/{id}/deliveries/{deliveryId}/redeliver': (c) =>
     c.redeliverWebhook(SAMPLE_ID, SAMPLE_DELIVERY_ID),
@@ -154,7 +164,8 @@ function expectedPath(contractPath: string): string {
     .replace('{id}', SAMPLE_ID)
     .replace('{userId}', SAMPLE_USER_ID)
     .replace('{teamId}', SAMPLE_TEAM_ID)
-    .replace('{deliveryId}', SAMPLE_DELIVERY_ID)}`;
+    .replace('{deliveryId}', SAMPLE_DELIVERY_ID)
+    .replace('{source}', 'partner')}`;
 }
 
 describe('chassis client route coverage (contract drift guard)', () => {

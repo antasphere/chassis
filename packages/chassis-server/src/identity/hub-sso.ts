@@ -191,6 +191,20 @@ export const HUB_SSO_SCOPES = [
 ] as const;
 
 /**
+ * The hub's scope for `POST /sso/connect-token` (PRDCT-3774, the hub's ADR
+ * 028): the person's grant on this tool buys a two-minute token audienced
+ * to a SIBLING tool, and nothing else. Requested at sign-in ONLY by a tool
+ * that declares a sibling connection source (boot.ts adds it to the
+ * provider's scopes then); a tool without one asks the hub nothing new. The
+ * same deploy-order rule as `orgs:create` holds: the hub lists the scope
+ * for every registry tool client first. A grant minted before a tool
+ * started requesting it lacks it; the hub answers 403 `insufficient_scope`
+ * on the connect, which the connections service maps to
+ * `sibling_scope_missing` — one sign-in heals it.
+ */
+export const HUB_SSO_CONNECT_SCOPE = 'sso:connect';
+
+/**
  * Strict whitelist for per-call authorize params (the SL-1 silent-connect
  * seam): the dashboard's silent auto-connect passes
  * `additionalData: { prompt: 'none' }` on `POST /sign-in/oauth2`, and the
@@ -232,6 +246,13 @@ export interface HubSsoOptions {
   tokenResource: string | null;
   /** Dashboard origin for the failure redirects (PUBLIC_BASE_URL). */
   publicBaseUrl: string;
+  /**
+   * Scopes requested at sign-in BESIDE `HUB_SSO_SCOPES`: the sibling connect
+   * scope when the tool declares a sibling source (boot.ts), nothing
+   * otherwise. The constant stays pure; what a tool asks is decided at
+   * construction from its definition.
+   */
+  extraScopes?: readonly string[] | undefined;
 }
 
 export class HubSsoService {
@@ -301,13 +322,18 @@ export class HubSsoService {
    *    emailVerified mapping — set from the hub's verified `email_verified`
    *    claim, never defaulted.
    */
+  /** What this instance asks the hub at sign-in: the fixed list, then the extras its definition earned, deduplicated. */
+  scopes(): string[] {
+    return [...new Set<string>([...HUB_SSO_SCOPES, ...(this.opts.extraScopes ?? [])])];
+  }
+
   providerConfig(): GenericOAuthConfig {
     return {
       providerId: HUB_SSO_PROVIDER_ID,
       discoveryUrl: this.opts.issuerUrl.replace(/\/+$/, '') + '/.well-known/openid-configuration',
       clientId: this.opts.clientId,
       clientSecret: this.opts.clientSecret,
-      scopes: [...HUB_SSO_SCOPES],
+      scopes: this.scopes(),
       pkce: true,
       ...(this.opts.tokenResource ? { tokenUrlParams: { resource: this.opts.tokenResource } } : {}),
       // Per-call prompt=none passthrough for the silent auto-connect — the

@@ -39,6 +39,8 @@ export interface AppDeps {
    * viewer/routes.ts in the app).
    */
   publicRoutes?: Hono | undefined;
+  /** The connections door (PRDCT-3773): `POST /hooks/:source/:token`, the chassis's own public route, mounted before the tool's. */
+  connectionDoor?: Hono | undefined;
   /** Observability middlewares + the /metrics route (M5). */
   metricsMiddleware?: MiddlewareHandler;
   metricsRoutes?: Hono;
@@ -90,6 +92,7 @@ export async function createApp({
   mcp,
   wellKnown,
   publicRoutes,
+  connectionDoor,
   metricsMiddleware,
   metricsRoutes,
   otelMiddleware,
@@ -218,6 +221,7 @@ export async function createApp({
 
   // The public-route slot: the share-link viewer lives here — before the
   // static assets and the SPA fallback, after every credentialed surface.
+  if (connectionDoor) app.route('/', connectionDoor);
   if (publicRoutes) app.route('/', publicRoutes);
 
   // The dashboard build: hashed assets cached for a year, everything else

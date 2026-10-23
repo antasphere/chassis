@@ -6,7 +6,8 @@ import {
   usageEventSchema,
   usageEventsBatchSchema,
   usageIngestResultSchema,
-  meAppsSchema
+  meAppsSchema,
+  toolOriginsSchema
 } from '@antasphere/chassis-contract';
 import { randomUUID } from 'node:crypto';
 import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
@@ -117,8 +118,13 @@ export interface FakeHubTool {
   slug: string;
   name: string;
   launchUrl: string;
+  /** The tool's resource URL (`<launch origin>/mcp` when absent): what /tool-origins lists and /sso/connect-token audiences (PRDCT-3774). */
+  resourceUrl?: string | undefined;
   descriptor?: Record<string, unknown> | undefined;
 }
+
+/** The hub's scope for `POST /api/v1/sso/connect-token` (PRDCT-3774, ADR 028). */
+export const SSO_CONNECT_SCOPE = 'sso:connect';
 
 /** One entry of a user's org registry (what GET /orgs serves). */
 export interface HubOrgEntry {
@@ -194,6 +200,16 @@ export class FakeHub {
   /** Per user and tool, the organizations that do NOT open the tool to them (absent = open everywhere). */
   private readonly userToolClosed = new Map<string, Set<string>>();
   readonly meAppsRequests: Array<{ auth: string | null; orgId: string | null }> = [];
+  /** GET /api/v1/tool-origins (PRDCT-3772): `ok` answers the registry's origins, `http500` a 500, `network` destroys the socket. */
+  toolOriginsMode: 'ok' | 'http500' | 'network' = 'ok';
+  /** Every read of GET /api/v1/tool-origins: the authorization header presented (the chassis sends none). */
+  readonly toolOriginsRequests: Array<{ auth: string | null }> = [];
+  /** POST /api/v1/sso/connect-token (PRDCT-3774): `ok` mints, `http500` a 500, `network` destroys the socket. */
+  connectTokenMode: 'ok' | 'http500' | 'network' = 'ok';
+  /** Every POST /api/v1/sso/connect-token: the bearer's subject (null when unresolved) and the resource asked. */
+  readonly connectTokenRequests: Array<{ sub: string | null; resource: string | null }> = [];
+  /** sub → the fixture last minted a token for: what /sso/connect-token signs the connect token from. */
+  private readonly fixturesBySub = new Map<string, HubUserFixture>();
   /** Every JWT access token this fake minted (bearer lookup for /api/v1). */
   private readonly accessTokens = new Map<string, AccessTokenRecord>();
   /** Live + rotated-out refresh tokens (rotation families). */
@@ -566,6 +582,12 @@ export class FakeHub {
     }
     if (req.method === 'GET' && url.pathname === '/api/v1/me/apps') {
       return this.handleMeApps(req, res);
+    }
+    if (req.method === 'POST' && url.pathname === '/api/v1/sso/connect-token') {
+      return this.handleConnectToken(req, res);
+    }
+    if (req.method === 'GET' && url.pathname === '/api/v1/tool-origins') {
+      return this.handleToolOrigins(req, res);
     }
     if (req.method === 'POST' && url.pathname === '/api/v1/orgs') {
       return this.handleOrgCreate(req, res);
@@ -960,6 +982,102 @@ export class FakeHub {
       });
     }
     return sendJson(res, 200, body);
+  }
+
+  // ── GET /api/v1/tool-origins: the registry's origins, public (PRDCT-3772) ─
+  // Mirrors the hub's handler: no credential read, every registered tool's
+  // client id, name and launch URL ORIGIN, in registry order, validated
+  // against the hub's contract before it is sent.
+  private handleToolOrigins(req: IncomingMessage, res: ServerResponse): void {
+    this.toolOriginsRequests.push({ auth: req.headers.authorization ?? null });
+    if (this.toolOriginsMode === 'network') {
+      res.socket?.destroy();
+      return;
+    }
+    if (this.toolOriginsMode === 'http500') {
+      return sendJson(res, 500, { error: { code: 'internal', message: 'boom' } });
+    }
+    const body = {
+      tools: this.tools.map((tool) => ({
+        slug: tool.slug,
+        clientId: `tool-${tool.slug}`,
+        name: tool.name,
+        origin: new URL(tool.launchUrl).origin,
+        resourceUrl: toolResourceUrl(tool)
+      }))
+    };
+    const checked = toolOriginsSchema.safeParse(body);
+    if (!checked.success) {
+      return sendJson(res, 500, {
+        error: {
+          code: 'fake_hub_drift',
+          message: `/tool-origins body is off the hub contract: ${checked.error.message}`
+        }
+      });
+    }
+    return sendJson(res, 200, body);
+  }
+
+  // ── POST /api/v1/sso/connect-token: the sibling connect (PRDCT-3774) ──────
+  // Mirrors the hub's api/sso.ts under ADR 028: a person's OAuth bearer
+  // (every token this fake mints is one) carrying `sso:connect`, a
+  // `resource` that is a registry tool's resource URL, and the same 120 s
+  // connect JWT `signConnectToken` signs for the CLI exchange, with NO
+  // offline grant in the answer: `{ token, expiresAt }` and nothing else.
+  private async handleConnectToken(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    let body: unknown = null;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      body = null;
+    }
+    const resource =
+      body && typeof body === 'object' && typeof (body as { resource?: unknown }).resource === 'string'
+        ? (body as { resource: string }).resource
+        : null;
+    const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? '')?.[1] ?? null;
+    const record = bearer ? this.accessTokens.get(bearer) : undefined;
+    this.connectTokenRequests.push({ sub: record?.sub ?? null, resource });
+    if (this.connectTokenMode === 'network') {
+      req.destroy();
+      return;
+    }
+    if (this.connectTokenMode === 'http500') return sendJson(res, 500, { error: { code: 'internal' } });
+    if (!record || record.expMs <= Date.now() || !record.aud.includes(this.apiResource)) {
+      return sendJson(res, 401, { error: { code: 'invalid_token', message: 'Unauthorized' } });
+    }
+    if (!record.scope.split(' ').includes(SSO_CONNECT_SCOPE)) {
+      return sendJson(res, 403, {
+        error: {
+          code: 'insufficient_scope',
+          message: `This credential was not granted "${SSO_CONNECT_SCOPE}"`
+        }
+      });
+    }
+    if (resource === null) {
+      return sendJson(res, 400, { error: { code: 'validation_error', message: 'resource is required' } });
+    }
+    const tool = this.tools.find((t) => toolResourceUrl(t) === resource);
+    if (!tool) {
+      return sendJson(res, 400, {
+        error: { code: 'unknown_resource', message: 'This resource is not a registered tool' }
+      });
+    }
+    const fixture = this.fixturesBySub.get(record.sub);
+    if (!fixture) {
+      return sendJson(res, 500, {
+        error: { code: 'fake_hub_drift', message: 'no fixture for this subject' }
+      });
+    }
+    // The real hub refuses a person the sibling is closed to (tool_access_denied); the fake's closures are per org.
+    const closed = this.userToolClosed.get(`${record.sub}:${tool.slug}`);
+    if (closed && closed.has(fixture.workspaceId)) {
+      return sendJson(res, 403, {
+        error: { code: 'tool_access_denied', message: 'No organization lets this account use this tool' }
+      });
+    }
+    const { token } = await this.signConnectToken(fixture, resource);
+    return sendJson(res, 200, { token, expiresAt: new Date(Date.now() + 120_000).toISOString() });
   }
 
   private async handleOrgs(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -1365,6 +1483,7 @@ export class FakeHub {
     // Recorded so /api/v1/orgs can resolve the bearer to its subject —
     // with the REAL exp/aud so wrong-audience and expiry refuse honestly.
     this.accessTokens.set(token, { sub: fixture.sub, aud, expMs: exp * 1000, scope });
+    this.fixturesBySub.set(fixture.sub, fixture);
     return token;
   }
 
@@ -1392,6 +1511,11 @@ async function newKey(): Promise<HubKey> {
   const { privateKey, publicKey } = await generateKeyPair('RS256', { extractable: true });
   const publicJwk = await exportJWK(publicKey);
   return { kid: `kid_${randomUUID()}`, privateKey, publicJwk };
+}
+
+/** A fake tool's resource URL: the explicit one, else `<launch origin>/mcp` as a chassis derives its own. */
+function toolResourceUrl(tool: FakeHubTool): string {
+  return tool.resourceUrl ?? `${new URL(tool.launchUrl).origin}/mcp`;
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {

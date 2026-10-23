@@ -51,6 +51,27 @@ export interface SafeFetchPolicy {
   allowPrivateNetworks: boolean;
   /** Only https: URLs are accepted (the cloud edition). Default false. */
   httpsOnly: boolean;
+  /**
+   * The fleet (PRDCT-3772): the origins of the hub's registry tools, read
+   * LIVE (the list refreshes hourly, `fleet-origins.ts`). A URL whose origin
+   * is one of them names a sibling tool of the same hub: it passes the https
+   * rule, the port rule and the address rule at registration and at every
+   * delivery, because inside a shared network a sibling's public name
+   * resolves to a private address (the team stack's Caddy aliases). Every
+   * other URL keeps the public-only rule, whatever the fleet holds. Absent
+   * (an oss boot, a test) or empty: no fleet.
+   */
+  fleetOrigins?: (() => ReadonlySet<string>) | undefined;
+}
+
+/**
+ * Whether the URL names a sibling of the same hub: its origin (the scheme,
+ * the host and the port as `URL.origin` spells them) is one of the fleet's.
+ * The origin and nothing looser: a host alone would let `http://crm.example`
+ * on another port, or on another scheme, borrow the exemption.
+ */
+export function isFleetOrigin(url: URL, policy: SafeFetchPolicy): boolean {
+  return policy.fleetOrigins?.().has(url.origin) ?? false;
 }
 
 export interface LookupAddress {
@@ -168,11 +189,14 @@ function bareHost(hostname: string): string {
 }
 
 /**
- * The checks that need no lookup: `http:`/`https:` only (`https:` alone under
- * `httpsOnly`), the scheme's default port only (`url.port === ''`, so an
- * explicit default port, which the URL parser drops, passes), no userinfo, a
- * non-empty hostname, a literal IP public unless `allowPrivateNetworks`.
- * Throws `WebhookUrlRefusedError`; returns the parsed URL.
+ * The checks that need no lookup: `http:`/`https:` only, no userinfo, a
+ * non-empty hostname; then, for every URL but a fleet origin's, `https:`
+ * alone under `httpsOnly`, the scheme's default port only (`url.port ===
+ * ''`, so an explicit default port, which the URL parser drops, passes), a
+ * literal IP public unless `allowPrivateNetworks`. A sibling of the same hub
+ * (`isFleetOrigin`) is reached as the hub names it: its scheme, its port,
+ * its address, whatever network it is on; the scheme and userinfo rules
+ * hold for it too. Throws `WebhookUrlRefusedError`; returns the parsed URL.
  */
 export function checkWebhookUrl(url: string, policy: SafeFetchPolicy): URL {
   let parsed: URL;
@@ -182,14 +206,15 @@ export function checkWebhookUrl(url: string, policy: SafeFetchPolicy): URL {
     throw new WebhookUrlRefusedError('malformed');
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new WebhookUrlRefusedError('scheme');
-  if (policy.httpsOnly && parsed.protocol !== 'https:') throw new WebhookUrlRefusedError('https_required');
   if (parsed.username || parsed.password) throw new WebhookUrlRefusedError('userinfo');
+  const host = bareHost(parsed.hostname);
+  if (host === '') throw new WebhookUrlRefusedError('malformed');
+  if (isFleetOrigin(parsed, policy)) return parsed;
+  if (policy.httpsOnly && parsed.protocol !== 'https:') throw new WebhookUrlRefusedError('https_required');
   // The scheme's default port only on the public internet; an operator who
   // opened private networks addresses services on their own ports (an n8n on
   // 5678), so the port rule lifts with the address rule.
   if (parsed.port !== '' && !policy.allowPrivateNetworks) throw new WebhookUrlRefusedError('port');
-  const host = bareHost(parsed.hostname);
-  if (host === '') throw new WebhookUrlRefusedError('malformed');
   if (isIP(host) && !policy.allowPrivateNetworks && !isPublicAddress(host)) {
     throw new WebhookUrlRefusedError('private_address');
   }
@@ -197,26 +222,32 @@ export function checkWebhookUrl(url: string, policy: SafeFetchPolicy): URL {
 }
 
 /**
- * The address to connect to, once EVERY address the name resolves to is
- * public (or the policy opens private networks); an empty resolution is
- * `unresolvable`. A failing resolver's own error passes through.
+ * Whether the address rule is lifted for this URL: the operator opened
+ * private networks, or the URL names a sibling of the same hub. Computed
+ * once per call from the URL the caller checked, so the socket's lookup
+ * (which sees a host name alone) judges the same URL the registration did.
  */
-async function checkedAddress(
-  hostname: string,
-  policy: SafeFetchPolicy,
-  lookup: SafeLookup
-): Promise<LookupAddress> {
+function addressRuleLifted(url: URL, policy: SafeFetchPolicy): boolean {
+  return policy.allowPrivateNetworks || isFleetOrigin(url, policy);
+}
+
+/**
+ * The address to connect to, once EVERY address the name resolves to is
+ * public (or the address rule is lifted, `addressRuleLifted`); an empty
+ * resolution is `unresolvable`. A failing resolver's own error passes through.
+ */
+async function checkedAddress(hostname: string, lifted: boolean, lookup: SafeLookup): Promise<LookupAddress> {
   const host = bareHost(hostname);
   const family = isIP(host);
   if (family) {
-    if (!policy.allowPrivateNetworks && !isPublicAddress(host)) {
+    if (!lifted && !isPublicAddress(host)) {
       throw new WebhookUrlRefusedError('private_address');
     }
     return { address: host, family };
   }
   const all = await lookup(host);
   if (all.length === 0) throw new WebhookUrlRefusedError('unresolvable');
-  if (!policy.allowPrivateNetworks && !all.every((a) => isPublicAddress(a.address))) {
+  if (!lifted && !all.every((a) => isPublicAddress(a.address))) {
     throw new WebhookUrlRefusedError('private_address');
   }
   return all[0]!;
@@ -257,10 +288,10 @@ async function readCapped(body: Readable, max: number): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-function nodeTransport(policy: SafeFetchPolicy, resolve: SafeLookup): SafeTransport {
+function nodeTransport(lifted: boolean, resolve: SafeLookup): SafeTransport {
   return (url, init, signal) => {
     const lookup: LookupFunction = (hostname, options, callback) => {
-      checkedAddress(hostname, policy, resolve).then(
+      checkedAddress(hostname, lifted, resolve).then(
         (first) => {
           if (options.all) callback(null, [first]);
           else callback(null, first.address, first.family);
@@ -284,7 +315,8 @@ function nodeTransport(policy: SafeFetchPolicy, resolve: SafeLookup): SafeTransp
 /**
  * One POST, no redirect followed (a 3xx comes back as its status), the address
  * check inside the socket's own lookup (ALL resolved addresses must be public
- * unless `allowPrivateNetworks`; an empty resolution is `unresolvable`),
+ * unless `allowPrivateNetworks` or the URL names a sibling of the same hub,
+ * `isFleetOrigin`; an empty resolution is `unresolvable`),
  * `AbortSignal.timeout(timeoutMs)` over the whole call, the response body read
  * up to `maxResponseBytes` then the stream destroyed. Rejects with
  * `WebhookUrlRefusedError` on a refused address, with the transport's error
@@ -300,6 +332,7 @@ export async function safePost(
 ): Promise<SafeFetchResult> {
   const started = performance.now();
   const target = checkWebhookUrl(url, policy);
+  const lifted = addressRuleLifted(target, policy);
   const lookup: SafeLookup = options.lookup ?? ((host) => dns.lookup(host, { all: true }));
   const signal = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   const maxBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
@@ -314,10 +347,10 @@ export async function safePost(
   let transport: SafeTransport;
   if (options.transport) {
     // The test seam: the same check the socket's lookup makes, made first.
-    await abortable(checkedAddress(target.hostname, policy, lookup), signal);
+    await abortable(checkedAddress(target.hostname, lifted, lookup), signal);
     transport = options.transport;
   } else {
-    transport = nodeTransport(policy, lookup);
+    transport = nodeTransport(lifted, lookup);
   }
 
   const res = await abortable(transport(target, init, signal), signal);

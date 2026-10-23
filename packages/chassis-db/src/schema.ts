@@ -841,6 +841,86 @@ export const webhookDeliveries = pgTable(
   ]
 );
 
+/**
+ * Connections (PRDCT-3773): one row per workspace and declared source, the
+ * tool-neutral store of every inbound webhook source and outbound key a tool
+ * holds. The secret or the key is SEALED (`secret-box.ts`, info
+ * `chassis:connection`), never plaintext; the receiving URL's token is kept
+ * as its SHA-256 only, so the URL is shown once. `fields` holds the values
+ * of the fields the source declares (a folder, the inboxes), never a secret.
+ */
+export const connections = pgTable(
+  'connections',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    /** The declared source key (`meet`, `lemlist`). */
+    source: text('source').notNull(),
+    /** The sealed secret or key; null until set. */
+    secretSealed: text('secret_sealed'),
+    secretSetAt: timestamp('secret_set_at', { withTimezone: true }),
+    secretSetBy: text('secret_set_by').references(() => user.id, { onDelete: 'set null' }),
+    /** The receiving URL's token, SHA-256 hex (an inbound source); null until the URL is made. */
+    tokenHash: text('token_hash'),
+    urlMadeAt: timestamp('url_made_at', { withTimezone: true }),
+    urlMadeBy: text('url_made_by').references(() => user.id, { onDelete: 'set null' }),
+    fields: jsonb('fields').$type<Record<string, string | string[] | null>>().notNull().default({}),
+    connectedBy: text('connected_by').references(() => user.id, { onDelete: 'set null' }),
+    lastDeliveryAt: timestamp('last_delivery_at', { withTimezone: true }),
+    lastDeliveryType: text('last_delivery_type'),
+    lastDeliveryOutcome: text('last_delivery_outcome', { enum: ['processed', 'ignored', 'failed'] }),
+    checkedAt: timestamp('checked_at', { withTimezone: true }),
+    checkOk: boolean('check_ok'),
+    checkDetail: text('check_detail').notNull().default(''),
+    /** The endpoint registered on a sibling tool as the person (PRDCT-3774); null otherwise. */
+    siblingEndpointId: text('sibling_endpoint_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => [
+    uniqueIndex('connections_workspace_source_idx').on(t.workspaceId, t.source),
+    uniqueIndex('connections_token_hash_idx').on(t.tokenHash),
+    check(
+      'connections_last_outcome_check',
+      sql`${t.lastDeliveryOutcome} IS NULL OR ${t.lastDeliveryOutcome} IN ('processed', 'ignored', 'failed')`
+    )
+  ]
+);
+
+/**
+ * The deliveries the door took, one row per (workspace, source, the sender's
+ * delivery id): the dedupe key (a repeat answers 200 and writes nothing), and
+ * the log the page and the CLI show. Purged like the webhook deliveries.
+ */
+export const connectionDeliveries = pgTable(
+  'connection_deliveries',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    connectionId: uuid('connection_id')
+      .notNull()
+      .references(() => connections.id, { onDelete: 'cascade' }),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    source: text('source').notNull(),
+    /** The sender's own id of the delivery (the `webhook-id` header, Stripe's event id). */
+    deliveryId: text('delivery_id').notNull(),
+    type: text('type').notNull(),
+    outcome: text('outcome', { enum: ['processed', 'ignored', 'failed'] }).notNull(),
+    detail: text('detail'),
+    error: text('error'),
+    receivedAt: timestamp('received_at', { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => [
+    uniqueIndex('connection_deliveries_dedupe_idx').on(t.workspaceId, t.source, t.deliveryId),
+    index('connection_deliveries_connection_received_id_idx').on(t.connectionId, t.receivedAt, t.id),
+    index('connection_deliveries_received_idx').on(t.receivedAt),
+    check('connection_deliveries_outcome_check', sql`${t.outcome} IN ('processed', 'ignored', 'failed')`)
+  ]
+);
+
 export type InstanceSettings = typeof instanceSettings.$inferSelect;
 export type Workspace = typeof workspaces.$inferSelect;
 export type WorkspaceMember = typeof workspaceMembers.$inferSelect;
@@ -858,3 +938,5 @@ export type WorkspaceTeamMemberRow = typeof workspaceTeamMembers.$inferSelect;
 export type ProjectTeamRow = typeof projectTeams.$inferSelect;
 export type WebhookEndpointRow = typeof webhookEndpoints.$inferSelect;
 export type WebhookDeliveryRow = typeof webhookDeliveries.$inferSelect;
+export type ConnectionRow = typeof connections.$inferSelect;
+export type ConnectionDeliveryRow = typeof connectionDeliveries.$inferSelect;

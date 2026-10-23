@@ -4,6 +4,8 @@ import { createPlatform } from '@antasphere/chassis-server';
 import type { ChassisTestHost } from '@antasphere/chassis-server/testing';
 import { THINGS_IDENTITY } from './identity.js';
 import {
+  connectionDeliveriesSeen,
+  connectionFieldsSeen,
   MIGRATIONS_FIXTURE,
   minimalTool,
   THINGS_ROUTE,
@@ -32,5 +34,6 @@ export const host: ChassisTestHost<HostBootResult, HostBootOverrides> = {
   hubClientId: 'tool-things-cloud',
   scopes: THINGS_SCOPES,
   probeRoute: THINGS_ROUTE,
-  webhooks: true
+  webhooks: true,
+  connections: { seen: connectionDeliveriesSeen, fieldsSeen: connectionFieldsSeen, sibling: true }
 };

@@ -84,9 +84,11 @@ import { demoSessionJudge, demoSignInOn, registerDemoPassRoutes } from './index.
 import { registerProjectRoutes } from './index.js';
 import { registerTeamRoutes } from './index.js';
 import { registerWebhookRoutes } from './webhooks.js';
+import { registerConnectionRoutes } from './connections.js';
 import { AppsService } from '../apps/service.js';
 import { registerAppsRoutes } from '../apps/routes.js';
 import type { WebhookService } from '../webhooks/index.js';
+import type { AnyConnectionService } from '../connections/index.js';
 import { bindMembershipRemoval } from '../members/removal.js';
 import { registerApiKeyRoutes } from './index.js';
 import { registerInvitationRoutes } from './index.js';
@@ -316,6 +318,8 @@ export interface ApiDeps<
   entitlementCloud?: EntitlementCloud | undefined;
   /** The outbound webhooks (PRDCT-3482): the endpoint routes and the catalog. */
   webhooks: WebhookService;
+  /** The connections (PRDCT-3773): the sources' state, the URL, the secret, the fields, the test, the log. */
+  connections: AnyConnectionService;
 }
 
 /** Control-flow marker: the singleton claim lost (instance already set up). */
@@ -1353,6 +1357,8 @@ export function createApiApp<
   registerTeamRoutes(api, { db, hubManaged });
   // Webhooks (PRDCT-3482): the tool's on both editions, never hub-managed (Romain's rule of 27 September 2026).
   registerWebhookRoutes(api, { service: deps.webhooks });
+  // Connections (PRDCT-3773): the tool's declared sources, the same on both editions, never hub-managed.
+  registerConnectionRoutes(api, { service: deps.connections });
 
   // The Apps page (PRDCT-3493): the other tools of the person's organization,
   // from the hub as the person on cloud (one GET /me/apps with the person's

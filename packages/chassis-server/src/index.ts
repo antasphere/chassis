@@ -75,3 +75,17 @@ export type {
   WebhookSubjectDeclaration,
   WebhookSubjectValue
 } from './webhooks/index.js';
+export type { ToolConnections } from './tool-definition.js';
+export type {
+  ConnectionCatalogDeclaration,
+  ConnectionDeliveryContext,
+  ConnectionDeliveryResult,
+  ConnectionFieldDeclaration,
+  ConnectionFieldsChangedContext,
+  ConnectionProbeContext,
+  ConnectionProbeResult,
+  ConnectionSourceDeclaration,
+  ConnectionVerifier,
+  ConnectionVerifierContext,
+  ConnectionVerifierVerdict
+} from './connections/index.js';

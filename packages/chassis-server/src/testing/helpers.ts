@@ -94,6 +94,20 @@ export interface ChassisTestHost<TResult extends BootResultLike, TOverrides> {
    */
   probeRoute: string;
   /**
+   * The host's tool declares the three connection sources of the chassis's
+   * minimal test tool (`partner` on the standard scheme, `ledger` on Stripe's,
+   * `vault` a key with a probe and two fields) and hands the suite what their
+   * handlers saw (PRDCT-3773). A real tool leaves it unset: the connections
+   * suite skips under its host, and the tool proves its own sources.
+   */
+  connections?: {
+    seen: Array<{ workspaceId: string; source: string; id: string; type: string }>;
+    /** What the key source's fields hook saw. */
+    fieldsSeen: Array<{ workspaceId: string; fields: Record<string, string | string[] | null> }>;
+    /** The host declares a sibling source (PRDCT-3774), so its sign-in asks the hub for `sso:connect` too. */
+    sibling: boolean;
+  };
+  /**
    * The host's tool is the chassis's minimal test tool, which declares the
    * `thing` subject and the `thing.created` / `thing.deleted` events the
    * webhooks suite emits (PRDCT-3482). A real tool leaves it unset: the
@@ -191,6 +205,8 @@ export function makeCreateTestApp<TResult extends BootResultLike, TOverrides>(
     return {
       ...result,
       stop: async () => {
+        // The fleet reader's timer, when the boot made one (a cloud boot): never a read after the stop.
+        (result as { fleetOrigins?: { stop(): void } | null }).fleetOrigins?.stop();
         await result.jobs.stop().catch(() => {});
         await endPool(result.db.pool);
       }

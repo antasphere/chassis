@@ -225,7 +225,12 @@ export const DEMO_SESSION_REFUSED_API_ROUTES: readonly DemoSessionRefusedApiRout
   { method: 'POST', path: '/webhooks', does: 'register a webhook' },
   { method: 'PATCH', path: '/webhooks/*', does: 'change a webhook' },
   { method: 'DELETE', path: '/webhooks/*', does: 'delete a webhook' },
-  { method: 'POST', path: '/webhooks/*', does: 'act on a webhook' }
+  { method: 'POST', path: '/webhooks/*', does: 'act on a webhook' },
+  // A connection is something the workspace keeps, and its secret is a credential (PRDCT-3773).
+  { method: 'POST', path: '/connections/*', does: 'connect a source' },
+  { method: 'PUT', path: '/connections/*', does: 'set a connection secret' },
+  { method: 'PATCH', path: '/connections/*', does: 'change a connection' },
+  { method: 'DELETE', path: '/connections/*', does: 'disconnect a source' }
 ];
 
 /** The refusal's sentence for one entry of `DEMO_SESSION_REFUSED_API_ROUTES`. */

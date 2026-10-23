@@ -43,6 +43,7 @@ export {
 } from './hub-reconcile.js';
 export {
   HUB_SSO_PROVIDER_ID,
+  HUB_SSO_CONNECT_SCOPE,
   HUB_SSO_SCOPES,
   type HubConnectAssertion,
   HubSsoLoginError,
