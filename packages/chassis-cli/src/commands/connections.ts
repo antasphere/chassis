@@ -70,6 +70,7 @@ export function explainConnectionRefusal(
     case 'sibling_access_denied':
     case 'sibling_workspace_missing':
     case 'sibling_refused':
+    case 'sibling_busy':
       // The server's sentence names the sibling and says what to do.
       return e.message;
     case 'insufficient_scope':

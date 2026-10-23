@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import pg from 'pg';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import {
   connectionDeliveries,
@@ -7,8 +8,7 @@ import {
   workspaces,
   type ConnectionDeliveryRow,
   type ConnectionRow,
-  type Db,
-  type DbConn
+  type Db
 } from '@antasphere/chassis-db';
 import type {
   Connection,
@@ -30,7 +30,7 @@ import {
   type ConnectionVerifier
 } from './catalog.js';
 import { NAMED_VERIFIERS } from './verifiers.js';
-import type { SiblingConnector, SiblingOutcome } from './sibling.js';
+import { DEFAULT_SIBLING_OVERALL_MS, type SiblingConnector, type SiblingOutcome } from './sibling.js';
 import type { FleetTool } from '../webhooks/fleet-origins.js';
 import { webhookSecretKey } from '../webhooks/signing.js';
 
@@ -74,9 +74,19 @@ export const CONNECTION_SECRET_BOX_INFO = 'chassis:connection';
  * The sibling connect's lock, two-int advisory form `(classid, hashtext(workspace:source))`
  * (PRDCT-3774, verifier round 5 F1): two connects of one source at once would both
  * register an endpoint on the sibling and the row would point at one of them. 7432007 is
- * free in this repository (7432006 is the workspace creation's).
+ * free in this repository (7432006 is the workspace creation's). A session-scoped try-lock
+ * on a dedicated connection, never a transaction on the pool (round 6, N1).
  */
 export const CONNECTION_SIBLING_LOCK_NAMESPACE = 7432007;
+/** The lock's watchdog fires this long after the connect's own budget: nothing holds the lock for longer. */
+export const SIBLING_LOCK_HEADROOM_MS = 5_000;
+
+/** A held source lock: released once, by the caller or by the watchdog. */
+interface SourceLock {
+  released: boolean;
+  watchdog?: NodeJS.Timeout | undefined;
+  release: () => Promise<void>;
+}
 export const CONNECTION_DELIVERIES_PURGE_QUEUE = 'connection-deliveries-purge';
 const MAX_ERROR_TEXT = 500;
 
@@ -100,6 +110,7 @@ export class ConnectionRefusedError extends Error {
       | 'sibling_access_denied'
       | 'sibling_workspace_missing'
       | 'sibling_refused'
+      | 'sibling_busy'
       | 'hub_reauth_required',
     message: string
   ) {
@@ -121,6 +132,10 @@ export interface ConnectionServiceDeps<TDomain = unknown> {
   instanceName: string;
   /** The sibling connect's conversations (PRDCT-3774); null on an instance that is not on a hub. */
   sibling?: SiblingConnector | null | undefined;
+  /** `DATABASE_URL`: the sibling connect's lock takes a dedicated connection, never one of the pool. */
+  connectionString: string;
+  /** How long the lock's dedicated connection may live (the connect's budget plus headroom by default). */
+  lockWatchdogMs?: number | undefined;
   now?: () => Date;
 }
 
@@ -412,62 +427,131 @@ export class ConnectionService<TDomain = unknown> {
   }
 
   /**
-   * One connect or disconnect of a source at a time per workspace: the
-   * transaction-scoped advisory lock, held across the conversations with
-   * the hub and the sibling, so a second caller reads the row the first one
-   * wrote and the sibling never holds two endpoints of ours (verifier round
-   * 5, F1). The lock cannot leak: it ends with the transaction.
+   * One connect or disconnect of a source at a time per workspace, and never
+   * a wait: a session-scoped TRY-lock on a dedicated connection (verifier
+   * round 6, N1 and N2: a transaction lock on the pool idled through the
+   * conversation with the hub and the sibling, Postgres cut it at its
+   * idle-in-transaction limit, the process could die on the unhandled
+   * error, and queued connects held the pool). A second caller is told the
+   * source is busy (`sibling_busy`, 409) and retries in a moment. The lock
+   * dies with its session: the watchdog cuts the dedicated connection a
+   * little after the connect's own budget, so nothing holds it for long.
    */
-  private async serialized<T>(
-    workspaceId: string,
-    key: string,
-    work: (tx: DbConn) => Promise<T>
-  ): Promise<T> {
-    return this.deps.db.transaction(async (tx) => {
-      await tx.execute(
-        sql`SELECT pg_advisory_xact_lock(${CONNECTION_SIBLING_LOCK_NAMESPACE}, hashtext(${`${workspaceId}:${key}`}))`
-      );
-      return work(tx);
+  private async lockSource(workspaceId: string, key: string): Promise<SourceLock> {
+    const client = new pg.Client({ connectionString: this.deps.connectionString });
+    // A dedicated client's error (the server cut the session) must never be an unhandled event.
+    client.on('error', (err) => {
+      this.deps.logger.warn({ err, source: key }, 'connections: the sibling lock connection errored');
     });
+    await client.connect();
+    const lock: SourceLock = {
+      released: false,
+      release: async () => {
+        if (lock.released) return;
+        lock.released = true;
+        if (lock.watchdog) clearTimeout(lock.watchdog);
+        await client.end().catch(() => {});
+      }
+    };
+    lock.watchdog = setTimeout(() => {
+      this.deps.logger.warn(
+        { source: key },
+        'connections: the sibling lock watchdog fired — cutting the dedicated connection'
+      );
+      void lock.release();
+    }, this.lockWatchdogMs);
+    lock.watchdog.unref();
+    try {
+      const res = await client.query<{ taken: boolean }>(
+        'SELECT pg_try_advisory_lock($1, hashtext($2)) AS taken',
+        [CONNECTION_SIBLING_LOCK_NAMESPACE, `${workspaceId}:${key}`]
+      );
+      if (!res.rows[0]?.taken) {
+        await lock.release();
+        throw new ConnectionRefusedError(
+          'sibling_busy',
+          'Another connect of this source is running: wait for it, then retry'
+        );
+      }
+    } catch (cause) {
+      await lock.release();
+      throw cause;
+    }
+    return lock;
+  }
+
+  private get lockWatchdogMs(): number {
+    return this.deps.lockWatchdogMs ?? DEFAULT_SIBLING_OVERALL_MS + SIBLING_LOCK_HEADROOM_MS;
+  }
+
+  /** Our door's prefix for a source: what every receiving URL of the source starts with. */
+  private doorPrefix(key: string): string {
+    return `${this.deps.publicBaseUrl.replace(/\/+$/, '')}${CONNECTION_HOOK_PATH}/${key}/`;
   }
 
   /**
    * Connect a sibling source AS THE PERSON: the receiving URL registered on
    * the sibling and the signing secret stored, in one call, nothing shown.
-   * A re-run replaces the endpoint, the URL and the secret; the stored
-   * fields stay. Nothing is written here until the sibling has accepted,
-   * and two connects of one source at once run one after the other.
+   * The new endpoint is registered FIRST, then every previous endpoint of
+   * ours for the source is cleared on the sibling (the tracked one by id,
+   * the others by our door's prefix), then the row is written: a failure
+   * before the registration changes nothing anywhere, and a clearing that
+   * fails is logged and retried by the next connect, the new endpoint live
+   * and stored all the same. A re-run replaces the endpoint, the URL and
+   * the secret; the stored fields stay.
    */
   async connectSibling(actor: ConnectionActor, key: string): Promise<Connection> {
     const { declared, connector } = this.siblingOf(key);
     const tool = this.siblingTool(connector, declared.toolSlug);
     const centralAccountId = await this.centralAccountOf(actor.workspaceId);
-    await this.serialized(actor.workspaceId, key, async (tx) => {
-      // The row is not read here: every previous endpoint of ours is found on the sibling itself.
+    const lock = await this.lockSource(actor.workspaceId, key);
+    try {
+      const existing = await this.row(actor.workspaceId, key);
       const token = randomBytes(32).toString('base64url');
-      const base = this.deps.publicBaseUrl.replace(/\/+$/, '');
-      const doorPrefix = `${base}${CONNECTION_HOOK_PATH}/${key}/`;
+      const doorPrefix = this.doorPrefix(key);
       const receivingUrl = `${doorPrefix}${token}`;
+      const budget = connector.budget();
 
       const connectToken = this.unwrap(
-        await connector.connectToken(actor.userId, tool.resourceUrl),
+        await connector.connectToken(actor.userId, tool.resourceUrl, budget),
         tool.name
       );
       const created = this.unwrap(
-        await connector.withPersonKey(tool, connectToken, async (personKey) => {
-          const twin = await connector.workspaceOf(tool, personKey, centralAccountId);
-          if (twin.kind !== 'ok') return twin;
-          // Every previous endpoint of ours for this source goes first (the tracked one, and any
-          // left by hand or by a lost race): after this connect they would only deliver to a URL
-          // that answers 404, and the sibling never holds two of ours.
-          const gone = await connector.deleteOurEndpoints(tool, personKey, twin.value, doorPrefix);
-          if (gone.kind !== 'ok') return gone;
-          return connector.createEndpoint(tool, personKey, twin.value, {
-            url: receivingUrl,
-            events: declared.events,
-            description: `${this.deps.instanceName}: connected from Settings › Connections`
-          });
-        }),
+        await connector.withPersonKey(
+          tool,
+          connectToken,
+          async (personKey) => {
+            const twin = await connector.workspaceOf(tool, personKey, centralAccountId, budget);
+            if (twin.kind !== 'ok') return twin;
+            const made = await connector.createEndpoint(
+              tool,
+              personKey,
+              twin.value,
+              {
+                url: receivingUrl,
+                events: declared.events,
+                description: `${this.deps.instanceName}: connected from Settings › Connections`
+              },
+              budget
+            );
+            if (made.kind !== 'ok') return made;
+            // The previous endpoints of ours go once the new one is live: a failure here leaves the
+            // new endpoint registered and stored, and the next connect clears again.
+            const cleared = await connector.deleteOurEndpoints(tool, personKey, twin.value, doorPrefix, {
+              keep: made.value.id,
+              also: existing?.siblingEndpointId,
+              budget
+            });
+            if (cleared.kind !== 'ok') {
+              this.deps.logger.warn(
+                { source: key, sibling: tool.slug, outcome: cleared.kind },
+                'connections: a previous endpoint of ours could not be removed on the sibling; the next connect retries'
+              );
+            }
+            return made;
+          },
+          budget
+        ),
         tool.name
       );
 
@@ -482,11 +566,13 @@ export class ConnectionService<TDomain = unknown> {
         siblingEndpointId: created.id,
         updatedAt: now
       };
-      await tx
+      await this.deps.db
         .insert(connections)
         .values({ workspaceId: actor.workspaceId, source: key, connectedBy: actor.userId, ...written })
         .onConflictDoUpdate({ target: [connections.workspaceId, connections.source], set: written });
-    });
+    } finally {
+      await lock.release();
+    }
     this.deps.logger.info(
       { source: key, sibling: tool.slug },
       'connections: a sibling was connected as the person'
@@ -495,40 +581,49 @@ export class ConnectionService<TDomain = unknown> {
   }
 
   /**
-   * Disconnect a sibling source as the person: the endpoint deleted on the
-   * sibling (one already gone counts), then the row and its log here. A
-   * sibling that cannot be reached leaves the row as it is, so the plain
-   * disconnect stays the way to drop the local half alone.
+   * Disconnect a sibling source as the person: every endpoint of ours for
+   * the source deleted on the sibling (the tracked one by id, the others by
+   * our door's prefix; one already gone counts), then the row and its log
+   * here. A sibling that cannot be reached leaves the row as it is, so the
+   * plain disconnect stays the way to drop the local half alone.
    */
   async disconnectSibling(actor: ConnectionActor, key: string): Promise<Connection> {
     const { declared, connector } = this.siblingOf(key);
-    await this.serialized(actor.workspaceId, key, async (tx) => {
-      const [existing] = await tx
-        .select()
-        .from(connections)
-        .where(and(eq(connections.workspaceId, actor.workspaceId), eq(connections.source, key)));
+    const lock = await this.lockSource(actor.workspaceId, key);
+    try {
+      const existing = await this.row(actor.workspaceId, key);
       if (existing?.siblingEndpointId) {
         const tool = this.siblingTool(connector, declared.toolSlug);
         const centralAccountId = await this.centralAccountOf(actor.workspaceId);
-        const doorPrefix = `${this.deps.publicBaseUrl.replace(/\/+$/, '')}${CONNECTION_HOOK_PATH}/${key}/`;
+        const tracked = existing.siblingEndpointId;
+        const budget = connector.budget();
         const connectToken = this.unwrap(
-          await connector.connectToken(actor.userId, tool.resourceUrl),
+          await connector.connectToken(actor.userId, tool.resourceUrl, budget),
           tool.name
         );
         this.unwrap(
-          await connector.withPersonKey(tool, connectToken, async (personKey) => {
-            const twin = await connector.workspaceOf(tool, personKey, centralAccountId);
-            if (twin.kind !== 'ok') return twin;
-            // The tracked endpoint and any other of ours for this source.
-            return connector.deleteOurEndpoints(tool, personKey, twin.value, doorPrefix);
-          }),
+          await connector.withPersonKey(
+            tool,
+            connectToken,
+            async (personKey) => {
+              const twin = await connector.workspaceOf(tool, personKey, centralAccountId, budget);
+              if (twin.kind !== 'ok') return twin;
+              return connector.deleteOurEndpoints(tool, personKey, twin.value, this.doorPrefix(key), {
+                also: tracked,
+                budget
+              });
+            },
+            budget
+          ),
           tool.name
         );
       }
       if (existing) {
-        await tx.delete(connections).where(eq(connections.id, existing.id));
+        await this.deps.db.delete(connections).where(eq(connections.id, existing.id));
       }
-    });
+    } finally {
+      await lock.release();
+    }
     return this.get(actor.workspaceId, key);
   }
 

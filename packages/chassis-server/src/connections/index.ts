@@ -26,6 +26,8 @@ export {
 export {
   CONNECTION_DELIVERIES_PURGE_QUEUE,
   CONNECTION_SECRET_BOX_INFO,
+  CONNECTION_SIBLING_LOCK_NAMESPACE,
+  SIBLING_LOCK_HEADROOM_MS,
   ConnectionRefusedError,
   ConnectionService,
   deliveryToWire as connectionDeliveryToWire,
@@ -35,8 +37,10 @@ export {
   type ConnectionServiceDeps
 } from './service.js';
 export {
+  DEFAULT_SIBLING_OVERALL_MS,
   DEFAULT_SIBLING_TIMEOUT_MS,
   SiblingConnector,
+  type SiblingBudget,
   type SiblingConnectorDeps,
   type SiblingOutcome,
   type SiblingRefusal

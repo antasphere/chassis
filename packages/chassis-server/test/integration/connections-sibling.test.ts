@@ -1,10 +1,12 @@
 import net from 'node:net';
+import pg from 'pg';
 import { serve, type ServerType } from '@hono/node-server';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { eq, isNull } from 'drizzle-orm';
 import { apiKeys, auditLog, connections } from '@antasphere/chassis-db';
 import { FakeHub, LEGACY_GRANT_SCOPE, type HubUserFixture } from '@antasphere/chassis-server/testing';
+import { CONNECTION_SIBLING_LOCK_NAMESPACE } from '@antasphere/chassis-server/connections';
 import { createDatabase, createTestApp, host, readJson, startPostgres, type TestApp } from './helpers.js';
 import * as sso from './sso-helpers.js';
 
@@ -73,6 +75,7 @@ let hereServer: ServerType;
 let twinServer: ServerType;
 let hereBase = '';
 let twinBase = '';
+let hereDb = '';
 let hereWorkspace = '';
 let twinWorkspace = '';
 const cookies: Record<string, string> = {};
@@ -161,8 +164,9 @@ beforeAll(async () => {
     { slug: 'things', name: 'Things', launchUrl: hereBase },
     { slug: 'twin', name: 'Twin', launchUrl: twinBase }
   ]);
+  hereDb = await createDatabase(container, 'sibling_here');
   [here, twin] = await Promise.all([
-    createTestApp(await createDatabase(container, 'sibling_here'), cloudEnv(hereBase), {
+    createTestApp(hereDb, cloudEnv(hereBase), {
       webhookDials: { listenerTtlMs: 0, timeoutMs: 2000 },
       fleetOriginsDials: { refreshMs: 60_000, retryMs: 60_000, timeoutMs: 2000 }
     }),
@@ -428,12 +432,58 @@ describe.skipIf(!host.connections)('connecting the twin as the person', () => {
     expect((await twinCall('DELETE', `/webhooks/${otherId}`)).status).toBe(200);
   });
 
-  it('9c. two connects of the same source at once run one after the other: ONE endpoint on the twin, the row points at it', async () => {
+  it('9c. while a connect of the source holds its lock, another is told the source is busy and changes nothing; the lock lives in its own session', async () => {
+    // The lock the connect takes, held from a dedicated session the way the connect holds it.
+    const holder = new pg.Client({ connectionString: hereDb });
+    await holder.connect();
+    try {
+      const taken = await holder.query<{ taken: boolean }>(
+        'SELECT pg_try_advisory_lock($1, hashtext($2)) AS taken',
+        [CONNECTION_SIBLING_LOCK_NAMESPACE, `${hereWorkspace}:twin`]
+      );
+      expect(taken.rows[0]!.taken).toBe(true);
+      const body = (await expectError(
+        await hereCall('POST', '/connections/twin/sibling'),
+        409,
+        'sibling_busy'
+      )) as { error: { message: string } };
+      expect(body.error.message).toMatch(/another connect/i);
+      await expectError(await hereCall('DELETE', '/connections/twin/sibling'), 409, 'sibling_busy');
+      expect((await twinEndpoints()).map((e) => e.id)).toEqual([endpointId]);
+      const card = await readJson(await hereCall('GET', '/connections/twin'));
+      expect(card.sibling.endpointId).toBe(endpointId);
+      // The busy answer held no connection of the pool: the ordinary reads still answer.
+      expect((await hereCall('GET', '/connections')).status).toBe(200);
+    } finally {
+      await holder.query('SELECT pg_advisory_unlock($1, hashtext($2))', [
+        CONNECTION_SIBLING_LOCK_NAMESPACE,
+        `${hereWorkspace}:twin`
+      ]);
+      await holder.end();
+    }
+    // Released: the connect goes through again.
+    const res = await hereCall('POST', '/connections/twin/sibling');
+    expect(res.status, await res.clone().text()).toBe(200);
+    const body = await readJson(res);
+    endpointId = body.sibling.endpointId;
+    madeAt = body.receiving.madeAt;
+    expect((await twinEndpoints()).map((e) => e.id)).toEqual([endpointId]);
+  });
+
+  it('9c2. two connects of the same source at once: one answers busy, or both run in turn; ONE endpoint on the twin, the row points at it', async () => {
     const [a, b] = await Promise.all([
       hereCall('POST', '/connections/twin/sibling'),
       hereCall('POST', '/connections/twin/sibling')
     ]);
-    expect([a.status, b.status]).toEqual([200, 200]);
+    const statuses = [a.status, b.status].sort();
+    expect([
+      [200, 200],
+      [200, 409]
+    ]).toContainEqual(statuses);
+    if (statuses[1] === 409) {
+      const refused = a.status === 409 ? a : b;
+      expect((await readJson(refused)).error.code).toBe('sibling_busy');
+    }
     const endpoints = await twinEndpoints();
     expect(endpoints).toHaveLength(1);
     const card = await readJson(await hereCall('GET', '/connections/twin'));
@@ -441,6 +491,56 @@ describe.skipIf(!host.connections)('connecting the twin as the person', () => {
     expect((await twin.db.db.select().from(apiKeys).where(isNull(apiKeys.revokedAt))).length).toBe(0);
     endpointId = card.sibling.endpointId;
     madeAt = card.receiving.madeAt;
+  });
+
+  it('9e. the endpoint the row tracks is removed by id even when it no longer sits under our door (the public base changed)', async () => {
+    // An endpoint of ours registered under an earlier base: a URL on our origin, another path.
+    const legacy = await twinCall('POST', '/webhooks', {
+      url: `${hereBase}/legacy-base/hooks/twin/old-token-00000000000000000000`,
+      events: ['thing.created'],
+      description: 'from before the base changed'
+    });
+    expect(legacy.status).toBe(201);
+    const legacyId = (await readJson(legacy)).id;
+    // The row remembers it as the sibling's endpoint, as it would after a base change;
+    // the current endpoint stays on the twin as a stale one under our door.
+    await here.db.db
+      .update(connections)
+      .set({ siblingEndpointId: legacyId })
+      .where(eq(connections.workspaceId, hereWorkspace));
+    const res = await hereCall('POST', '/connections/twin/sibling');
+    expect(res.status, await res.clone().text()).toBe(200);
+    const body = await readJson(res);
+    expect((await twinEndpoints()).map((e) => e.id)).toEqual([body.sibling.endpointId]);
+    endpointId = body.sibling.endpointId;
+    madeAt = body.receiving.madeAt;
+  });
+
+  it('9f. a sibling that refuses the new endpoint changes nothing: the previous one stays registered, the card untouched', async () => {
+    // The twin stops seeing this tool as a fleet sibling: our http loopback URL is then refused at registration.
+    hub.setTools([{ slug: 'twin', name: 'Twin', launchUrl: twinBase }]);
+    await twin.fleetOrigins!.refresh();
+    try {
+      const body = (await expectError(
+        await hereCall('POST', '/connections/twin/sibling'),
+        400,
+        'sibling_refused'
+      )) as { error: { message: string } };
+      expect(body.error.message).toContain('Twin would not register the endpoint');
+      expect((await twinEndpoints()).map((e) => e.id)).toEqual([endpointId]);
+      const card = await readJson(await hereCall('GET', '/connections/twin'));
+      expect(card.sibling.endpointId).toBe(endpointId);
+      expect(card.receiving.madeAt).toBe(madeAt);
+    } finally {
+      hub.setTools([
+        { slug: 'things', name: 'Things', launchUrl: hereBase },
+        { slug: 'twin', name: 'Twin', launchUrl: twinBase }
+      ]);
+      await twin.fleetOrigins!.refresh();
+    }
+    // Back in the fleet, the next ping on the kept endpoint still lands.
+    const ping = await twinCall('POST', `/webhooks/${endpointId}/test`);
+    expect((await readJson(ping)).delivery.status).toBe('delivered');
   });
 
   it('10. a member is refused flat, and a source that declares no sibling is 409', async () => {
@@ -460,6 +560,13 @@ describe.skipIf(!host.connections)('connecting the twin as the person', () => {
   });
 
   it('12. the disconnect deletes the endpoint on the twin first, then the row and the log here; a second one is a no-op', async () => {
+    // A stale endpoint of ours left by hand goes with the disconnect too.
+    const stale = await twinCall('POST', '/webhooks', {
+      url: `${hereBase}/hooks/twin/stale-before-the-disconnect-000000000000`,
+      events: ['thing.created'],
+      description: 'made by hand'
+    });
+    expect(stale.status).toBe(201);
     const res = await hereCall('DELETE', '/connections/twin/sibling');
     expect(res.status).toBe(200);
     const body = await readJson(res);
@@ -482,5 +589,52 @@ describe.skipIf(!host.connections)('connecting the twin as the person', () => {
     expect(rows.length).toBe(2);
     // Every key the twin ever minted for the connects is revoked.
     expect((await twin.db.db.select().from(apiKeys).where(isNull(apiKeys.revokedAt))).length).toBe(0);
+  });
+});
+
+describe.skipIf(!host.connections)('a hub whose fleet list was never read', () => {
+  let unread: TestApp;
+  let cookie = '';
+  let workspace = '';
+
+  beforeAll(async () => {
+    // The hub does not answer the fleet list while this instance boots: the list stays empty, never read.
+    hub.toolOriginsMode = 'http500';
+    try {
+      unread = await createTestApp(
+        await createDatabase(container, 'sibling_unread'),
+        cloudEnv('http://localhost:3999'),
+        { fleetOriginsDials: { refreshMs: 60_000, retryMs: 60_000, timeoutMs: 2000 } }
+      );
+    } finally {
+      hub.toolOriginsMode = 'ok';
+    }
+    cookie = await sso.ssoLogin(unread, hub, ADMIN);
+    workspace = (await readJson(await unread.app.request('/api/v1/me', { headers: { cookie } })))
+      .activeWorkspaceId;
+  }, 120_000);
+
+  afterAll(async () => {
+    await unread?.stop();
+  });
+
+  it('answers unavailable, not "no such tool", until the list is read; then the connect proceeds', async () => {
+    expect(unread.fleetOrigins!.fetchedAt).toBeNull();
+    const body = (await expectError(
+      await call(unread, 'http://localhost:3999', 'POST', '/connections/twin/sibling', { cookie, workspace }),
+      502,
+      'source_unavailable'
+    )) as { error: { message: string } };
+    expect(body.error.message).toMatch(/fleet list/);
+    // The hub answers again: the next read names the twin, and the connect goes past the fleet
+    // (here the twin refuses our URL, which is not a fleet origin on its side: a refusal, no longer unavailable).
+    const read = await unread.fleetOrigins!.refresh();
+    expect(read.ok).toBe(true);
+    await expectError(
+      await call(unread, 'http://localhost:3999', 'POST', '/connections/twin/sibling', { cookie, workspace }),
+      400,
+      'sibling_refused'
+    );
+    expect(await twinEndpoints()).toEqual([]);
   });
 });

@@ -63,10 +63,24 @@ export interface SiblingConnectorDeps {
   logger: Logger;
   /** Per-call budget for the hub and the sibling; a connect is one deliberate human act, awaited once. */
   timeoutMs?: number | undefined;
+  /** The whole connect's budget, every call included (DEFAULT_SIBLING_OVERALL_MS). */
+  overallMs?: number | undefined;
   fetchImpl?: typeof fetch | undefined;
 }
 
 export const DEFAULT_SIBLING_TIMEOUT_MS = 10_000;
+/**
+ * One connect's whole budget, every call to the hub and the sibling included
+ * (verifier round 6, N1): a conversation that runs past it is cut as
+ * unavailable, so a slow sibling never holds a connect (and its lock) open
+ * for long. The per-call limit stays `timeoutMs`; the budget is the ceiling.
+ */
+export const DEFAULT_SIBLING_OVERALL_MS = 60_000;
+
+/** The deadline of one connect, handed to every call it makes. */
+export interface SiblingBudget {
+  deadlineAt: number;
+}
 
 const errorBody = z.object({
   error: z.object({ code: z.string(), message: z.string().optional() })
@@ -98,11 +112,26 @@ export class SiblingConnector {
   private readonly fetchImpl: typeof fetch;
   private readonly hubBase: string;
   private readonly timeoutMs: number;
+  private readonly overallMs: number;
 
   constructor(private readonly deps: SiblingConnectorDeps) {
     this.fetchImpl = deps.fetchImpl ?? fetch;
     this.hubBase = deps.issuerUrl.replace(/\/+$/, '');
     this.timeoutMs = deps.timeoutMs ?? DEFAULT_SIBLING_TIMEOUT_MS;
+    this.overallMs = deps.overallMs ?? DEFAULT_SIBLING_OVERALL_MS;
+  }
+
+  /** A new connect's budget: its deadline, from now. */
+  budget(): SiblingBudget {
+    return { deadlineAt: Date.now() + this.overallMs };
+  }
+
+  /** The signal of one call under a budget: the per-call limit, or what is left of the budget; null when nothing is left. */
+  private signal(budget: SiblingBudget | undefined): AbortSignal | null {
+    if (!budget) return AbortSignal.timeout(this.timeoutMs);
+    const left = budget.deadlineAt - Date.now();
+    if (left <= 0) return null;
+    return AbortSignal.timeout(Math.min(this.timeoutMs, left));
   }
 
   /** The sibling as the hub lists it, by registry slug; null when the fleet list (as last read) names none. */
@@ -129,18 +158,22 @@ export class SiblingConnector {
   // ── The hub, as the person ────────────────────────────────────────────────
 
   /** The two-minute token audienced to the sibling, bought with the person's own grant on this tool. */
-  async connectToken(userId: string, resourceUrl: string): Promise<SiblingOutcome<string>> {
+  async connectToken(
+    userId: string,
+    resourceUrl: string,
+    budget?: SiblingBudget
+  ): Promise<SiblingOutcome<string>> {
     const access = await this.deps.grant.accessToken(userId);
     if (access.kind !== 'ok') return this.grantRefusal(access);
 
-    let res = await this.postConnectToken(access.accessToken, resourceUrl);
+    let res = await this.postConnectToken(access.accessToken, resourceUrl, budget);
     if (res.kind === 'error') return { kind: 'unavailable', message: res.message };
     if (res.response.status === 401) {
       // The hub refused the token before doing anything: one forced refresh, one retry.
       this.deps.grant.invalidateAccess(userId);
       const refreshed: GrantAccess = await this.deps.grant.refresh(userId);
       if (refreshed.kind !== 'ok') return this.grantRefusal(refreshed);
-      res = await this.postConnectToken(refreshed.accessToken, resourceUrl);
+      res = await this.postConnectToken(refreshed.accessToken, resourceUrl, budget);
       if (res.kind === 'error') return { kind: 'unavailable', message: res.message };
       if (res.response.status === 401) {
         this.deps.logger.error(
@@ -179,8 +212,11 @@ export class SiblingConnector {
 
   private async postConnectToken(
     token: string,
-    resourceUrl: string
+    resourceUrl: string,
+    budget?: SiblingBudget
   ): Promise<{ kind: 'ok'; response: Response } | { kind: 'error'; message: string }> {
+    const signal = this.signal(budget);
+    if (!signal) return { kind: 'error', message: 'the connect took too long' };
     try {
       const response = await this.fetchImpl(`${this.hubBase}/api/v1/sso/connect-token`, {
         method: 'POST',
@@ -191,7 +227,7 @@ export class SiblingConnector {
         },
         body: JSON.stringify({ resource: resourceUrl }),
         redirect: 'error',
-        signal: AbortSignal.timeout(this.timeoutMs)
+        signal
       });
       return { kind: 'ok', response };
     } catch (err) {
@@ -209,10 +245,12 @@ export class SiblingConnector {
   async withPersonKey<T>(
     tool: FleetTool,
     connectToken: string,
-    work: (key: string) => Promise<SiblingOutcome<T>>
+    work: (key: string) => Promise<SiblingOutcome<T>>,
+    budget?: SiblingBudget
   ): Promise<SiblingOutcome<T>> {
     const minted = await this.call(tool, 'POST', '/sso/cli-connect', {
-      body: { token: connectToken }
+      body: { token: connectToken },
+      budget
     });
     if (minted.kind !== 'ok') return minted;
     const { response } = minted;
@@ -238,6 +276,7 @@ export class SiblingConnector {
     try {
       return await work(key);
     } finally {
+      // The revocation rides no budget: it must be tried whatever the clock says.
       await this.revoke(tool, key);
     }
   }
@@ -254,8 +293,13 @@ export class SiblingConnector {
   }
 
   /** The sibling workspace that projects our hub organization, as the key sees it. */
-  async workspaceOf(tool: FleetTool, key: string, centralAccountId: string): Promise<SiblingOutcome<string>> {
-    const res = await this.call(tool, 'GET', '/me', { key });
+  async workspaceOf(
+    tool: FleetTool,
+    key: string,
+    centralAccountId: string,
+    budget?: SiblingBudget
+  ): Promise<SiblingOutcome<string>> {
+    const res = await this.call(tool, 'GET', '/me', { key, budget });
     if (res.kind !== 'ok') return res;
     if (res.response.status !== 200) return this.refusal(tool, res.response, 'read the person’s workspaces');
     const body = meWorkspaces.safeParse(await res.response.json().catch(() => null));
@@ -271,12 +315,14 @@ export class SiblingConnector {
     tool: FleetTool,
     key: string,
     workspaceId: string,
-    endpoint: { url: string; events: readonly string[]; description: string }
+    endpoint: { url: string; events: readonly string[]; description: string },
+    budget?: SiblingBudget
   ): Promise<SiblingOutcome<{ id: string; secret: string }>> {
     const res = await this.call(tool, 'POST', '/webhooks', {
       key,
       workspaceId,
-      body: { url: endpoint.url, events: [...endpoint.events], description: endpoint.description }
+      body: { url: endpoint.url, events: [...endpoint.events], description: endpoint.description },
+      budget
     });
     if (res.kind !== 'ok') return res;
     if (res.response.status !== 201) return this.refusal(tool, res.response, 'register the endpoint');
@@ -288,40 +334,55 @@ export class SiblingConnector {
   }
 
   /**
-   * Delete every endpoint of OURS for a source in the sibling workspace: the
-   * ones whose URL starts with our door's prefix for that source (nobody
-   * else's URL points at our door), the tracked one among them. A connect
-   * replaces every previous receiving address of the source, so what stays
-   * on the sibling would only deliver to a URL that answers 404 (the
-   * laptop proof of round 5 found one left by hand); a disconnect leaves
-   * none. The list is read page by page; one already gone counts as deleted.
+   * Delete every PREVIOUS endpoint of ours for a source in the sibling
+   * workspace: the one the row tracks (`also`, by id, whatever its URL: the
+   * public base may have changed since) and every one whose URL starts with
+   * our door's prefix for that source (the ones left by hand or by a lost
+   * race), all but the one just registered (`keep`). After a connect they
+   * would only deliver to an address that answers 404 (the laptop proof of
+   * round 5 found one left by hand); after a disconnect none stays. The list
+   * is read page by page; one already gone counts as deleted. A URL under the
+   * prefix is ours by construction: the door's path names this source, and
+   * no other tool is ever told to post there.
    */
   async deleteOurEndpoints(
     tool: FleetTool,
     key: string,
     workspaceId: string,
-    urlPrefix: string
+    urlPrefix: string,
+    opts: {
+      keep?: string | undefined;
+      also?: string | null | undefined;
+      budget?: SiblingBudget | undefined;
+    } = {}
   ): Promise<SiblingOutcome<number>> {
-    const ours: string[] = [];
+    const ours = new Set<string>();
+    if (opts.also && opts.also !== opts.keep) ours.add(opts.also);
     let cursor: string | null = null;
     for (let page = 0; page < 20; page++) {
       const query = `?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
-      const res = await this.call(tool, 'GET', `/webhooks${query}`, { key, workspaceId });
+      const res = await this.call(tool, 'GET', `/webhooks${query}`, {
+        key,
+        workspaceId,
+        budget: opts.budget
+      });
       if (res.kind !== 'ok') return res;
       if (res.response.status !== 200) return this.refusal(tool, res.response, 'list its endpoints');
       const body = endpointsPage.safeParse(await res.response.json().catch(() => null));
       if (!body.success) {
         return { kind: 'unavailable', message: `${tool.name}’s endpoint list was off the contract` };
       }
-      for (const e of body.data.webhooks) if (e.url.startsWith(urlPrefix)) ours.push(e.id);
+      for (const e of body.data.webhooks) {
+        if (e.id !== opts.keep && e.url.startsWith(urlPrefix)) ours.add(e.id);
+      }
       cursor = body.data.nextCursor;
       if (!cursor) break;
     }
     for (const id of ours) {
-      const gone = await this.deleteEndpoint(tool, key, workspaceId, id);
+      const gone = await this.deleteEndpoint(tool, key, workspaceId, id, opts.budget);
       if (gone.kind !== 'ok') return gone;
     }
-    return { kind: 'ok', value: ours.length };
+    return { kind: 'ok', value: ours.size };
   }
 
   /** Delete an endpoint on the sibling; one already gone (404) counts as deleted. */
@@ -329,11 +390,13 @@ export class SiblingConnector {
     tool: FleetTool,
     key: string,
     workspaceId: string,
-    endpointId: string
+    endpointId: string,
+    budget?: SiblingBudget
   ): Promise<SiblingOutcome<void>> {
     const res = await this.call(tool, 'DELETE', `/webhooks/${encodeURIComponent(endpointId)}`, {
       key,
-      workspaceId
+      workspaceId,
+      budget
     });
     if (res.kind !== 'ok') return res;
     if (res.response.status === 200 || res.response.status === 204 || res.response.status === 404) {
@@ -355,8 +418,15 @@ export class SiblingConnector {
     tool: FleetTool,
     method: 'GET' | 'POST' | 'DELETE',
     path: string,
-    opts: { key?: string | undefined; workspaceId?: string | undefined; body?: unknown } = {}
+    opts: {
+      key?: string | undefined;
+      workspaceId?: string | undefined;
+      body?: unknown;
+      budget?: SiblingBudget | undefined;
+    } = {}
   ): Promise<{ kind: 'ok'; response: Response } | { kind: 'unavailable'; message: string }> {
+    const signal = this.signal(opts.budget);
+    if (!signal) return { kind: 'unavailable', message: 'the connect took too long' };
     const headers: Record<string, string> = { accept: 'application/json' };
     if (opts.key) headers.authorization = `Bearer ${opts.key}`;
     if (opts.workspaceId) headers['x-workspace-id'] = opts.workspaceId;
@@ -367,7 +437,7 @@ export class SiblingConnector {
         headers,
         ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
         redirect: 'error',
-        signal: AbortSignal.timeout(this.timeoutMs)
+        signal
       });
       return { kind: 'ok', response };
     } catch (err) {

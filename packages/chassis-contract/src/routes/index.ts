@@ -1403,7 +1403,7 @@ export const connectionSiblingConnectRoute = createRoute({
     404: connectionErrors[404],
     409: jsonBody(
       apiErrorSchema,
-      'not_sibling (the source declares no sibling), not_inbound, or sibling_unavailable (this instance is not on a hub)'
+      'not_sibling (the source declares no sibling), not_inbound, sibling_unavailable (this instance is not on a hub), or sibling_busy (another connect of this source is running: retry in a moment)'
     ),
     502: jsonBody(
       apiErrorSchema,
@@ -1425,7 +1425,10 @@ export const connectionSiblingDisconnectRoute = createRoute({
     401: jsonBody(apiErrorSchema, 'unauthenticated, or hub_reauth_required (the person must sign in again)'),
     403: connectionErrors[403],
     404: connectionErrors[404],
-    409: jsonBody(apiErrorSchema, 'not_sibling, or sibling_unavailable (this instance is not on a hub)'),
+    409: jsonBody(
+      apiErrorSchema,
+      'not_sibling, sibling_unavailable (this instance is not on a hub), or sibling_busy (another connect of this source is running: retry in a moment)'
+    ),
     502: jsonBody(
       apiErrorSchema,
       'source_unavailable: the hub or the sibling did not answer; nothing changed'

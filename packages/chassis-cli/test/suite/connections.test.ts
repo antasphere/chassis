@@ -551,6 +551,16 @@ describe(`${bin} connections`, () => {
     const h4 = harness([{ body: TWIN_FRESH }, refusal(409, 'not_sibling')]);
     expect(await run(['connections', 'connect', 'twin', ...WIRED], h4.io)).toBe(1);
     expect(h4.err()).toContain('This source is not a sibling tool of this hub');
+
+    // Another connect of the source is running: the server's sentence, and no manual fallback (that is for an instance off any hub).
+    const busy = 'Another connect of this source is running: wait for it, then retry';
+    const h5 = harness([{ body: TWIN_FRESH }, refusal(409, 'sibling_busy', busy)]);
+    expect(await run(['connections', 'connect', 'twin', ...WIRED], h5.io)).toBe(1);
+    expect(h5.err()).toContain(busy);
+    expect(h5.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      'GET /api/v1/connections/twin',
+      'POST /api/v1/connections/twin/sibling'
+    ]);
   });
 
   it('forbidden and guest_forbidden read as sentences', async () => {
