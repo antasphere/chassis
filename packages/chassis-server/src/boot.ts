@@ -60,6 +60,7 @@ import { NoopUsageSink } from './platform/index.js';
 import { WorkspaceService } from './platform/index.js';
 import { clearGeneratedSetupToken, resolveAuthSecret, resolveSetupToken } from './util/index.js';
 import { createRuntimeState } from './util/index.js';
+import { closeOnUncaughtException } from './state.js';
 import {
   assertToolCopy,
   assertToolIdentity,
@@ -106,6 +107,19 @@ export async function bootPlatform<
       'postgres ended an idle pooled connection; the pool opens a new one on the next query'
     )
   );
+  // The checked-out case (PRDCT-3583): createDb keeps it from reaching the
+  // process; this is what makes it visible, for as long as a client is out.
+  const logCheckedOut = (err: Error) =>
+    logger.error(
+      { err },
+      'postgres ended a checked-out connection; its query or transaction fails and the pool drops it'
+    );
+  db.pool.on('acquire', (client) => client.on('error', logCheckedOut));
+  db.pool.on('release', (_err, client) => client.off('error', logCheckedOut));
+  // The last resort: an exception nothing caught closes this replica's
+  // surface (503 service_closed, as a refused tombstone does) instead of
+  // ending the process with every request in flight.
+  closeOnUncaughtException(state, logger);
   await db.pool.query('SELECT 1');
   logger.info('database reachable');
 
