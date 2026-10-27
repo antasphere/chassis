@@ -6,7 +6,13 @@ import type { StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { eq, isNull } from 'drizzle-orm';
 import { apiKeys, auditLog, connections } from '@antasphere/chassis-db';
 import { FakeHub, LEGACY_GRANT_SCOPE, type HubUserFixture } from '@antasphere/chassis-server/testing';
-import { CONNECTION_SIBLING_LOCK_NAMESPACE } from '@antasphere/chassis-server/connections';
+import {
+  CONNECTION_SIBLING_LOCK_NAMESPACE,
+  ConnectionService,
+  DEFAULT_SIBLING_OVERALL_MS,
+  SIBLING_LOCK_HEADROOM_MS,
+  SiblingConnector
+} from '@antasphere/chassis-server/connections';
 import { createDatabase, createTestApp, host, readJson, startPostgres, type TestApp } from './helpers.js';
 import * as sso from './sso-helpers.js';
 
@@ -559,6 +565,31 @@ describe.skipIf(!host.connections)('connecting the twin as the person', () => {
     await expectError(res, 400, 'sibling_workspace_missing');
   });
 
+  it('11b. the disconnect removes the tracked endpoint by id even when it no longer sits under our door', async () => {
+    const legacy = await twinCall('POST', '/webhooks', {
+      url: `${hereBase}/legacy-base/hooks/twin/old-token-11111111111111111111`,
+      events: ['thing.created'],
+      description: 'from before the base changed'
+    });
+    expect(legacy.status).toBe(201);
+    const legacyId = (await readJson(legacy)).id;
+    await here.db.db
+      .update(connections)
+      .set({ siblingEndpointId: legacyId })
+      .where(eq(connections.workspaceId, hereWorkspace));
+    // The twin holds the current endpoint (under our door) and the legacy one (tracked by the row).
+    expect((await twinEndpoints()).map((e) => e.id).sort()).toEqual([endpointId, legacyId].sort());
+    const res = await hereCall('DELETE', '/connections/twin/sibling');
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect(await twinEndpoints()).toEqual([]);
+    // Connected again for the scenarios that follow.
+    const again = await hereCall('POST', '/connections/twin/sibling');
+    expect(again.status).toBe(200);
+    const body = await readJson(again);
+    endpointId = body.sibling.endpointId;
+    madeAt = body.receiving.madeAt;
+  });
+
   it('12. the disconnect deletes the endpoint on the twin first, then the row and the log here; a second one is a no-op', async () => {
     // A stale endpoint of ours left by hand goes with the disconnect too.
     const stale = await twinCall('POST', '/webhooks', {
@@ -582,11 +613,12 @@ describe.skipIf(!host.connections)('connecting the twin as the person', () => {
     expect(log.deliveries).toEqual([]);
     const again = await hereCall('DELETE', '/connections/twin/sibling');
     expect(again.status).toBe(200);
+    // Three disconnects so far: 11b's, and the two of this scenario.
     const rows = await until(
       () => here.db.db.select().from(auditLog).where(eq(auditLog.action, 'connection.sibling_disconnect')),
-      (v) => v.length >= 2
+      (v) => v.length >= 3
     );
-    expect(rows.length).toBe(2);
+    expect(rows.length).toBe(3);
     // Every key the twin ever minted for the connects is revoked.
     expect((await twin.db.db.select().from(apiKeys).where(isNull(apiKeys.revokedAt))).length).toBe(0);
   });
@@ -636,5 +668,152 @@ describe.skipIf(!host.connections)('a hub whose fleet list was never read', () =
       'sibling_refused'
     );
     expect(await twinEndpoints()).toEqual([]);
+  });
+});
+
+describe.skipIf(!host.connections)('the service on its own: what the two-instance walk cannot reach', () => {
+  // The service built by hand on this tool's database, its connector talking to a scripted hub and
+  // sibling, so the suite reaches what the real twin never does: a clearing that fails after the
+  // registration, the lock's watchdog floor, the holder's session cut mid-connect.
+  const ORG_TWIN_WORKSPACE = 'twin-workspace-id';
+  const warned: string[] = [];
+  const logger = {
+    info() {},
+    warn(_o: unknown, msg: string) {
+      warned.push(msg);
+    },
+    error() {},
+    debug() {}
+  } as never;
+  const grant = {
+    accessToken: async () => ({ kind: 'ok' as const, accessToken: 'hub-access-token' }),
+    invalidateAccess() {},
+    refresh: async () => ({ kind: 'ok' as const, accessToken: 'hub-access-token' })
+  };
+  let userId = '';
+  let centralAccountId = '';
+
+  type Reply = { status: number; body?: unknown; delayMs?: number };
+  function scripted(answers: Record<string, Reply[]>, seen: string[]) {
+    return (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const key = `${init?.method ?? 'GET'} ${url.pathname}`;
+      seen.push(key);
+      const reply = answers[key]?.shift();
+      if (!reply) throw new Error(`unscripted ${key}`);
+      if (reply.delayMs) await new Promise((r) => setTimeout(r, reply.delayMs));
+      return new Response(reply.body === undefined ? null : JSON.stringify(reply.body), {
+        status: reply.status,
+        headers: { 'content-type': 'application/json' }
+      });
+    }) as typeof fetch;
+  }
+  const happy = (): Record<string, Reply[]> => ({
+    'POST /api/v1/sso/connect-token': [{ status: 200, body: { token: 'connect-jwt', expiresAt: 'x' } }],
+    'POST /api/v1/sso/cli-connect': [{ status: 201, body: { key: 'tk_person_key_000000000000' } }],
+    'GET /api/v1/me': [{ status: 200, body: { workspaces: [{ id: ORG_TWIN_WORKSPACE, centralAccountId }] } }],
+    'POST /api/v1/webhooks': [
+      { status: 201, body: { id: 'ep-scripted-1', secret: 'whsec_c2NyaXB0ZWQtc2VjcmV0LW9mLXRoZS10d2lu' } }
+    ],
+    'GET /api/v1/webhooks': [{ status: 200, body: { webhooks: [], nextCursor: null } }],
+    'DELETE /api/v1/cli/auth/key': [{ status: 200, body: { revoked: true, id: 'k' } }]
+  });
+  function service(answers: Record<string, Reply[]>, seen: string[], opts: { lockWatchdogMs?: number } = {}) {
+    const connector = new SiblingConnector({
+      grant,
+      issuerUrl: hub.issuer,
+      fleet: here.fleetOrigins!,
+      logger,
+      fetchImpl: scripted(answers, seen),
+      timeoutMs: 2000
+    });
+    return new ConnectionService({
+      db: here.db.db,
+      logger,
+      authSecret: here.authSecret,
+      publicBaseUrl: hereBase,
+      catalog: here.connections.catalog,
+      getTool: () => null,
+      instanceName: host.identity.displayName,
+      sibling: connector,
+      connectionString: hereDb,
+      ...(opts.lockWatchdogMs !== undefined ? { lockWatchdogMs: opts.lockWatchdogMs } : {})
+    });
+  }
+  const lockHolders = async () =>
+    (
+      await here.db.pool.query<{ pid: number }>(
+        `SELECT l.pid FROM pg_locks l WHERE l.locktype = 'advisory' AND l.classid = $1 AND l.granted`,
+        [CONNECTION_SIBLING_LOCK_NAMESPACE]
+      )
+    ).rows.map((r) => r.pid);
+
+  beforeAll(async () => {
+    const me = await readJson(await here.app.request('/api/v1/me', { headers: { cookie: cookies.admin! } }));
+    userId = me.user.id;
+    centralAccountId = me.workspaces.find((w: { id: string }) => w.id === hereWorkspace).centralAccountId;
+    await here.db.db.delete(connections).where(eq(connections.workspaceId, hereWorkspace));
+  });
+
+  afterAll(async () => {
+    await here.db.db.delete(connections).where(eq(connections.workspaceId, hereWorkspace));
+  });
+
+  it('a clearing that fails after the registration is logged, not refused: the new endpoint is stored, the key revoked', async () => {
+    const seen: string[] = [];
+    const answers = happy();
+    answers['GET /api/v1/webhooks'] = [{ status: 500, body: { error: { code: 'internal' } } }];
+    warned.length = 0;
+    const svc = service(answers, seen);
+    const connection = await svc.connectSibling({ workspaceId: hereWorkspace, userId }, 'twin');
+    expect(connection).toMatchObject({ connected: true, sibling: { endpointId: 'ep-scripted-1' } });
+    expect(seen).toEqual([
+      'POST /api/v1/sso/connect-token',
+      'POST /api/v1/sso/cli-connect',
+      'GET /api/v1/me',
+      'POST /api/v1/webhooks',
+      'GET /api/v1/webhooks',
+      'DELETE /api/v1/cli/auth/key'
+    ]);
+    expect(warned.some((m) => m.includes('could not be removed on the sibling'))).toBe(true);
+    const [row] = await here.db.db
+      .select()
+      .from(connections)
+      .where(eq(connections.workspaceId, hereWorkspace));
+    expect(row!.siblingEndpointId).toBe('ep-scripted-1');
+    expect(row!.secretSealed).not.toBeNull();
+    expect(await lockHolders()).toEqual([]);
+  });
+
+  it("the lock's watchdog is floored at the connect's budget plus one call plus headroom, whatever a smaller setting says", () => {
+    // The service's connector has the default budget and a 2 s per-call limit (see `service()`).
+    const svc = service(happy(), [], { lockWatchdogMs: 300 });
+    expect(svc.lockWatchdogMs).toBe(DEFAULT_SIBLING_OVERALL_MS + 2000 + SIBLING_LOCK_HEADROOM_MS);
+    expect(svc.lockWatchdogMs).toBeGreaterThan(60_000);
+    const larger = service(happy(), [], { lockWatchdogMs: 120_000 });
+    expect(larger.lockWatchdogMs).toBe(120_000);
+  });
+
+  it("the holder's session cut by the server mid-connect is logged, never an unhandled error, and the connect completes", async () => {
+    const seen: string[] = [];
+    const answers = happy();
+    answers['GET /api/v1/me'] = [
+      { status: 200, body: { workspaces: [{ id: ORG_TWIN_WORKSPACE, centralAccountId }] }, delayMs: 1500 }
+    ];
+    warned.length = 0;
+    const svc = service(answers, seen);
+    const connect = svc.connectSibling({ workspaceId: hereWorkspace, userId }, 'twin');
+    // While the connect waits on the sibling, the lock's holder is found and its session cut.
+    let holders: number[] = [];
+    for (let i = 0; i < 50 && holders.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+      holders = await lockHolders();
+    }
+    expect(holders).toHaveLength(1);
+    await here.db.pool.query('SELECT pg_terminate_backend($1)', [holders[0]]);
+    const connection = await connect;
+    expect(connection).toMatchObject({ connected: true, sibling: { endpointId: 'ep-scripted-1' } });
+    expect(warned.some((m) => m.includes('lock connection errored'))).toBe(true);
+    expect(await lockHolders()).toEqual([]);
   });
 });

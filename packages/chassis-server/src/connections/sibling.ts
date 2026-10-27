@@ -111,8 +111,10 @@ async function readError(res: Response): Promise<{ code: string | null; message:
 export class SiblingConnector {
   private readonly fetchImpl: typeof fetch;
   private readonly hubBase: string;
-  private readonly timeoutMs: number;
-  private readonly overallMs: number;
+  /** The per-call limit, in milliseconds. */
+  readonly timeoutMs: number;
+  /** One connect's whole budget, in milliseconds. */
+  readonly overallMs: number;
 
   constructor(private readonly deps: SiblingConnectorDeps) {
     this.fetchImpl = deps.fetchImpl ?? fetch;

@@ -30,7 +30,12 @@ import {
   type ConnectionVerifier
 } from './catalog.js';
 import { NAMED_VERIFIERS } from './verifiers.js';
-import { DEFAULT_SIBLING_OVERALL_MS, type SiblingConnector, type SiblingOutcome } from './sibling.js';
+import {
+  DEFAULT_SIBLING_OVERALL_MS,
+  DEFAULT_SIBLING_TIMEOUT_MS,
+  type SiblingConnector,
+  type SiblingOutcome
+} from './sibling.js';
 import type { FleetTool } from '../webhooks/fleet-origins.js';
 import { webhookSecretKey } from '../webhooks/signing.js';
 
@@ -58,15 +63,20 @@ import { webhookSecretKey } from '../webhooks/signing.js';
  *    2xx as delivered and retries nothing else); the retry runs it again.
  *  - THE SIBLING CONNECT (`connectSibling`, PRDCT-3774): a source that
  *    declares a sibling tool of the same hub is connected as the person in
- *    one call. A fresh receiving token is minted here but NOTHING is written
- *    until the sibling has registered the URL: the hub turns the person's
- *    grant into a two-minute token for the sibling, the sibling mints the
- *    person a key, the endpoint of the previous run (if any) is deleted,
- *    the new URL is registered with the declared events, and the key is
- *    revoked; then ONE write stores the token's hash, the secret sealed and
- *    the endpoint id. A failure anywhere leaves the row as it was: the
- *    previous URL and secret keep answering. `disconnectSibling` deletes
- *    the endpoint on the sibling first, then the row.
+ *    one call, one connect of a source at a time (a session try-lock on a
+ *    dedicated connection; a second caller is told the source is busy). A
+ *    fresh receiving token is minted here but NOTHING is written until the
+ *    sibling has registered the URL: the hub turns the person's grant into
+ *    a two-minute token for the sibling, the sibling mints the person a key,
+ *    the new URL is registered with the declared events, THEN every
+ *    previous endpoint of ours for the source is cleared there (the tracked
+ *    one by id, the others by our door's prefix), the key is revoked, and
+ *    ONE write stores the token's hash, the secret sealed and the endpoint
+ *    id. A failure before the registration leaves the row and the sibling as
+ *    they were; a clearing that fails is logged and retried by the next
+ *    connect, the new endpoint live and stored all the same.
+ *    `disconnectSibling` clears our endpoints on the sibling first, then
+ *    the row.
  */
 
 export const CONNECTION_SECRET_BOX_INFO = 'chassis:connection';
@@ -171,8 +181,21 @@ const iso = (d: Date) => d.toISOString();
 export class ConnectionService<TDomain = unknown> {
   private readonly box: SecretBox;
 
+  /**
+   * How long the sibling lock's dedicated connection may live: the connect's
+   * whole budget, plus one more call (the unbudgeted revocation of the key),
+   * plus headroom, and never less (verifier round 7, N6): a watchdog that
+   * fired before the row write would drop the serialization in silence.
+   */
+  readonly lockWatchdogMs: number;
+
   constructor(private readonly deps: ConnectionServiceDeps<TDomain>) {
     this.box = createSecretBox(deps.authSecret, CONNECTION_SECRET_BOX_INFO);
+    const floor =
+      (deps.sibling?.overallMs ?? DEFAULT_SIBLING_OVERALL_MS) +
+      (deps.sibling?.timeoutMs ?? DEFAULT_SIBLING_TIMEOUT_MS) +
+      SIBLING_LOCK_HEADROOM_MS;
+    this.lockWatchdogMs = Math.max(deps.lockWatchdogMs ?? floor, floor);
   }
 
   get catalog(): ConnectionCatalogIndex<TDomain> {
@@ -438,7 +461,11 @@ export class ConnectionService<TDomain = unknown> {
    * little after the connect's own budget, so nothing holds it for long.
    */
   private async lockSource(workspaceId: string, key: string): Promise<SourceLock> {
-    const client = new pg.Client({ connectionString: this.deps.connectionString });
+    // Bounded like the pool's own connects: a hung database answers the person, never hangs the request.
+    const client = new pg.Client({
+      connectionString: this.deps.connectionString,
+      connectionTimeoutMillis: 10_000
+    });
     // A dedicated client's error (the server cut the session) must never be an unhandled event.
     client.on('error', (err) => {
       this.deps.logger.warn({ err, source: key }, 'connections: the sibling lock connection errored');
@@ -470,7 +497,7 @@ export class ConnectionService<TDomain = unknown> {
         await lock.release();
         throw new ConnectionRefusedError(
           'sibling_busy',
-          'Another connect of this source is running: wait for it, then retry'
+          'Another connect or disconnect of this source is running: wait for it, then retry'
         );
       }
     } catch (cause) {
@@ -478,10 +505,6 @@ export class ConnectionService<TDomain = unknown> {
       throw cause;
     }
     return lock;
-  }
-
-  private get lockWatchdogMs(): number {
-    return this.deps.lockWatchdogMs ?? DEFAULT_SIBLING_OVERALL_MS + SIBLING_LOCK_HEADROOM_MS;
   }
 
   /** Our door's prefix for a source: what every receiving URL of the source starts with. */
@@ -566,6 +589,14 @@ export class ConnectionService<TDomain = unknown> {
         siblingEndpointId: created.id,
         updatedAt: now
       };
+      if (lock.released) {
+        // The watchdog cut the lock before the write: the serialization is gone, so nothing is stored.
+        // The endpoint registered meanwhile is ours by its URL and the next connect clears it.
+        throw new ConnectionRefusedError(
+          'source_unavailable',
+          'Nothing stored: the connect ran past its time, and the endpoint it registered will be replaced by the next one; retry'
+        );
+      }
       await this.deps.db
         .insert(connections)
         .values({ workspaceId: actor.workspaceId, source: key, connectedBy: actor.userId, ...written })
