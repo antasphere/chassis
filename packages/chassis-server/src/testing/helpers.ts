@@ -45,6 +45,12 @@ export interface BootResultLike {
   app: Hono;
   db: { pool: pg.Pool };
   jobs: { stop: () => Promise<void> };
+  /**
+   * The connections slot's catalog (PRDCT-3773): the sources the booted tool
+   * declares, by key. The shipped sign-in suite reads which of them is a
+   * sibling (PRDCT-3774) from here, never from the host descriptor.
+   */
+  connections?: { catalog: { sources: Map<string, { sibling?: unknown }> } };
 }
 
 /** A tool's boot function, as `createPlatform(tool).boot` hands it out. */
@@ -98,14 +104,15 @@ export interface ChassisTestHost<TResult extends BootResultLike, TOverrides> {
    * minimal test tool (`partner` on the standard scheme, `ledger` on Stripe's,
    * `vault` a key with a probe and two fields) and hands the suite what their
    * handlers saw (PRDCT-3773). A real tool leaves it unset: the connections
-   * suite skips under its host, and the tool proves its own sources.
+   * suite skips under its host, and the tool proves its own sources. Whether
+   * the sign-in asks the hub for the sibling connect scope (PRDCT-3774) is read
+   * from the booted tool's own catalog, never from here, so a real tool that
+   * declares a sibling source needs nothing in this descriptor.
    */
   connections?: {
     seen: Array<{ workspaceId: string; source: string; id: string; type: string }>;
     /** What the key source's fields hook saw. */
     fieldsSeen: Array<{ workspaceId: string; fields: Record<string, string | string[] | null> }>;
-    /** The host declares a sibling source (PRDCT-3774), so its sign-in asks the hub for `sso:connect` too. */
-    sibling: boolean;
   };
   /**
    * The host's tool is the chassis's minimal test tool, which declares the
