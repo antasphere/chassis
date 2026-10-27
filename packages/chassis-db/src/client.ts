@@ -30,6 +30,14 @@ export interface CreateDbOptions {
    * pool has already dropped that client and opens a new one on the next query.
    */
   onIdleError?: (err: Error) => void;
+  /**
+   * Told when a CHECKED-OUT connection ends on the server's side (inside a
+   * transaction: `pg_terminate_backend`, a failover, the pool's own
+   * `idle_in_transaction_session_timeout`, 25P03): the place to log it. The
+   * query or transaction holding that client rejects on its own; the pool
+   * drops the client when it is released.
+   */
+  onCheckedOutError?: (err: Error) => void;
 }
 
 export function createDb(
@@ -54,6 +62,21 @@ export function createDb(
   // event nobody listens to is an uncaught exception: without this line a
   // Postgres restart kills the process (57P01) instead of costing one reconnect.
   pool.on('error', (err) => options.onIdleError?.(err));
+  // The same, for a client the pool has handed out (PRDCT-3583). pg-pool
+  // listens on a client only while it is idle, and node-postgres emits
+  // `error` on the CLIENT when the server ends a checked-out connection: inside
+  // a transaction nobody listened, and the process died. Every client gets a
+  // listener of its own for its whole life; it reports only while the client
+  // is checked out, since the pool's idle listener reports the idle case, and
+  // once, as that one does (the socket's close follows with a second error).
+  const checkedOut = new WeakSet<pg.PoolClient>();
+  pool.on('acquire', (client) => checkedOut.add(client));
+  pool.on('release', (_err, client) => checkedOut.delete(client));
+  pool.on('connect', (client) => {
+    client.on('error', (err) => {
+      if (checkedOut.delete(client)) options.onCheckedOutError?.(err);
+    });
+  });
   const db = drizzle(pool, { schema });
   return { db, pool };
 }
