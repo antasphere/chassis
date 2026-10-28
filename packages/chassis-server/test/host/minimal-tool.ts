@@ -34,6 +34,20 @@ type ThingsScope = (typeof THINGS_SCOPES)[keyof typeof THINGS_SCOPES];
 
 /** The probe routes, one per scope: authenticated, workspace-scoped, and empty. */
 export const THINGS_ROUTE = '/api/v1/things';
+/** What the host's connection handlers saw (PRDCT-3773), for the suite to read. */
+export const connectionDeliveriesSeen: Array<{
+  workspaceId: string;
+  source: string;
+  id: string;
+  type: string;
+  fields: Record<string, string | string[] | null>;
+}> = [];
+const flakySeen = new Set<string>();
+/** What the vault source's fields hook saw (PRDCT-3773). */
+export const connectionFieldsSeen: Array<{
+  workspaceId: string;
+  fields: Record<string, string | string[] | null>;
+}> = [];
 const THINGS_EXPORT_ROUTE = '/api/v1/things/export';
 
 const contract = defineChassisContract({
@@ -103,6 +117,104 @@ export const minimalTool: ToolDefinition<NoEnv, NoDomain> = {
         description: 'A thing was deleted.',
         subjects: ['thing'],
         data: z.object({ thingId: z.string() })
+      }
+    ]
+  },
+  // The connections catalog (PRDCT-3773): an inbound source on the standard
+  // scheme with a handler the suite watches, an inbound source on Stripe's
+  // scheme, and a key source with a probe and a field, so the chassis suite
+  // can connect, set, test, receive and read the log of a tool's sources.
+  connections: {
+    sources: [
+      {
+        key: 'partner',
+        name: 'Partner',
+        description: 'A partner service that posts its events here.',
+        kind: 'inbound',
+        events: ['thing.created', 'thing.deleted'],
+        secretHint: 'whsec_…',
+        secretPattern: /^whsec_[A-Za-z0-9+/=_-]{16,}$/,
+        handler: async ({ workspaceId, source, delivery, fields }) => {
+          connectionDeliveriesSeen.push({
+            workspaceId,
+            source,
+            id: delivery.id,
+            type: delivery.type,
+            fields
+          });
+          if (delivery.type === 'thing.explode') throw new Error('the handler exploded');
+          // Fails the first time an id is seen, succeeds after (the retry of a transient failure).
+          if (delivery.type === 'thing.flaky') {
+            if (!flakySeen.has(delivery.id)) {
+              flakySeen.add(delivery.id);
+              throw new Error('the handler failed once');
+            }
+            // The retry holds inside the transaction, so two retries at once overlap on the row's lock.
+            await new Promise((r) => setTimeout(r, 300));
+          }
+          return { detail: `took ${delivery.type}` };
+        }
+      },
+      {
+        // A sibling tool of the same hub (PRDCT-3774): the suite boots a second
+        // instance of this very tool as the sibling the fake hub lists under
+        // the slug `twin`, and connects it as the person.
+        key: 'twin',
+        name: 'Twin',
+        description: 'A sibling tool of this hub whose things are mirrored here.',
+        kind: 'inbound',
+        events: ['thing.created'],
+        secretHint: 'whsec_…',
+        sibling: { toolSlug: 'twin', events: ['thing.created'] },
+        handler: async ({ workspaceId, source, delivery, fields }) => {
+          connectionDeliveriesSeen.push({
+            workspaceId,
+            source,
+            id: delivery.id,
+            type: delivery.type,
+            fields
+          });
+        }
+      },
+      {
+        key: 'ledger',
+        name: 'Ledger',
+        kind: 'inbound',
+        verifier: 'stripe',
+        events: ['payment.succeeded'],
+        handler: async ({ workspaceId, source, delivery, fields }) => {
+          connectionDeliveriesSeen.push({
+            workspaceId,
+            source,
+            id: delivery.id,
+            type: delivery.type,
+            fields
+          });
+        }
+      },
+      {
+        key: 'vault',
+        name: 'Vault',
+        kind: 'key',
+        secretHint: 'vk_…',
+        secretPattern: /^vk_/,
+        fields: [
+          { key: 'folder', label: 'Folder', description: 'The folder the key reads', required: false },
+          { key: 'labels', label: 'Labels', multiple: true }
+        ],
+        // A value a migration carried from a table of before the slot (test-only marker).
+        migrateSecret: (sealed) =>
+          sealed.startsWith('legacy:')
+            ? Buffer.from(sealed.slice('legacy:'.length), 'base64').toString('utf8')
+            : null,
+        onFieldsChanged: async ({ workspaceId, fields }) => {
+          connectionFieldsSeen.push({ workspaceId, fields });
+        },
+        probe: async ({ secret, fields }) => {
+          if (secret === 'vk_down') return { ok: false, detail: 'Vault did not answer', unavailable: true };
+          if (secret !== 'vk_good') return { ok: false, detail: 'Vault refused the key' };
+          return { ok: true, detail: 'Vault answered', fields: { folder: fields.folder ?? 'root' } };
+        }
       }
     ]
   },

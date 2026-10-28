@@ -45,6 +45,12 @@ export interface BootResultLike {
   app: Hono;
   db: { pool: pg.Pool };
   jobs: { stop: () => Promise<void> };
+  /**
+   * The connections slot's catalog (PRDCT-3773): the sources the booted tool
+   * declares, by key. The shipped sign-in suite reads which of them is a
+   * sibling (PRDCT-3774) from here, never from the host descriptor.
+   */
+  connections?: { catalog: { sources: Map<string, { sibling?: unknown }> } };
 }
 
 /** A tool's boot function, as `createPlatform(tool).boot` hands it out. */
@@ -93,6 +99,21 @@ export interface ChassisTestHost<TResult extends BootResultLike, TOverrides> {
    * scope) that answers 200 to any principal the gates let through.
    */
   probeRoute: string;
+  /**
+   * The host's tool declares the three connection sources of the chassis's
+   * minimal test tool (`partner` on the standard scheme, `ledger` on Stripe's,
+   * `vault` a key with a probe and two fields) and hands the suite what their
+   * handlers saw (PRDCT-3773). A real tool leaves it unset: the connections
+   * suite skips under its host, and the tool proves its own sources. Whether
+   * the sign-in asks the hub for the sibling connect scope (PRDCT-3774) is read
+   * from the booted tool's own catalog, never from here, so a real tool that
+   * declares a sibling source needs nothing in this descriptor.
+   */
+  connections?: {
+    seen: Array<{ workspaceId: string; source: string; id: string; type: string }>;
+    /** What the key source's fields hook saw. */
+    fieldsSeen: Array<{ workspaceId: string; fields: Record<string, string | string[] | null> }>;
+  };
   /**
    * The host's tool is the chassis's minimal test tool, which declares the
    * `thing` subject and the `thing.created` / `thing.deleted` events the
@@ -191,6 +212,8 @@ export function makeCreateTestApp<TResult extends BootResultLike, TOverrides>(
     return {
       ...result,
       stop: async () => {
+        // The fleet reader's timer, when the boot made one (a cloud boot): never a read after the stop.
+        (result as { fleetOrigins?: { stop(): void } | null }).fleetOrigins?.stop();
         await result.jobs.stop().catch(() => {});
         await endPool(result.db.pool);
       }

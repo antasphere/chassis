@@ -34,9 +34,9 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@antasphere/contract": "^0.19.0",
+    "@antasphere/contract": "^0.20.0",
     "@hono/zod-openapi": "^1.4.0",
-    "zod": "^4.1.0"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "vitest": "^3.2.0"

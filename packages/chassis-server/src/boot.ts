@@ -21,7 +21,7 @@ import {
 } from './email/index.js';
 import { hubConfig, parseEnv } from './env.js';
 import { createAuth, mcpResourceUrl, type AccountEvent } from './identity/index.js';
-import { HubSsoService } from './identity/index.js';
+import { HUB_SSO_CONNECT_SCOPE, HubSsoService } from './identity/index.js';
 import { HubGrantService } from './identity/index.js';
 import { HubLogoutService } from './identity/index.js';
 import { hubApiResource, HubUserClient } from './identity/index.js';
@@ -52,7 +52,14 @@ import { createOtel } from './observability/index.js';
 import { bindEditionSeams } from './platform/index.js';
 import { AllowAllEntitlements } from './platform/index.js';
 import { EventBus } from './platform/index.js';
-import { buildWebhookCatalog, WebhookService, webhookJobs } from './webhooks/index.js';
+import { buildWebhookCatalog, FleetOrigins, WebhookService, webhookJobs } from './webhooks/index.js';
+import {
+  buildConnectionCatalog,
+  connectionDoor,
+  connectionJobs,
+  ConnectionService,
+  SiblingConnector
+} from './connections/index.js';
 import { bindMembershipRemoval } from './members/removal.js';
 import { LocalIdentityProvider } from './platform/index.js';
 import { createRegistry } from './platform/index.js';
@@ -355,6 +362,10 @@ export async function bootPlatform<
   // are HUB-audienced and callable at hub /api/v1 as the user. Flipping it
   // to null (if the hub ever accepts opaque tokens) is this one line.
   const hubTokenResource = hub ? hubApiResource(hub.issuerUrl) : null;
+  // The sibling connect scope (PRDCT-3774) is asked of the hub ONLY by a tool
+  // that declares a sibling connection source: a tool without one asks the
+  // hub nothing new, and the constant HUB_SSO_SCOPES stays pure.
+  const declaresSibling = (tool.connections?.sources ?? []).some((source) => source.sibling !== undefined);
   const hubSso = hub
     ? new HubSsoService({
         db: db.db,
@@ -367,7 +378,8 @@ export async function bootPlatform<
         // hub-audienced via tokenResource.
         resourceUrl: mcpResourceUrl(env.PUBLIC_BASE_URL),
         tokenResource: hubTokenResource,
-        publicBaseUrl: env.PUBLIC_BASE_URL
+        publicBaseUrl: env.PUBLIC_BASE_URL,
+        extraScopes: declaresSibling ? [HUB_SSO_CONNECT_SCOPE] : []
       })
     : undefined;
 
@@ -561,13 +573,28 @@ export async function bootPlatform<
   // own) and attached to it right after; a tool's `services` slot receives
   // the emitter, the API app the service, the bus the chassis's own events.
   const webhookCatalog = buildWebhookCatalog(tool.webhooks);
+  // The fleet (PRDCT-3772): the origins of the hub's registry tools, read
+  // once here (bounded, never fatal: a hub that does not answer leaves the
+  // list empty and opens nothing) and refreshed hourly; the policy reads the
+  // live list, so the guard never holds a stale copy. An oss boot has none.
+  const fleetOrigins = hub
+    ? new FleetOrigins({ issuerUrl: hub.issuerUrl, logger, dials: overrides.fleetOriginsDials })
+    : null;
+  if (fleetOrigins) {
+    await fleetOrigins.refresh();
+    fleetOrigins.start({ isDraining: () => state.draining });
+  }
   const webhooks = new WebhookService({
     db: db.db,
     logger,
     authSecret,
     identity: tool.identity,
     version: tool.runtime.version,
-    policy: { allowPrivateNetworks: env.WEBHOOKS_ALLOW_PRIVATE_NETWORKS, httpsOnly: env.EDITION === 'cloud' },
+    policy: {
+      allowPrivateNetworks: env.WEBHOOKS_ALLOW_PRIVATE_NETWORKS,
+      httpsOnly: env.EDITION === 'cloud',
+      ...(fleetOrigins ? { fleetOrigins: () => fleetOrigins.get() } : {})
+    },
     email,
     brand: { name: tool.identity.displayName, tagline: tool.copy.mail.tagline },
     publicBaseUrl: env.PUBLIC_BASE_URL,
@@ -695,6 +722,35 @@ export async function bootPlatform<
   // The usage queue's retry budget and its hold (PRDCT-2635): stated once,
   // shared by the sink that sends and the held queue that re-drives.
   const usageRetry: UsageRetry = { ...DEFAULT_USAGE_RETRY, ...overrides.usageRetry };
+  // The connections (PRDCT-3773): the tool's declared sources checked once,
+  // the service built before the job runtime (its purge joins the queues)
+  // and before the services slot (a handler reads the domain lazily).
+  const connectionCatalog = buildConnectionCatalog(tool.connections);
+  // The sibling connect (PRDCT-3774) reads the hub as the person (the grant
+  // service) and the fleet list for the sibling's address: both exist on a
+  // cloud boot alone, so an oss instance answers `sibling_unavailable`.
+  const siblingConnector =
+    hub && hubGrant && fleetOrigins
+      ? new SiblingConnector({
+          grant: hubGrant,
+          issuerUrl: hub.issuerUrl,
+          fleet: fleetOrigins,
+          logger,
+          timeoutMs: hubDials.tokenTimeoutMs,
+          fetchImpl: overrides.siblingFetch
+        })
+      : null;
+  const connections = new ConnectionService<TDomain>({
+    db: db.db,
+    logger,
+    authSecret,
+    publicBaseUrl: env.PUBLIC_BASE_URL,
+    catalog: connectionCatalog,
+    getTool: () => domainRef.current,
+    instanceName: tool.identity.displayName,
+    sibling: siblingConnector,
+    connectionString: env.DATABASE_URL
+  });
   const jobs = await createJobs(
     env,
     db.db,
@@ -705,6 +761,7 @@ export async function bootPlatform<
     audit,
     [
       ...webhookJobs(webhooks, logger, env.WEBHOOK_DELIVERY_RETENTION_DAYS),
+      ...connectionJobs(connections, logger, env.WEBHOOK_DELIVERY_RETENTION_DAYS),
       ...(tool.jobs?.({ env, db: db.db, logger, getTool: () => domainRef.current }) ?? [])
     ],
     usageRetry
@@ -853,6 +910,14 @@ export async function bootPlatform<
     authSecret,
     timers: jobs.timers,
     webhooks,
+    connections: {
+      connection: (workspaceId, source) => connections.get(workspaceId, source),
+      secret: (workspaceId, source) => connections.secretOf(workspaceId, source),
+      fields: (workspaceId, source) => connections.fieldsOf(workspaceId, source),
+      setFields: (workspaceId, source, patch) => connections.setFieldsOf(workspaceId, source, patch),
+      recordCheck: (workspaceId, source, ok, detail) =>
+        connections.recordCheck(workspaceId, source, ok, detail)
+    },
     overrides: overrides.tool
   };
   const domain = tool.services(serviceCore);
@@ -897,6 +962,7 @@ export async function bootPlatform<
     entitlements,
     entitlementCloud,
     webhooks,
+    connections,
     // Cloud only (PRDCT-2443): POST /workspaces creates the organization at
     // the hub AS THE CALLER, then forces their reconcile. undefined on oss —
     // the route creates locally there.
@@ -960,7 +1026,7 @@ export async function bootPlatform<
     resolveApiKey: (token) => apiKeys.resolve(token, null),
     isApiKeyToken: apiKeys.isToken,
     limiter: rateLimit(limiters.mcp, makeClientIp(env.TRUST_PROXY)),
-    tool: tool.mcp,
+    tool: { ...tool.mcp, hasConnections: connectionCatalog.sources.size > 0 },
     identity: tool.identity.mcp,
     instanceName: async () => {
       if (cachedName) return cachedName;
@@ -979,6 +1045,11 @@ export async function bootPlatform<
     mcp,
     wellKnown: wellKnownRoutes({ auth, publicBaseUrl: env.PUBLIC_BASE_URL, oauthScopes: tool.scopes.oauth }),
     publicRoutes,
+    // The connections door (PRDCT-3773): only when the tool declares a source that takes deliveries.
+    connectionDoor:
+      connectionCatalog.sources.size > 0
+        ? connectionDoor(connections, rateLimit(limiters.connectionDoor, makeClientIp(env.TRUST_PROXY)))
+        : undefined,
     metricsMiddleware: metrics.middleware,
     metricsRoutes: metrics.routes(env.METRICS_TOKEN),
     otelMiddleware: otel.middleware,
@@ -1014,6 +1085,8 @@ export async function bootPlatform<
     otel,
     authSecret,
     webhooks,
+    fleetOrigins,
+    connections,
     tool: domain
   };
 }
