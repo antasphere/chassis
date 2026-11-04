@@ -1,11 +1,24 @@
 import type { Logger } from '../logger.js';
 import type { Env } from '../env.js';
 
+/**
+ * A file sent with a message: a calendar invitation (`invite.ics`, content type
+ * `text/calendar; method=REQUEST`), a receipt. The content is text, UTF-8; each
+ * delivering driver hands it to its provider in the provider's own shape.
+ */
+export interface EmailAttachment {
+  filename: string;
+  content: string;
+  contentType: string;
+}
+
 export interface EmailMessage {
   to: string;
   subject: string;
   html: string;
   text?: string;
+  /** Absent or empty: a message with no attachment, sent exactly as before. */
+  attachments?: readonly EmailAttachment[];
 }
 
 export interface EmailDriver {
@@ -44,7 +57,20 @@ class SmtpDriver implements EmailDriver {
   }
   async send(message: EmailMessage): Promise<void> {
     const t = await this.transporter();
-    await t.sendMail({ from: this.from, ...message });
+    const { attachments, ...rest } = message;
+    await t.sendMail({
+      from: this.from,
+      ...rest,
+      ...(attachments?.length
+        ? {
+            attachments: attachments.map((a) => ({
+              filename: a.filename,
+              content: a.content,
+              contentType: a.contentType
+            }))
+          }
+        : {})
+    });
   }
 }
 
@@ -63,7 +89,20 @@ class ResendDriver implements EmailDriver {
   }
   async send(message: EmailMessage): Promise<void> {
     const client = await this.client();
-    const { error } = await client.emails.send({ from: this.from, ...message });
+    const { attachments, ...rest } = message;
+    const { error } = await client.emails.send({
+      from: this.from,
+      ...rest,
+      ...(attachments?.length
+        ? {
+            attachments: attachments.map((a) => ({
+              filename: a.filename,
+              content: Buffer.from(a.content, 'utf8'),
+              contentType: a.contentType
+            }))
+          }
+        : {})
+    });
     if (error) throw new Error(`resend: ${error.message}`);
   }
 }
@@ -94,7 +133,16 @@ class BrevoDriver implements EmailDriver {
         to: [{ email: message.to }],
         subject: message.subject,
         htmlContent: message.html,
-        ...(message.text ? { textContent: message.text } : {})
+        ...(message.text ? { textContent: message.text } : {}),
+        // Brevo takes base64 content and reads the type from the file's extension.
+        ...(message.attachments?.length
+          ? {
+              attachment: message.attachments.map((a) => ({
+                name: a.filename,
+                content: Buffer.from(a.content, 'utf8').toString('base64')
+              }))
+            }
+          : {})
       })
     });
     if (res.ok) return;

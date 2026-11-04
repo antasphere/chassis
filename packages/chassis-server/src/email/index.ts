@@ -1,4 +1,4 @@
-export { type EmailDriver, type EmailMessage, createEmailDriver } from './driver.js';
+export { type EmailAttachment, type EmailDriver, type EmailMessage, createEmailDriver } from './driver.js';
 export {
   type EmailAssets,
   type MailBrand,

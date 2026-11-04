@@ -1,4 +1,14 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// The smtp and resend drivers load their SDKs lazily; the mocks stand in for both.
+const sendMail = vi.fn(async (_opts: Record<string, unknown>) => ({}));
+const resendSend = vi.fn(async (_opts: Record<string, unknown>) => ({ error: null }));
+vi.mock('nodemailer', () => ({ default: { createTransport: () => ({ sendMail }) } }));
+vi.mock('resend', () => ({
+  Resend: class {
+    emails = { send: resendSend };
+  }
+}));
 import { createEmailDriver, type EmailMessage } from '@antasphere/chassis-server/email';
 import type { Logger } from '@antasphere/chassis-server/logger';
 
@@ -123,5 +133,89 @@ describe('the brevo driver on the wire', () => {
       expect(result?.message).not.toContain('xkeysib-secret');
       expect(result?.message).not.toContain('her@example.com');
     }
+  });
+});
+
+describe('attachments', () => {
+  const invite = {
+    filename: 'invite.ics',
+    content: 'BEGIN:VCALENDAR\r\nSUMMARY:Café\r\nEND:VCALENDAR\r\n',
+    contentType: 'text/calendar; method=REQUEST; charset=UTF-8'
+  };
+  const message: EmailMessage = {
+    to: 'her@example.com',
+    subject: 'S',
+    html: '<p>B</p>',
+    attachments: [invite]
+  };
+  const from = 'Things <noreply@example.com>';
+
+  beforeEach(() => {
+    sendMail.mockClear();
+    resendSend.mockClear();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('brevo sends each attachment as base64 under its file name', async () => {
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await createEmailDriver(
+      { EMAIL_DRIVER: 'brevo', BREVO_API_KEY: 'k', EMAIL_FROM: from } as FactoryEnv,
+      logger
+    ).send(message);
+    const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    expect(body.attachment).toEqual([
+      { name: 'invite.ics', content: Buffer.from(invite.content, 'utf8').toString('base64') }
+    ]);
+    expect(Buffer.from(body.attachment[0].content, 'base64').toString('utf8')).toBe(invite.content);
+  });
+
+  it('brevo sends no attachment key for a message without one, or with an empty list', async () => {
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const driver = createEmailDriver(
+      { EMAIL_DRIVER: 'brevo', BREVO_API_KEY: 'k', EMAIL_FROM: from } as FactoryEnv,
+      logger
+    );
+    await driver.send({ to: 'her@example.com', subject: 'S', html: '<p>B</p>' });
+    await driver.send({ to: 'her@example.com', subject: 'S', html: '<p>B</p>', attachments: [] });
+    for (const call of fetchMock.mock.calls as unknown as [string, RequestInit][]) {
+      expect('attachment' in JSON.parse(call[1].body as string)).toBe(false);
+    }
+  });
+
+  it('smtp hands nodemailer the file name, the content and the content type', async () => {
+    await createEmailDriver(
+      { EMAIL_DRIVER: 'smtp', SMTP_URL: 'smtp://h:25', EMAIL_FROM: from } as FactoryEnv,
+      logger
+    ).send(message);
+    const opts = sendMail.mock.calls[0]![0];
+    expect(opts.from).toBe(from);
+    expect(opts.to).toBe('her@example.com');
+    expect(opts.attachments).toEqual([invite]);
+  });
+
+  it('smtp passes no attachments key when there is none', async () => {
+    await createEmailDriver(
+      { EMAIL_DRIVER: 'smtp', SMTP_URL: 'smtp://h:25', EMAIL_FROM: from } as FactoryEnv,
+      logger
+    ).send({ to: 'her@example.com', subject: 'S', html: '<p>B</p>' });
+    expect('attachments' in sendMail.mock.calls[0]![0]).toBe(false);
+  });
+
+  it('resend hands its SDK the file name, the bytes and the content type', async () => {
+    await createEmailDriver(
+      { EMAIL_DRIVER: 'resend', RESEND_API_KEY: 're_x', EMAIL_FROM: from } as FactoryEnv,
+      logger
+    ).send(message);
+    const opts = resendSend.mock.calls[0]![0] as {
+      attachments: Array<{ filename: string; content: Buffer; contentType: string }>;
+    };
+    expect(opts.attachments).toHaveLength(1);
+    expect(opts.attachments[0]!.filename).toBe('invite.ics');
+    expect(opts.attachments[0]!.contentType).toBe(invite.contentType);
+    expect(opts.attachments[0]!.content.toString('utf8')).toBe(invite.content);
   });
 });
