@@ -60,6 +60,7 @@ import {
   ConnectionService,
   SiblingConnector
 } from './connections/index.js';
+import { docsSourceRoutes, findDocsDir, loadDocsSource } from './docs-source/index.js';
 import { bindMembershipRemoval } from './members/removal.js';
 import { LocalIdentityProvider } from './platform/index.js';
 import { createRegistry } from './platform/index.js';
@@ -985,6 +986,9 @@ export async function bootPlatform<
 
   // The tool's public routes (e.g. a share-link viewer, Phase 4,
   // ADR 012): anonymous, mounted in app.ts's public-route slot.
+  // The docs folder the image carries, read once (PRDCT-4098).
+  const docsSource = await loadDocsSource(findDocsDir(tool.runtime.publicDir, env.DOCS_DIR), logger);
+
   const publicRoutes = tool.app?.publicRoutes?.({ ...core, overrides: undefined }, domain);
 
   // Observability: tracing (exporterless = zero phone-home) + Prometheus.
@@ -1050,6 +1054,12 @@ export async function bootPlatform<
       connectionCatalog.sources.size > 0
         ? connectionDoor(connections, rateLimit(limiters.connectionDoor, makeClientIp(env.TRUST_PROXY)))
         : undefined,
+    // The docs source (PRDCT-4098): always mounted; without a docs folder it answers 404.
+    docsSource: docsSourceRoutes(
+      docsSource,
+      { version: env.APP_VERSION, slug: tool.identity.slug },
+      rateLimit(limiters.docsSource, makeClientIp(env.TRUST_PROXY))
+    ),
     metricsMiddleware: metrics.middleware,
     metricsRoutes: metrics.routes(env.METRICS_TOKEN),
     otelMiddleware: otel.middleware,

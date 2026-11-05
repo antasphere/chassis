@@ -35,6 +35,7 @@ export * from './schemas/webhooks.js';
 export * from './schemas/connections.js';
 export * from './schemas/demo-passes.js';
 export * from './schemas/apps.js';
+export * from './schemas/docs-source.js';
 export * from './fleet.js';
 export * from './tools.js';
 export * from './seams.js';
