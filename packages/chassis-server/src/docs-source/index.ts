@@ -1,5 +1,5 @@
 import { existsSync, statSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { join, relative, resolve, isAbsolute, sep } from 'node:path';
 import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { parse as parseYaml } from 'yaml';
@@ -169,6 +169,7 @@ export async function loadDocsSource(dir: string | null, logger: Logger): Promis
   if (!Array.isArray(n.groups)) {
     logger.warn({ file: navFile }, 'docs source: nav.yml has no `groups` list; the manifest has no group');
   }
+  const realDir = await realpath(dir);
   const pages = new Map<string, string>();
   const groups: DocsSourceGroup[] = [];
   for (const [i, raw] of rawGroups.entries()) {
@@ -197,12 +198,27 @@ export async function loadDocsSource(dir: string | null, logger: Logger): Promis
         continue;
       }
       const file = join(dir, `${entry}.md`);
-      if (!inside(dir, file)) continue;
-      let markdown: string;
+      // Where the file really is: a link inside the folder is a page like any
+      // other, a link pointing out of it is not served (round 1, F2).
+      let real: string;
       try {
-        markdown = await readFile(file, 'utf8');
+        real = await realpath(file);
       } catch {
         logger.warn({ file }, 'docs source: a page nav.yml lists does not exist; left out of the manifest');
+        continue;
+      }
+      if (!inside(realDir, real)) {
+        logger.warn(
+          { file, real },
+          'docs source: a page points outside the docs folder; left out of the manifest'
+        );
+        continue;
+      }
+      let markdown: string;
+      try {
+        markdown = await readFile(real, 'utf8');
+      } catch {
+        logger.warn({ file }, 'docs source: a page nav.yml lists cannot be read; left out of the manifest');
         continue;
       }
       const meta = pageMeta(markdown);
@@ -216,6 +232,24 @@ export async function loadDocsSource(dir: string | null, logger: Logger): Promis
   }
   logger.info({ dir, pages: pages.size }, 'docs source read');
   return { dir, product, description, groups, pages };
+}
+
+/**
+ * What the boot does with the docs (PRDCT-4098, round 1 F3): with no token
+ * the route is off and the folder is NOT read, not even looked for; with one,
+ * the folder is found and read once.
+ */
+export async function docsSourceAtBoot(opts: {
+  token: string | undefined;
+  publicDir: string;
+  override: string | undefined;
+  logger: Logger;
+}): Promise<DocsSource | null> {
+  if (!opts.token) {
+    opts.logger.info('docs source off: DOCS_SOURCE_TOKEN is unset, /docs-source answers 404');
+    return null;
+  }
+  return loadDocsSource(findDocsDir(opts.publicDir, opts.override), opts.logger);
 }
 
 /** The one 404, byte for byte, whatever gave it (a guard, an unlisted path, no folder). */
@@ -260,12 +294,17 @@ export function docsSourceRoutes(
     if (!token) return notFound(c);
     return next();
   });
-  if (!token) {
-    app.all('/docs-source/*', notFound);
-    return app;
-  }
+  // Off: the guard above answers every request under the path; nothing else to mount.
+  if (!token) return app;
   const expected = `Bearer ${token}`;
-  app.use('/docs-source/*', wall);
+  // The wall's own 429 is the shared one; it leaves here never kept either (round 1, F1).
+  app.use('/docs-source/*', async (c, next) => {
+    // Called directly, the wall hands back its own answer (the 429) or nothing
+    // once the chain below has answered; the 429 is returned with the header.
+    const answer = await wall(c, next);
+    if (answer && answer.status === 429) answer.headers.set('cache-control', DOCS_SOURCE_CACHE_CONTROL);
+    return answer;
+  });
   // Guard 3: the bearer, in constant time, before any lookup.
   app.use('/docs-source/*', async (c, next) => {
     const presented = c.req.header('authorization');

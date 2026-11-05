@@ -60,7 +60,7 @@ import {
   ConnectionService,
   SiblingConnector
 } from './connections/index.js';
-import { docsSourceRoutes, findDocsDir, loadDocsSource, type DocsSource } from './docs-source/index.js';
+import { docsSourceAtBoot, docsSourceRoutes } from './docs-source/index.js';
 import { bindMembershipRemoval } from './members/removal.js';
 import { LocalIdentityProvider } from './platform/index.js';
 import { createRegistry } from './platform/index.js';
@@ -988,12 +988,12 @@ export async function bootPlatform<
   // ADR 012): anonymous, mounted in app.ts's public-route slot.
   // The docs folder the image carries, read once (PRDCT-4098), and only when
   // the route is on: unset DOCS_SOURCE_TOKEN leaves the folder unread.
-  let docsSource: DocsSource | null = null;
-  if (env.DOCS_SOURCE_TOKEN) {
-    docsSource = await loadDocsSource(findDocsDir(tool.runtime.publicDir, env.DOCS_DIR), logger);
-  } else {
-    logger.info('docs source off: DOCS_SOURCE_TOKEN is unset, /docs-source answers 404');
-  }
+  const docsSource = await docsSourceAtBoot({
+    token: env.DOCS_SOURCE_TOKEN,
+    publicDir: tool.runtime.publicDir,
+    override: env.DOCS_DIR,
+    logger
+  });
 
   const publicRoutes = tool.app?.publicRoutes?.({ ...core, overrides: undefined }, domain);
 

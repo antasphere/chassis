@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -7,6 +7,7 @@ import type { Context, Hono, MiddlewareHandler } from 'hono';
 import { docsSourceManifestSchema } from '@antasphere/chassis-contract';
 import {
   DOCS_SOURCE_CACHE_CONTROL,
+  docsSourceAtBoot,
   docsSourceRoutes,
   findDocsDir,
   isDocsPagePath,
@@ -135,6 +136,8 @@ describe('GET /docs-source/pages/<path>', () => {
       expect(res.headers.get('content-type')).toBe('text/markdown; charset=utf-8');
       expect(res.headers.get('cache-control')).toBe(DOCS_SOURCE_CACHE_CONTROL);
       expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+      // A browser that ever reaches a page runs nothing from it (round 1, F5).
+      expect(res.headers.get('content-security-policy')).toBe("default-src 'none'; sandbox");
       expect(await res.text()).toBe(PAGES[file]);
     }
   });
@@ -286,6 +289,82 @@ groups:
   });
 });
 
+describe('symlinks (round 1, F2)', () => {
+  it('a listed page that is a link pointing outside the folder is left out, with a warning naming it, and never served', async () => {
+    const nav = 'product: P\ndescription: D\ngroups:\n  - title: G\n    pages: [index, leak]\n';
+    const dir = docsFolder({ 'nav.yml': nav, 'index.md': '# I\n' });
+    writeFileSync(join(dir, '..', 'outside-secret.txt'), 'OUTSIDE-SECRET-CONTENT');
+    symlinkSync(join('..', 'outside-secret.txt'), join(dir, 'leak.md'));
+    const log = logger();
+    const source = await loadDocsSource(dir, log);
+    const app = withToken(docsSourceRoutes(source, FACTS, { token: TOKEN, wall: open }));
+    const body = docsSourceManifestSchema.parse(await (await app.request('/docs-source')).json());
+    expect(body.groups[0]!.pages.map((p) => p.path)).toEqual(['index']);
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ file: join(dir, 'leak.md') }),
+      expect.stringContaining('outside the docs folder')
+    );
+    const res = await app.request('/docs-source/pages/leak');
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain('OUTSIDE');
+  });
+
+  it('a link that stays inside the folder is a page like any other', async () => {
+    const nav = 'product: P\ndescription: D\ngroups:\n  - title: G\n    pages: [index, alias]\n';
+    const dir = docsFolder({ 'nav.yml': nav, 'index.md': '# I\n\nIntro.\n' });
+    symlinkSync('index.md', join(dir, 'alias.md'));
+    const log = logger();
+    const source = await loadDocsSource(dir, log);
+    const app = withToken(docsSourceRoutes(source, FACTS, { token: TOKEN, wall: open }));
+    expect(await (await app.request('/docs-source/pages/alias')).text()).toBe('# I\n\nIntro.\n');
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('docsSourceAtBoot (round 1, F3)', () => {
+  it('token unset: the folder is not read at all, one info line, no warning even for a malformed nav', async () => {
+    const dir = docsFolder({ 'nav.yml': 'product: [unclosed\n  - : :' });
+    const log = logger();
+    const source = await docsSourceAtBoot({
+      token: undefined,
+      publicDir: join(dir, '..', 'public'),
+      override: dir,
+      logger: log
+    });
+    expect(source).toBeNull();
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(log.info).toHaveBeenCalledTimes(1);
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining('DOCS_SOURCE_TOKEN is unset'));
+  });
+
+  it('token set: the folder is found beside the dashboard build and read', async () => {
+    const dir = docsFolder({ 'nav.yml': NAV, ...PAGES });
+    const log = logger();
+    const source = await docsSourceAtBoot({
+      token: TOKEN,
+      publicDir: join(dir, '..', 'public'),
+      override: undefined,
+      logger: log
+    });
+    expect(source?.pages.size).toBe(3);
+    expect(log.info).toHaveBeenCalledWith(expect.objectContaining({ pages: 3 }), 'docs source read');
+  });
+
+  it('token set, no folder anywhere: null and one info line', async () => {
+    const empty = mkdtempSync(join(tmpdir(), 'docs-none-'));
+    const log = logger();
+    expect(
+      await docsSourceAtBoot({
+        token: TOKEN,
+        publicDir: join(empty, 'public'),
+        override: undefined,
+        logger: log
+      })
+    ).toBeNull();
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining('no docs folder'));
+  });
+});
+
 describe('findDocsDir', () => {
   it('finds the image layout beside the dashboard build, then the workspace root', () => {
     const image = mkdtempSync(join(tmpdir(), 'docs-image-'));
@@ -350,7 +429,10 @@ describe('the wall', () => {
     expect((await app.request('/docs-source', from('peer-1'))).status).toBe(200);
     expect((await app.request('/docs-source/pages/index', from('peer-1'))).status).toBe(200);
     expect((await app.request('/docs-source/pages/nope', from('peer-1'))).status).toBe(404);
-    expect((await app.request('/docs-source', from('peer-1'))).status).toBe(429);
+    const spent = await app.request('/docs-source', from('peer-1'));
+    expect(spent.status).toBe(429);
+    // The wall's 429 is never kept either (round 1, F1).
+    expect(spent.headers.get('cache-control')).toBe('private, no-store');
     expect((await app.request('/docs-source/pages/index', from('peer-1'))).status).toBe(429);
     // A wrong token spends the bucket too: the wall stands before the token check.
     expect((await app.raw.request('/docs-source', from('peer-1'))).status).toBe(429);
