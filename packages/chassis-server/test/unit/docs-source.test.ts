@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { RateLimiterMemory } from 'rate-limiter-flexible';
-import type { MiddlewareHandler } from 'hono';
+import type { Context, Hono, MiddlewareHandler } from 'hono';
 import { docsSourceManifestSchema } from '@antasphere/chassis-contract';
 import {
   DOCS_SOURCE_CACHE_CONTROL,
@@ -13,7 +13,7 @@ import {
   loadDocsSource,
   pageMeta
 } from '../../src/docs-source/index.js';
-import { makeClientIp, rateLimit } from '../../src/middleware/rate-limit.js';
+import { rateLimit } from '../../src/middleware/rate-limit.js';
 import type { Logger } from '../../src/logger.js';
 
 /**
@@ -66,11 +66,23 @@ const PAGES = {
   'internal.md': '# Internal\n\nNot listed.\n'
 };
 
+const TOKEN = 'docs-source-test-token-0123456789abcdef';
+const BEARER = { authorization: `Bearer ${TOKEN}` };
+
+/** The routes with the token set, and a `request` that presents it (`raw` presents nothing). */
+function withToken(hono: Hono) {
+  return {
+    raw: hono,
+    request: (url: string, init: RequestInit = {}) =>
+      hono.request(url, { ...init, headers: { ...BEARER, ...(init.headers as Record<string, string>) } })
+  };
+}
+
 async function serve(files: Record<string, string>, wall: MiddlewareHandler = open) {
   const dir = docsFolder(files);
   const log = logger();
   const source = await loadDocsSource(dir, log);
-  return { app: docsSourceRoutes(source, FACTS, wall), log, dir };
+  return { app: withToken(docsSourceRoutes(source, FACTS, { token: TOKEN, wall })), log, dir };
 }
 
 describe('GET /docs-source: the manifest', () => {
@@ -168,7 +180,7 @@ describe('the folder', () => {
     expect(source).toBeNull();
     expect(log.info).toHaveBeenCalledTimes(1);
     expect(log.warn).not.toHaveBeenCalled();
-    const app = docsSourceRoutes(source, FACTS, open);
+    const app = withToken(docsSourceRoutes(source, FACTS, { token: TOKEN, wall: open }));
     expect((await app.request('/docs-source')).status).toBe(404);
     expect((await app.request('/docs-source/pages/index')).status).toBe(404);
   });
@@ -331,14 +343,126 @@ describe('pageMeta and the page paths', () => {
 describe('the wall', () => {
   it('is per address and answers 429 once the bucket is spent, on both paths and on a 404', async () => {
     const limiter = new RateLimiterMemory({ keyPrefix: 'rl:docs-source-test', points: 3, duration: 60 });
-    const { app } = await serve({ 'nav.yml': NAV, ...PAGES }, rateLimit(limiter, makeClientIp(true)));
-    const from = (ip: string) => ({ headers: { 'x-forwarded-for': ip } });
-    expect((await app.request('/docs-source', from('203.0.113.1'))).status).toBe(200);
-    expect((await app.request('/docs-source/pages/index', from('203.0.113.1'))).status).toBe(200);
-    expect((await app.request('/docs-source/pages/nope', from('203.0.113.1'))).status).toBe(404);
-    expect((await app.request('/docs-source', from('203.0.113.1'))).status).toBe(429);
-    expect((await app.request('/docs-source/pages/index', from('203.0.113.1'))).status).toBe(429);
-    // Another address has its own bucket.
-    expect((await app.request('/docs-source', from('203.0.113.2'))).status).toBe(200);
+    // A proxy header is refused before the wall, so the test keys the bucket on its own header.
+    const byTestHeader = (c: Context) => c.req.header('x-test-peer') ?? 'unknown';
+    const { app } = await serve({ 'nav.yml': NAV, ...PAGES }, rateLimit(limiter, byTestHeader));
+    const from = (peer: string) => ({ headers: { 'x-test-peer': peer } });
+    expect((await app.request('/docs-source', from('peer-1'))).status).toBe(200);
+    expect((await app.request('/docs-source/pages/index', from('peer-1'))).status).toBe(200);
+    expect((await app.request('/docs-source/pages/nope', from('peer-1'))).status).toBe(404);
+    expect((await app.request('/docs-source', from('peer-1'))).status).toBe(429);
+    expect((await app.request('/docs-source/pages/index', from('peer-1'))).status).toBe(429);
+    // A wrong token spends the bucket too: the wall stands before the token check.
+    expect((await app.raw.request('/docs-source', from('peer-1'))).status).toBe(429);
+    // Another peer has its own bucket.
+    expect((await app.request('/docs-source', from('peer-2'))).status).toBe(200);
+  });
+
+  it('is not spent by a request a guard refused before it (a proxy header, the route off)', async () => {
+    const limiter = new RateLimiterMemory({ keyPrefix: 'rl:docs-source-before', points: 1, duration: 60 });
+    const { app } = await serve(
+      { 'nav.yml': NAV, ...PAGES },
+      rateLimit(limiter, () => 'one')
+    );
+    for (let i = 0; i < 5; i++) {
+      expect((await app.request('/docs-source', { headers: { via: '1.1 front' } })).status).toBe(404);
+    }
+    expect((await app.request('/docs-source')).status).toBe(200);
+  });
+});
+
+describe('the guards', () => {
+  async function notFoundBytes(res: Response) {
+    return {
+      status: res.status,
+      body: await res.text(),
+      headers: [...res.headers.entries()].sort()
+    };
+  }
+
+  it('token unset: every path answers the 404, with or without a bearer, and the folder is not needed', async () => {
+    const app = docsSourceRoutes(null, FACTS, { token: undefined, wall: open });
+    for (const url of ['/docs-source', '/docs-source/pages/index', '/docs-source/x']) {
+      expect((await app.request(url)).status).toBe(404);
+      expect((await app.request(url, { headers: BEARER })).status).toBe(404);
+    }
+  });
+
+  it('token set: no header, a wrong scheme, one byte off, a longer or shorter token answer a bare 401', async () => {
+    const { app } = await serve({ 'nav.yml': NAV, ...PAGES });
+    const offByOne = TOKEN.slice(0, -1) + (TOKEN.endsWith('f') ? 'e' : 'f');
+    const tries: Array<Record<string, string>> = [
+      {},
+      { authorization: '' },
+      { authorization: TOKEN },
+      { authorization: `Basic ${TOKEN}` },
+      { authorization: `bearer ${TOKEN}` },
+      { authorization: `Bearer ${offByOne}` },
+      { authorization: `Bearer ${TOKEN}x` },
+      { authorization: `Bearer ${TOKEN.slice(0, -1)}` },
+      { authorization: `Bearer  ${TOKEN}` }
+    ];
+    for (const headers of tries) {
+      for (const url of ['/docs-source', '/docs-source/pages/index', '/docs-source/pages/nope']) {
+        const res = await app.raw.request(url, { headers });
+        expect(res.status, `${url} ${JSON.stringify(headers)}`).toBe(401);
+        expect(await res.text()).toBe('');
+        expect(res.headers.get('cache-control')).toBe('private, no-store');
+        expect(res.headers.get('www-authenticate')).toBe('Bearer');
+      }
+    }
+  });
+
+  it('token set: the right bearer reads', async () => {
+    const { app } = await serve({ 'nav.yml': NAV, ...PAGES });
+    expect((await app.raw.request('/docs-source', { headers: BEARER })).status).toBe(200);
+    expect((await app.raw.request('/docs-source/pages/index', { headers: BEARER })).status).toBe(200);
+  });
+
+  it.each(['x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'forwarded', 'via'])(
+    'the right bearer with %s answers the 404, whatever the value, before the token is read',
+    async (header) => {
+      const { app } = await serve({ 'nav.yml': NAV, ...PAGES });
+      for (const value of ['1.2.3.4', '', 'for=10.0.0.1']) {
+        for (const url of ['/docs-source', '/docs-source/pages/index']) {
+          const res = await app.request(url, { headers: { [header]: value } });
+          expect(res.status, `${header}: ${value} ${url}`).toBe(404);
+        }
+        // Without the token too: a proxied probe never learns the route is on (no 401).
+        expect((await app.raw.request('/docs-source', { headers: { [header]: value } })).status).toBe(404);
+      }
+    }
+  );
+
+  it('the 404 is byte-identical: proxy header, token unset, unlisted page, unknown path, no folder', async () => {
+    const { app } = await serve({ 'nav.yml': NAV, ...PAGES });
+    const off = docsSourceRoutes(null, FACTS, { token: undefined, wall: open });
+    const noFolder = withToken(docsSourceRoutes(null, FACTS, { token: TOKEN, wall: open }));
+    const answers = await Promise.all(
+      [
+        app.request('/docs-source', { headers: { 'x-forwarded-for': '1.2.3.4' } }),
+        off.request('/docs-source'),
+        off.request('/docs-source/pages/index', { headers: BEARER }),
+        app.request('/docs-source/pages/internal'),
+        app.request('/docs-source/elsewhere'),
+        app.request('/docs-source', { method: 'POST' }),
+        noFolder.request('/docs-source'),
+        noFolder.request('/docs-source/pages/index')
+      ].map(async (r) => notFoundBytes(await r))
+    );
+    for (const a of answers) expect(a).toEqual(answers[0]);
+    expect(answers[0]!.status).toBe(404);
+    expect(answers[0]!.headers).toEqual([
+      ['cache-control', 'private, no-store'],
+      ['content-type', 'application/json'],
+      ['x-content-type-options', 'nosniff']
+    ]);
+  });
+
+  it('every answer is private, no-store', async () => {
+    const { app } = await serve({ 'nav.yml': NAV, ...PAGES });
+    for (const url of ['/docs-source', '/docs-source/pages/index', '/docs-source/pages/nope']) {
+      expect((await app.request(url)).headers.get('cache-control')).toBe('private, no-store');
+    }
   });
 });

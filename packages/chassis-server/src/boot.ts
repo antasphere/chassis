@@ -60,7 +60,7 @@ import {
   ConnectionService,
   SiblingConnector
 } from './connections/index.js';
-import { docsSourceRoutes, findDocsDir, loadDocsSource } from './docs-source/index.js';
+import { docsSourceRoutes, findDocsDir, loadDocsSource, type DocsSource } from './docs-source/index.js';
 import { bindMembershipRemoval } from './members/removal.js';
 import { LocalIdentityProvider } from './platform/index.js';
 import { createRegistry } from './platform/index.js';
@@ -986,8 +986,14 @@ export async function bootPlatform<
 
   // The tool's public routes (e.g. a share-link viewer, Phase 4,
   // ADR 012): anonymous, mounted in app.ts's public-route slot.
-  // The docs folder the image carries, read once (PRDCT-4098).
-  const docsSource = await loadDocsSource(findDocsDir(tool.runtime.publicDir, env.DOCS_DIR), logger);
+  // The docs folder the image carries, read once (PRDCT-4098), and only when
+  // the route is on: unset DOCS_SOURCE_TOKEN leaves the folder unread.
+  let docsSource: DocsSource | null = null;
+  if (env.DOCS_SOURCE_TOKEN) {
+    docsSource = await loadDocsSource(findDocsDir(tool.runtime.publicDir, env.DOCS_DIR), logger);
+  } else {
+    logger.info('docs source off: DOCS_SOURCE_TOKEN is unset, /docs-source answers 404');
+  }
 
   const publicRoutes = tool.app?.publicRoutes?.({ ...core, overrides: undefined }, domain);
 
@@ -1054,11 +1060,12 @@ export async function bootPlatform<
       connectionCatalog.sources.size > 0
         ? connectionDoor(connections, rateLimit(limiters.connectionDoor, makeClientIp(env.TRUST_PROXY)))
         : undefined,
-    // The docs source (PRDCT-4098): always mounted; without a docs folder it answers 404.
+    // The docs source (PRDCT-4098): always answers its own paths, the 404
+    // unless DOCS_SOURCE_TOKEN is set (docs-source/index.ts, the three guards).
     docsSource: docsSourceRoutes(
       docsSource,
       { version: env.APP_VERSION, slug: tool.identity.slug },
-      rateLimit(limiters.docsSource, makeClientIp(env.TRUST_PROXY))
+      { token: env.DOCS_SOURCE_TOKEN, wall: rateLimit(limiters.docsSource, makeClientIp(env.TRUST_PROXY)) }
     ),
     metricsMiddleware: metrics.middleware,
     metricsRoutes: metrics.routes(env.METRICS_TOKEN),

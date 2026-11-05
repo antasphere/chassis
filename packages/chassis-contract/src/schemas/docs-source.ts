@@ -1,8 +1,10 @@
 import { z } from 'zod';
 
 /**
- * The docs source (PRDCT-4098): what a tool answers on its public
- * `GET /docs-source`, read from the `docs/` folder its image carries. A
+ * The docs source (PRDCT-4098): what a tool answers on `GET /docs-source`,
+ * read from the `docs/` folder its image carries, to a direct network peer
+ * presenting `Authorization: Bearer <DOCS_SOURCE_TOKEN>` (off when the tool
+ * has no token; a request through a proxy answers 404). A
  * reader (the Handbook) validates the answer with this schema, the way
  * `toolOriginsSchema` guards the fleet read.
  *

@@ -4,16 +4,31 @@ import { join, relative, resolve, isAbsolute, sep } from 'node:path';
 import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { parse as parseYaml } from 'yaml';
 import type { DocsSourceGroup, DocsSourceManifest } from '@antasphere/chassis-contract';
+import { constantTimeEquals } from '../constant-time.js';
 import type { Logger } from '../logger.js';
 
 /**
- * The docs source (PRDCT-4098): a tool's image carries its `docs/` folder
- * (the PUBLIC pages, by the template's own contract) and the chassis answers
- * it on two public, read-only routes, so a reader on the stack network (the
- * Handbook) reads every tool's docs live:
+ * The docs source (PRDCT-4098): a tool's image carries its `docs/` folder and
+ * the chassis answers it on two read-only routes, so a reader on the stack
+ * network (the Handbook) reads every tool's docs live:
  *
  *   GET /docs-source               the manifest (`docsSourceManifestSchema`)
  *   GET /docs-source/pages/<path>  a page's raw markdown, for a path nav.yml lists
+ *
+ * These are INTERNAL tools' docs (Romain, 5 November 2026), so the route is
+ * unreachable from outside by three guards, each sufficient alone, in order:
+ *  1. a request carrying a proxy header (`PROXY_HEADERS`) answers the 404,
+ *     before anything else: only a direct network peer is ever served (the
+ *     reader calls `http://<slug>:3000`, no front in the path; a front always
+ *     sets one of them). Its presence counts, not its value, and `TRUST_PROXY`
+ *     plays no part;
+ *  2. `DOCS_SOURCE_TOKEN` unset: the route is off, every path under it
+ *     answers the 404 and the folder is never read;
+ *  3. set: `Authorization: Bearer <token>`, compared in constant time; any
+ *     other answer is a bare 401, before the lookup.
+ * The 404 is ONE answer (`notFound`), whichever guard or lookup gave it, so a
+ * probe learns nothing. Every answer is `private, no-store`, no cookie is read,
+ * no audit row written; the per-address wall sits after guard 2.
  *
  * The folder is read ONCE at boot and held in memory (it is immutable in an
  * image). A request never reaches the disk: a page is looked up by its exact
@@ -32,8 +47,17 @@ export interface DocsSource {
   pages: ReadonlyMap<string, string>;
 }
 
-/** `Cache-Control` of an answer: public, five minutes. */
-export const DOCS_SOURCE_CACHE_CONTROL = 'public, max-age=300';
+/** `Cache-Control` of every answer: never kept by anyone. */
+export const DOCS_SOURCE_CACHE_CONTROL = 'private, no-store';
+
+/** The headers a front (a reverse proxy, a CDN) sets: any one of them present refuses the request (guard 1). */
+export const PROXY_HEADERS = [
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-proto',
+  'forwarded',
+  'via'
+] as const;
 
 /**
  * Where the docs folder is: `DOCS_DIR` when set, else beside the dashboard
@@ -194,24 +218,61 @@ export async function loadDocsSource(dir: string | null, logger: Logger): Promis
   return { dir, product, description, groups, pages };
 }
 
+/** The one 404, byte for byte, whatever gave it (a guard, an unlisted path, no folder). */
 function notFound(c: Context) {
-  c.header('Cache-Control', 'no-store');
-  c.header('x-content-type-options', 'nosniff');
-  return c.json({ error: { code: 'not_found', message: 'Not found' } }, 404);
+  return c.body(NOT_FOUND_BODY, 404, NOT_FOUND_HEADERS);
+}
+const NOT_FOUND_BODY = JSON.stringify({ error: { code: 'not_found', message: 'Not found' } });
+const NOT_FOUND_HEADERS = {
+  'content-type': 'application/json',
+  'cache-control': DOCS_SOURCE_CACHE_CONTROL,
+  'x-content-type-options': 'nosniff'
+};
+
+function unauthorized(c: Context) {
+  return c.body(null, 401, {
+    'cache-control': DOCS_SOURCE_CACHE_CONTROL,
+    'x-content-type-options': 'nosniff',
+    'www-authenticate': 'Bearer'
+  });
 }
 
 /**
  * The routes. Every method and every path under `/docs-source` is answered
- * here (a 404 when it is not one of the two reads), so nothing under it falls
- * through to the dashboard's fallback. The wall is the chassis's own
- * per-address bucket. No cookie is read, no audit row is written.
+ * here (the 404 when it is not one of the two reads), so nothing under it
+ * falls through to the dashboard's fallback, whether the route is on or off.
+ * `token` is `DOCS_SOURCE_TOKEN` (undefined = off); `wall` the chassis's own
+ * per-address bucket.
  */
 export function docsSourceRoutes(
   source: DocsSource | null,
   facts: { version: string; slug: string },
-  wall: MiddlewareHandler
+  guard: { token: string | undefined; wall: MiddlewareHandler }
 ): Hono {
   const app = new Hono();
+  const { token, wall } = guard;
+  // Hono's `/docs-source/*` matches `/docs-source` itself: one `use` covers both
+  // paths (a second one on the bare path would run every guard twice).
+  app.use('/docs-source/*', async (c, next) => {
+    // Guard 1: a proxy header present, whatever its value.
+    if (PROXY_HEADERS.some((h) => c.req.header(h) !== undefined)) return notFound(c);
+    // Guard 2: off unless configured.
+    if (!token) return notFound(c);
+    return next();
+  });
+  if (!token) {
+    app.all('/docs-source/*', notFound);
+    return app;
+  }
+  const expected = `Bearer ${token}`;
+  app.use('/docs-source/*', wall);
+  // Guard 3: the bearer, in constant time, before any lookup.
+  app.use('/docs-source/*', async (c, next) => {
+    const presented = c.req.header('authorization');
+    if (presented === undefined || !constantTimeEquals(presented, expected)) return unauthorized(c);
+    return next();
+  });
+
   const manifest: DocsSourceManifest | null = source
     ? {
         product: source.product,
@@ -222,13 +283,9 @@ export function docsSourceRoutes(
       }
     : null;
   const PREFIX = '/docs-source/pages/';
-
-  // One wall for both: Hono's `/docs-source/*` matches `/docs-source` itself,
-  // so a second `use` on the bare path would charge the manifest twice.
-  app.use('/docs-source/*', wall);
   app.get('/docs-source', (c) => {
     if (!manifest) return notFound(c);
-    c.header('Cache-Control', DOCS_SOURCE_CACHE_CONTROL);
+    c.header('cache-control', DOCS_SOURCE_CACHE_CONTROL);
     c.header('x-content-type-options', 'nosniff');
     return c.json(manifest);
   });
@@ -238,12 +295,13 @@ export function docsSourceRoutes(
     const path = c.req.path.startsWith(PREFIX) ? c.req.path.slice(PREFIX.length) : '';
     const markdown = source?.pages.get(path);
     if (markdown === undefined) return notFound(c);
-    c.header('Cache-Control', DOCS_SOURCE_CACHE_CONTROL);
-    c.header('x-content-type-options', 'nosniff');
-    c.header('content-security-policy', "default-src 'none'; sandbox");
-    return c.body(markdown, 200, { 'content-type': 'text/markdown; charset=utf-8' });
+    return c.body(markdown, 200, {
+      'content-type': 'text/markdown; charset=utf-8',
+      'cache-control': DOCS_SOURCE_CACHE_CONTROL,
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': "default-src 'none'; sandbox"
+    });
   });
-  app.all('/docs-source', notFound);
   app.all('/docs-source/*', notFound);
   return app;
 }
