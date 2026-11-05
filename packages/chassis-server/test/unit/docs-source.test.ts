@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -318,6 +318,59 @@ describe('symlinks (round 1, F2)', () => {
     const app = withToken(docsSourceRoutes(source, FACTS, { token: TOKEN, wall: open }));
     expect(await (await app.request('/docs-source/pages/alias')).text()).toBe('# I\n\nIntro.\n');
     expect(log.warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('the folder reached through a link (round 2, F17 and F18)', () => {
+  // A temp folder that is not itself a link, so the test proves the realpath
+  // on its own terms (macOS's /var is a link to /private/var; a Linux runner's
+  // temp folder is not).
+  const plainTmp = () => mkdtempSync(join(realpathSync(tmpdir()), 'docs-real-'));
+
+  it('a docs folder that is a symlink serves its pages, by DOCS_DIR and beside the dashboard build', async () => {
+    const root = plainTmp();
+    mkdirSync(join(root, 'real-docs'));
+    writeFileSync(
+      join(root, 'real-docs', 'nav.yml'),
+      'product: P\ndescription: D\ngroups:\n  - title: G\n    pages: [index]\n'
+    );
+    writeFileSync(join(root, 'real-docs', 'index.md'), '# Linked\n\nThrough a link.\n');
+    symlinkSync('real-docs', join(root, 'docs'));
+    for (const dir of [join(root, 'docs'), findDocsDir(join(root, 'public'))!]) {
+      const log = logger();
+      const source = await loadDocsSource(dir, log);
+      expect(source?.pages.size, dir).toBe(1);
+      expect(log.warn).not.toHaveBeenCalled();
+      const app = withToken(docsSourceRoutes(source, FACTS, { token: TOKEN, wall: open }));
+      expect(await (await app.request('/docs-source/pages/index')).text()).toBe(
+        '# Linked\n\nThrough a link.\n'
+      );
+    }
+  });
+
+  it('a nav.yml that is a link pointing outside the folder is refused: 404 and a warning naming it', async () => {
+    const root = plainTmp();
+    mkdirSync(join(root, 'docs'));
+    writeFileSync(join(root, 'outside-nav.yml'), 'product: OUTSIDE\ndescription: D\ngroups: []\n');
+    symlinkSync(join('..', 'outside-nav.yml'), join(root, 'docs', 'nav.yml'));
+    const log = logger();
+    const source = await loadDocsSource(join(root, 'docs'), log);
+    expect(source).toBeNull();
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ file: join(root, 'docs', 'nav.yml') }),
+      expect.stringContaining('outside the docs folder')
+    );
+    const app = withToken(docsSourceRoutes(source, FACTS, { token: TOKEN, wall: open }));
+    expect((await app.request('/docs-source')).status).toBe(404);
+  });
+
+  it('a nav.yml that is a link staying inside the folder is read', async () => {
+    const root = plainTmp();
+    mkdirSync(join(root, 'docs'));
+    writeFileSync(join(root, 'docs', 'real-nav.yml'), 'product: INSIDE\ndescription: D\ngroups: []\n');
+    symlinkSync('real-nav.yml', join(root, 'docs', 'nav.yml'));
+    const source = await loadDocsSource(join(root, 'docs'), logger());
+    expect(source?.product).toBe('INSIDE');
   });
 });
 

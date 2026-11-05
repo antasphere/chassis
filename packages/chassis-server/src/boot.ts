@@ -1104,6 +1104,7 @@ export async function bootPlatform<
     webhooks,
     fleetOrigins,
     connections,
+    docsSource,
     tool: domain
   };
 }

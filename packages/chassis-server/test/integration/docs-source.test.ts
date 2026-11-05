@@ -53,6 +53,11 @@ describe('with a docs folder', () => {
     await app?.stop();
   });
 
+  it('the boot read the folder: two pages held, the folder named', () => {
+    expect(app.docsSource?.pages.size).toBe(2);
+    expect(app.docsSource?.dir).toBe(fixture);
+  });
+
   it('answers the manifest to the bearer, with the version and the slug', async () => {
     const res = await app.app.request('/docs-source', { headers: BEARER });
     expect(res.status).toBe(200);
@@ -124,6 +129,10 @@ describe('with a docs folder and no token', () => {
     await app?.stop();
   });
 
+  it('the boot did not read the folder: nothing held, although DOCS_DIR names a valid one (round 2, F3)', () => {
+    expect(app.docsSource).toBeNull();
+  });
+
   it('the route is off: both paths answer the 404, bearer or not, never the dashboard', async () => {
     for (const url of ['/docs-source', '/docs-source/pages/index']) {
       for (const headers of [{}, BEARER]) {
@@ -148,6 +157,7 @@ describe('without a docs folder', () => {
   });
 
   it('boots, and both paths answer 404 JSON', async () => {
+    expect(app.docsSource).toBeNull();
     expect((await app.app.request('/healthz')).status).toBe(200);
     for (const url of ['/docs-source', '/docs-source/pages/index']) {
       const res = await app.app.request(url, { headers: BEARER });

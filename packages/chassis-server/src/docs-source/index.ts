@@ -141,9 +141,30 @@ export async function loadDocsSource(dir: string | null, logger: Logger): Promis
     return null;
   }
   const navFile = join(dir, 'nav.yml');
+  // The folder's real place, so a link inside it is judged by where it points
+  // (round 1, F2); the nav file is held to the same rule (round 2, F18).
+  let realDir: string;
+  let realNav: string;
+  try {
+    realDir = await realpath(dir);
+    realNav = await realpath(navFile);
+  } catch (err) {
+    logger.warn(
+      { err, file: navFile },
+      'docs source: nav.yml cannot be read or parsed; /docs-source answers 404'
+    );
+    return null;
+  }
+  if (!inside(realDir, realNav)) {
+    logger.warn(
+      { file: navFile, real: realNav },
+      'docs source: nav.yml points outside the docs folder; /docs-source answers 404'
+    );
+    return null;
+  }
   let nav: unknown;
   try {
-    nav = parseYaml(await readFile(navFile, 'utf8'));
+    nav = parseYaml(await readFile(realNav, 'utf8'));
   } catch (err) {
     logger.warn(
       { err, file: navFile },
@@ -169,7 +190,6 @@ export async function loadDocsSource(dir: string | null, logger: Logger): Promis
   if (!Array.isArray(n.groups)) {
     logger.warn({ file: navFile }, 'docs source: nav.yml has no `groups` list; the manifest has no group');
   }
-  const realDir = await realpath(dir);
   const pages = new Map<string, string>();
   const groups: DocsSourceGroup[] = [];
   for (const [i, raw] of rawGroups.entries()) {

@@ -42,6 +42,7 @@ import type {
 } from './webhooks/index.js';
 import type { SafeFetchOptions } from './webhooks/safe-fetch.js';
 import type { FleetOrigins, FleetOriginsDials } from './webhooks/fleet-origins.js';
+import type { DocsSource } from './docs-source/index.js';
 import type { ConnectionCatalogDeclaration, ConnectionService } from './connections/index.js';
 import type { PlatformRegistry } from './platform/registry.js';
 import type { RuntimeState } from './state.js';
@@ -486,6 +487,8 @@ export interface BootResult<
   webhooks: WebhookService;
   /** The fleet (PRDCT-3772): the hub's registry origins the delivery guard reads; null on an oss boot. */
   fleetOrigins: FleetOrigins | null;
+  /** The docs source (PRDCT-4098): what the boot read of the docs folder, null when the route is off or the folder absent; read-only, for a suite to see the boot's decision. */
+  docsSource: DocsSource | null;
   /** The connections (PRDCT-3773): the store, the door's logic and the log, for a suite to drive directly. */
   connections: ConnectionService<TDomain>;
 }
