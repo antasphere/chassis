@@ -63,4 +63,16 @@ describe('log redaction', () => {
       expect(out).not.toContain(leaked);
     }
   });
+
+  it('redacts the docs source token and the bearer a reader presents (PRDCT-4098)', () => {
+    const out = capture((log) => {
+      log.info({ DOCS_SOURCE_TOKEN: 'docs-source-token-value-0123456789abcdef' });
+      log.info({
+        req: { method: 'GET', url: '/docs-source', headers: { authorization: 'Bearer docs-bearer-value' } }
+      });
+    });
+    expect(out).toContain('/docs-source');
+    expect(out).not.toContain('docs-source-token-value');
+    expect(out).not.toContain('docs-bearer-value');
+  });
 });
