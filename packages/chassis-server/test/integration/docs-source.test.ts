@@ -15,6 +15,11 @@ import { createDatabase, createTestApp, startPostgres, type TestApp, host } from
  * the paths answer the 404, never the dashboard. Pinned against a fixture
  * folder named by DOCS_DIR (so the host's own docs never decide the result),
  * and against a DOCS_DIR that does not exist: the instance boots, 404.
+ *
+ * Beside it, the docs address of PRDCT-4110: discovery names the tool's
+ * section on the site DOCS_SITE_URL sets, the public site when nothing is
+ * set. The refusal of a bad value is the env schema's unit test: the boot
+ * exits the process on an invalid environment, so it cannot be tried here.
  */
 
 const TOKEN = 'integration-test-docs-source-token-0123456789';
@@ -46,6 +51,7 @@ describe('with a docs folder', () => {
     app = await createTestApp(await createDatabase(container, 'docs_source'), {
       DOCS_DIR: fixture,
       DOCS_SOURCE_TOKEN: TOKEN,
+      DOCS_SITE_URL: 'https://handbook.example.test',
       APP_VERSION: '7.7.7-docs'
     });
   }, 120_000);
@@ -118,6 +124,33 @@ describe('with a docs folder', () => {
     const refused = await app.app.request('/docs-source', { headers: { authorization: 'Bearer wrong' } });
     expect(await refused.text()).not.toContain(TOKEN);
   });
+});
+
+describe('discovery names the docs site (PRDCT-4110)', () => {
+  it('the tool section of DOCS_SITE_URL when it is set, cacheable like the rest of discovery', async () => {
+    const app = await createTestApp(await createDatabase(container, 'docs_site_set'), {
+      DOCS_SITE_URL: 'https://handbook.example.test'
+    });
+    try {
+      const res = await app.app.request('/api/v1/instance');
+      expect(res.status).toBe(200);
+      expect(res.headers.get('cache-control')).toBe('public, max-age=60');
+      const info = (await res.json()) as { docs?: { url: string } };
+      expect(info.docs).toEqual({ url: `https://handbook.example.test/${host.identity.slug}` });
+    } finally {
+      await app.stop();
+    }
+  }, 120_000);
+
+  it('the tool section of the public site when nothing is set', async () => {
+    const app = await createTestApp(await createDatabase(container, 'docs_site_default'));
+    try {
+      const info = (await (await app.app.request('/api/v1/instance')).json()) as { docs?: { url: string } };
+      expect(info.docs).toEqual({ url: `https://docs.antasphere.com/${host.identity.slug}` });
+    } finally {
+      await app.stop();
+    }
+  }, 120_000);
 });
 
 describe('with a docs folder and no token', () => {

@@ -74,6 +74,16 @@ export const instanceInfoSchema = z.object({
    * held to (the CLI's upfront refusal with the right number). Optional on
    * the wire so a client keeps parsing an instance from before the rail.
    */
-  entitlements: toolEntitlementsSchema.optional()
+  entitlements: toolEntitlementsSchema.optional(),
+  /**
+   * Where this instance sends its people for the docs (PRDCT-4110): the
+   * tool's section, `<site>/<slug>`, on the docs site the operator named
+   * (`DOCS_SITE_URL`; the public site by default, the team stack's Handbook).
+   * The dashboard's Docs card, the first-run welcome and the agent prompt
+   * open it, so one setting moves every link. Optional on the wire so a
+   * client keeps parsing an instance from before 1.9.0, and falls back to
+   * the public site itself.
+   */
+  docs: z.object({ url: z.url() }).optional()
 });
 export type InstanceInfo = z.infer<typeof instanceInfoSchema>;
