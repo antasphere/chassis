@@ -865,7 +865,11 @@ export function createApiApp<
           actions: deps.entitlements.actions,
           limits: deps.entitlements.limits,
           features: deps.entitlements.features
-        }
+        },
+        // The tool's section on the docs site the operator named (PRDCT-4110):
+        // the one address the dashboard's Docs card, the welcome and the agent
+        // prompt open, the public site unless DOCS_SITE_URL says otherwise.
+        docs: { url: `${env.DOCS_SITE_URL}/${tool.identity.slug}` }
       },
       200
     );
