@@ -52,12 +52,32 @@ export const PUBLIC_DOCS_SITE_URL = 'https://docs.antasphere.com';
 /**
  * An http(s) URL a path is appended to (`<url>/<slug>`): nothing may follow
  * its path, so a trailing slash, a query or a fragment refuses the boot
- * instead of minting `https://site//slug` or `https://site?x/slug`.
+ * instead of minting `https://site//slug` or `https://site?x/slug`. The
+ * check reads the raw value AND the parsed URL: the parser turns a trailing
+ * backslash into a slash (verifier round 1, M1), and a credential in the
+ * authority would be published on unauthenticated discovery.
  */
 export const siteUrl = () =>
-  httpUrl().refine((value) => !value.endsWith('/') && !/[?#]/.test(value), {
-    message: 'an http(s) URL with no trailing slash, query or fragment'
-  });
+  httpUrl().refine(
+    (value) => {
+      if (/[?#\\]/.test(value) || value.endsWith('/')) return false;
+      let url: URL;
+      try {
+        url = new URL(value);
+      } catch {
+        return false; // the url check before this one already named the problem
+      }
+      return (
+        url.username === '' &&
+        url.password === '' &&
+        url.search === '' &&
+        url.hash === '' &&
+        !url.pathname.endsWith('//') &&
+        (url.pathname === '/' || !url.pathname.endsWith('/'))
+      );
+    },
+    { message: 'an http(s) URL with no trailing slash, query, fragment or credential' }
+  );
 
 /**
  * Cheap, deterministic quality floor for operator-supplied secrets. `min(32)`
@@ -216,7 +236,7 @@ const chassisEnvShape = (version: string) => ({
   DOCS_DIR: optionalString(z.string().min(1)),
   /** The docs source's credential (PRDCT-4098), at least 32 characters. Unset (the default) = `/docs-source` is off: every path under it answers 404 and the docs folder is never read. Set = the reader presents `Authorization: Bearer <this>`; anything else answers 401. A request carrying a proxy header (`X-Forwarded-*`, `Forwarded`, `Via`) answers 404 either way: only a direct network peer (the Handbook on the stack network) is served. */
   DOCS_SOURCE_TOKEN: optionalString(z.string().min(32)),
-  /** The docs site this instance sends its people to (PRDCT-4110): the dashboard's Docs card, the first-run welcome and the agent prompt open `<DOCS_SITE_URL>/<slug>` (the identity's slug, the tool's section of that site), and `GET /api/v1/instance` carries that address as `docs.url`, so one setting moves every link. An http or https URL with no trailing slash, query or fragment; anything else refuses the boot. Blank or unset = the public site, `https://docs.antasphere.com`. The team stack names its Handbook, whose pages mirror the docs paths. */
+  /** The docs site this instance sends its people to (PRDCT-4110): the dashboard's Docs card, the first-run welcome and the agent prompt open `<DOCS_SITE_URL>/<slug>` (the identity's slug, the tool's section of that site), and `GET /api/v1/instance` carries that address as `docs.url`, so one setting moves every link. An http or https URL with no trailing slash, query, fragment or credential; anything else refuses the boot. Blank or unset = the public site, `https://docs.antasphere.com`. The team stack names its Handbook, whose pages mirror the docs paths. */
   DOCS_SITE_URL: z.preprocess(blankToUndefined, siteUrl().default(PUBLIC_DOCS_SITE_URL)),
   /** The tool's own CLI package as the release packed it (PRDCT-3312): a folder holding `package.tgz` (the output of `pnpm pack` of `packages/cli`) beside a copy of that package's `package.json`. The image sets it. Cloud edition: the instance serves the tarball on `POST /cli/package` to a member the hub lets into the tool, and discovery carries `cli { name, version }` so the `team` command knows what it installs and whether to update. Unset = the instance serves no CLI: discovery carries no `cli` and the route answers 404 `cli_not_packaged`. A set value whose folder does not hold both files, or whose `package.json` has no string `name` and `version`, refuses the boot with the path and what is missing: a misconfiguration is proven at the image, never discovered by a person's install. */
   CLI_PACKAGE_DIR: optionalString(

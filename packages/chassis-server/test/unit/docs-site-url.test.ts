@@ -42,6 +42,14 @@ describe('DOCS_SITE_URL', () => {
     expect(issuesOf('https://handbook.antasphere.com#top')).toContain('DOCS_SITE_URL');
   });
 
+  it('refuses the boot on a trailing backslash (the parser reads it as a slash) and on a credential in the authority', () => {
+    expect(issuesOf('https://handbook.antasphere.com\\')).toContain('DOCS_SITE_URL');
+    expect(issuesOf('https://handbook.antasphere.com\\docs')).toContain('DOCS_SITE_URL');
+    expect(issuesOf('https://user:secret@handbook.antasphere.com')).toContain('DOCS_SITE_URL');
+    expect(issuesOf('https://user@handbook.antasphere.com')).toContain('DOCS_SITE_URL');
+    expect(issuesOf('https://handbook.antasphere.com?')).toContain('DOCS_SITE_URL');
+  });
+
   it('refuses the boot on anything that is not an http(s) URL', () => {
     for (const bad of [
       'handbook.antasphere.com',
@@ -59,7 +67,7 @@ describe('DOCS_SITE_URL', () => {
     expect(result.success).toBe(false);
     if (!result.success)
       expect(result.error.issues[0]?.message).toBe(
-        'an http(s) URL with no trailing slash, query or fragment'
+        'an http(s) URL with no trailing slash, query, fragment or credential'
       );
   });
 });

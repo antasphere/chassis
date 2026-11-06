@@ -134,6 +134,7 @@ describe('discovery names the docs site (PRDCT-4110)', () => {
     try {
       const res = await app.app.request('/api/v1/instance');
       expect(res.status).toBe(200);
+      expect(res.headers.get('cache-control')).toBe('public, max-age=60');
       const info = (await res.json()) as { docs?: { url: string } };
       expect(info.docs).toEqual({ url: `https://handbook.example.test/${host.identity.slug}` });
     } finally {
