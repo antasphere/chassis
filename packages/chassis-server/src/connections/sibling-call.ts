@@ -135,6 +135,18 @@ export function buildSiblingDeclarations(declared: unknown): readonly SiblingDec
   });
 }
 
+/**
+ * Whether the sign-in asks the hub for `sso:connect`: a tool that declares a
+ * sibling it calls (the `siblings` slot) or a sibling connection source (the
+ * connect of PRDCT-3774) needs it, each on its own; any other asks nothing new.
+ */
+export function asksConnectScope(
+  siblings: readonly SiblingDeclaration[],
+  sources: readonly { sibling?: unknown }[]
+): boolean {
+  return siblings.length > 0 || sources.some((source) => source.sibling !== undefined);
+}
+
 /** The request path checked against the sibling's API: relative to `/api/v1`, never leaving it. */
 function checkedPath(path: unknown): string {
   if (
@@ -170,7 +182,8 @@ class Handle implements SiblingHandle {
   readonly #fleetTool: FleetTool;
   readonly #key: string;
   readonly #budget: SiblingBudget;
-  #closed = false;
+  /** Fires when the call ends: what is still in flight is cut before the key is revoked. */
+  readonly #ended = new AbortController();
 
   constructor(
     connector: SiblingConnector,
@@ -187,7 +200,7 @@ class Handle implements SiblingHandle {
   }
 
   close(): void {
-    this.#closed = true;
+    this.#ended.abort();
   }
 
   async request(
@@ -199,7 +212,7 @@ class Handle implements SiblingHandle {
       throw new TypeError(`sibling request: ${String(method)} is not one of GET, POST, PUT, PATCH, DELETE`);
     }
     const checked = checkedPath(path);
-    if (this.#closed) {
+    if (this.#ended.signal.aborted) {
       return { kind: 'unavailable', message: `the call to ${this.tool.name} is over` };
     }
     return this.#connector.request(
@@ -209,7 +222,8 @@ class Handle implements SiblingHandle {
       method,
       checked,
       opts.body,
-      this.#budget
+      this.#budget,
+      this.#ended.signal
     );
   }
 

@@ -1,12 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Principal } from '@antasphere/chassis-contract';
-import { SiblingConnector } from '../../src/connections/sibling.js';
+import { SiblingConnector, siblingKeyTtlSeconds } from '../../src/connections/sibling.js';
 import {
   SiblingCalls,
+  asksConnectScope,
   buildSiblingDeclarations,
   type SiblingHandle
 } from '../../src/connections/sibling-call.js';
-import { personOfRequest, runAsPerson, type PersonOfRequest } from '../../src/middleware/person-scope.js';
+import {
+  personOfRequest,
+  runAsPerson,
+  runWithoutPerson,
+  type PersonOfRequest
+} from '../../src/middleware/person-scope.js';
 import type { GrantAccess } from '../../src/identity/hub-grant.js';
 import type { FleetTool } from '../../src/webhooks/fleet-origins.js';
 
@@ -75,6 +81,8 @@ function harness(
   } = {}
 ) {
   const calls: Call[] = [];
+  /** Every request as it starts, and every request cut while in flight, in order. */
+  const events: string[] = [];
   const grantCalls: string[] = [];
   const centralReads: string[] = [];
   const { lines, logger } = makeLogger();
@@ -90,6 +98,7 @@ function harness(
       body: init?.body ? JSON.parse(String(init.body)) : undefined
     };
     calls.push(call);
+    events.push(`call ${call.method} ${url.pathname}`);
     expect(init?.redirect).toBe('error');
     const key = `${call.method} ${url.pathname}`;
     const entry = script[key];
@@ -100,6 +109,7 @@ function harness(
       await new Promise<void>((resolve, reject) => {
         const t = setTimeout(resolve, reply.delayMs);
         init?.signal?.addEventListener('abort', () => {
+          events.push(`abort ${call.method} ${url.pathname}`);
           clearTimeout(t);
           reject(new DOMException('The operation was aborted', 'TimeoutError'));
         });
@@ -144,7 +154,7 @@ function harness(
     person: () => (opts.person === undefined ? PERSON : opts.person)
   });
   const revoked = () => calls.filter((c) => c.method === 'DELETE' && c.path === '/api/v1/cli/auth/key');
-  return { siblings: calls$, calls, grantCalls, centralReads, lines, revoked };
+  return { siblings: calls$, calls, events, grantCalls, centralReads, lines, revoked };
 }
 
 const err = (code: string, message = code) => ({ error: { code, message } });
@@ -267,7 +277,7 @@ describe('the sibling call · as the person', () => {
       'DELETE /api/v1/cli/auth/key'
     ]);
     expect(h.calls[0]!.body).toEqual({ resource: TWIN.resourceUrl });
-    expect(h.calls[1]!.body).toEqual({ token: CONNECT });
+    expect(h.calls[1]!.body).toEqual({ token: CONNECT, expiresInSeconds: 300 });
     const thing = h.calls[3]!;
     expect(thing.headers.authorization).toBe(`Bearer ${KEY}`);
     // The workspace whose hub organization is ours, not the first one listed.
@@ -492,6 +502,120 @@ describe('the sibling call · as the person', () => {
       bad.siblings.call('twin', (sibling) => sibling.request('TRACE' as never, '/things'))
     ).rejects.toThrow(TypeError);
     expect(bad.revoked()).toHaveLength(1);
+  });
+});
+
+describe('the sibling call · what the first verifier round asked for', () => {
+  it('F3: a request still in flight when the work returns is cut before the key is revoked', async () => {
+    const script = happyScript();
+    script['GET /api/v1/things'] = [{ status: 200, body: { things: [] }, delayMs: 5_000 }];
+    const h = harness(script);
+    const started = Date.now();
+    const outcome = await h.siblings.call('twin', async (sibling) => {
+      // Fired and left behind: the work answers before its request does.
+      void sibling.request('GET', '/things');
+      await new Promise((r) => setTimeout(r, 20));
+      return { kind: 'ok', value: 'answered' };
+    });
+    expect(outcome).toEqual({ kind: 'ok', value: 'answered' });
+    expect(Date.now() - started).toBeLessThan(1000);
+    const abort = h.events.indexOf('abort GET /api/v1/things');
+    const revoke = h.events.indexOf('call DELETE /api/v1/cli/auth/key');
+    expect(abort).toBeGreaterThan(-1);
+    expect(revoke).toBeGreaterThan(abort);
+  });
+
+  it('F3: a request in flight at the deadline is cut before the key is revoked', async () => {
+    const script = happyScript();
+    script['GET /api/v1/things'] = [{ status: 200, body: { things: [] }, delayMs: 5_000 }];
+    const h = harness(script, { overallMs: 300 });
+    expect((await h.siblings.call('twin', (sibling) => sibling.request('GET', '/things'))).kind).toBe(
+      'unavailable'
+    );
+    const abort = h.events.indexOf('abort GET /api/v1/things');
+    expect(abort).toBeGreaterThan(-1);
+    expect(h.events.indexOf('call DELETE /api/v1/cli/auth/key')).toBeGreaterThan(abort);
+  });
+
+  it('F4: a call leaves no timer of its own behind, whatever its outcome', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const ok = harness(happyScript());
+      expect((await ok.siblings.call('twin', async () => ({ kind: 'ok', value: 1 }))).kind).toBe('ok');
+      expect(vi.getTimerCount()).toBe(0);
+      const refused = happyScript();
+      refused['GET /api/v1/things'] = [{ status: 404, body: err('not_found') }];
+      const r = harness(refused);
+      expect((await r.siblings.call('twin', (s) => s.request('GET', '/things'))).kind).toBe(
+        'sibling_refused'
+      );
+      expect(vi.getTimerCount()).toBe(0);
+      const thrown = harness(happyScript());
+      await expect(
+        thrown.siblings.call('twin', async () => {
+          throw new Error('boom');
+        })
+      ).rejects.toThrow('boom');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('F5: a dot segment, an encoded backslash and a malformed escape are each a TypeError', async () => {
+    for (const path of [
+      '/things/./x',
+      '/./things',
+      '/things/%2e',
+      '/a%5Cb',
+      '/a%5cb',
+      '/%E0%A4%A',
+      '/things/%'
+    ]) {
+      const h = harness(happyScript());
+      const thrown = await h.siblings.call('twin', (sibling) => sibling.request('GET', path)).catch((e) => e);
+      expect(thrown, path).toBeInstanceOf(TypeError);
+      expect(h.revoked()).toHaveLength(1);
+    }
+  });
+
+  it('F6: the key is asked for with a lifetime of its own, so a revocation that cannot run still ends it', async () => {
+    const h = harness(happyScript());
+    await h.siblings.call('twin', async () => ({ kind: 'ok', value: 1 }));
+    const mint = h.calls.find((c) => c.path === '/api/v1/sso/cli-connect')!;
+    expect(mint.body).toEqual({ token: CONNECT, expiresInSeconds: 300 });
+    expect(siblingKeyTtlSeconds(60_000, 10_000)).toBe(300);
+    expect(siblingKeyTtlSeconds(600_000, 10_000)).toBe(670);
+    expect(siblingKeyTtlSeconds(10 * 3_600_000, 10_000)).toBe(3600);
+    expect(siblingKeyTtlSeconds(0, 0)).toBe(300);
+  });
+
+  it('F9: a request with no principal runs with no person, even entered from a person’s scope', async () => {
+    const principal = {
+      userId: 'u-outer',
+      email: 'o@example.com',
+      name: 'O',
+      workspaceId: 'ws-outer',
+      role: 'admin',
+      origin: 'hub',
+      via: 'session',
+      scopes: null
+    } satisfies Principal;
+    const seen = await runAsPerson(principal, () =>
+      runWithoutPerson(async () => {
+        await new Promise((r) => setTimeout(r, 1));
+        return personOfRequest();
+      })
+    );
+    expect(seen).toBeNull();
+    expect(runAsPerson(principal, () => personOfRequest())?.userId).toBe('u-outer');
+  });
+
+  it('F1: the sign-in asks for sso:connect for a sibling call, for a sibling source, each on its own', () => {
+    expect(asksConnectScope([], [])).toBe(false);
+    expect(asksConnectScope([], [{}, { sibling: undefined }])).toBe(false);
+    expect(asksConnectScope([{ toolSlug: 'twin' }], [])).toBe(true);
+    expect(asksConnectScope([], [{}, { sibling: { toolSlug: 'twin', events: [] } }])).toBe(true);
   });
 });
 

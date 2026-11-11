@@ -109,34 +109,45 @@ credential they came with: a **session** (the console), an **API key** (the CLI,
 **OAuth bearer** (an MCP client; an MCP tool reaches your routes through your own API, so it is the
 same request). The sibling sees that person with their own role and rights there, and nothing more.
 
-Code that runs outside a person's request (a job, a timer, a webhook handler, a public route) has
-nobody to act as: the call answers `no_person`. The chassis never acts on a sibling as your tool.
+Code that runs outside a person's request (a job of the `jobs` slot, a timer armed through
+`core.timers`, a connection handler, a public route) has nobody to act as: the call answers
+`no_person`. The chassis never acts on a sibling as your tool. What a request starts and leaves
+running (a `setTimeout`, a promise nobody awaits) keeps that request's person: it still acts as them
+after the answer has gone, so do not leave a sibling call behind a request on purpose.
 
 The key the sibling minted is revoked in a `finally` on every path: an answer, a refusal, a work past
-the budget, a work that throws. Your code never sees it, and the handle answers `unavailable` to any
-request made after the call returned, so keeping the handle buys nothing.
+the budget, a work that throws. A request still in flight at that moment is cut first. Your code never
+sees the key, and the handle answers `unavailable` to any request made after the call returned, so
+keeping the handle buys nothing. The key is also minted with a lifetime of its own, five minutes by
+default, so a revocation that could not run (the process stopped mid-call) still ends it; a sibling on
+a chassis older than 1.10 ignores that lifetime, and its key then lasts until the person revokes it.
 
-The key carries the person's full rights on the sibling, whatever narrower scope the credential that
-reached your tool had. Put a call that changes something behind one of your write routes.
+The key is the one the sibling's own CLI would get: the sibling's CLI scopes, within the person's role
+there, whatever narrower scope the credential that reached your tool had. Put a call that changes
+something behind one of your write routes.
+
+Each call mints a key through the sibling's `POST /sso/cli-connect`, which the sibling rate-limits per
+client address (300 per 15 minutes by default). Every call your instance makes comes from its own
+address, so a burst beyond that answers `sibling_refused` until the window turns. Each call also leaves a revoked key and its audit row on the sibling.
 
 ### 4. Every answer of the call
 
 The call never throws for a refusal. Each answer, and what to tell the person:
 
-| `kind`                      | When                                                                                                         | What the person does                                   |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------ |
-| `ok`                        | the work's own value                                                                                         |                                                        |
-| `sibling_not_declared`      | the slug is not in your `siblings` slot (a mistake in your code)                                             | nothing; fix the declaration                           |
-| `not_on_hub`                | this instance is not on a hub: a local stack, password accounts (see below)                                  | nothing; the sibling act does not exist here           |
-| `no_person`                 | the call runs outside a person's request                                                                     | nothing; move the call into a route                    |
-| `hub_reauth_required`       | the person's grant on your tool is gone or dead                                                              | sign in again                                          |
-| `sibling_scope_missing`     | the person's grant predates your tool asking for `sso:connect`                                               | sign out, sign in again                                |
-| `sibling_unknown`           | the hub lists no tool of that slug, or no tool at its address                                                | nothing; the sibling is not on this hub                |
-| `sibling_access_denied`     | the hub does not let this person into the sibling                                                            | ask an admin of the hub for access                     |
-| `sibling_grant_missing`     | the sibling does not know the person yet                                                                     | open the sibling once, then retry                      |
-| `sibling_workspace_missing` | the request's workspace is local (no hub organization), or the sibling has no workspace of that organization | open the sibling in that organization once, then retry |
-| `sibling_refused`           | the hub or the sibling refused for a reason of its own; `message` is theirs                                  | depends on the message                                 |
-| `unavailable`               | the hub or the sibling did not answer, answered 5xx, or the call ran past its budget                         | try again in a moment                                  |
+| `kind`                      | When                                                                                                                | What the person does                                                                            |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `ok`                        | the work's own value                                                                                                |                                                                                                 |
+| `sibling_not_declared`      | the slug is not in your `siblings` slot (a mistake in your code)                                                    | nothing; fix the declaration                                                                    |
+| `not_on_hub`                | this instance is not on a hub: a local stack, password accounts (see below)                                         | nothing; the sibling act does not exist here                                                    |
+| `no_person`                 | the call runs outside a person's request                                                                            | nothing; move the call into a route                                                             |
+| `hub_reauth_required`       | the person's grant on your tool is gone or dead, or they never signed in through the hub (a guest, a local account) | sign in again with their Antasphere account; a guest or a local account cannot act on a sibling |
+| `sibling_scope_missing`     | the person's grant predates your tool asking for `sso:connect`                                                      | sign out, sign in again                                                                         |
+| `sibling_unknown`           | the hub lists no tool of that slug, or no tool at its address                                                       | nothing; the sibling is not on this hub                                                         |
+| `sibling_access_denied`     | the hub does not let this person into the sibling                                                                   | ask an admin of the hub for access                                                              |
+| `sibling_grant_missing`     | the sibling does not know the person yet                                                                            | open the sibling once, then retry                                                               |
+| `sibling_workspace_missing` | the request's workspace is local (no hub organization), or the sibling has no workspace of that organization        | open the sibling in that organization once, then retry                                          |
+| `sibling_refused`           | the hub or the sibling refused for a reason of its own; `message` is theirs                                         | depends on the message                                                                          |
+| `unavailable`               | the hub or the sibling did not answer, answered 5xx, or the call ran past its budget                                | try again in a moment, once you know nothing was made                                           |
 
 A route usually answers `ok` with its value, maps `hub_reauth_required` to 401, the five the person
 can fix (`sibling_scope_missing`, `sibling_access_denied`, `sibling_grant_missing`,
@@ -144,15 +155,20 @@ can fix (`sibling_scope_missing`, `sibling_access_denied`, `sibling_grant_missin
 to 502, and the three that are about your code or your instance (`sibling_not_declared`,
 `not_on_hub`, `no_person`) to what your screen shows when the feature is off.
 
-What is thrown is a bug: a `path` that would leave the sibling's `/api/v1` (`//host`, a `..` segment,
-an absolute URL) or a method outside the five throws a `TypeError`, and an error your work throws is
+An `unavailable` after a request was sent does not prove the sibling did nothing: a creation may have
+landed before its answer was lost or the budget ran out. Before a retry that creates something, read
+back what is there, or send a key of your own the sibling deduplicates on.
+
+What is thrown is a bug: a `path` that would leave the sibling's `/api/v1` (`//host`, a `.` or `..` segment,
+an encoded slash or backslash, a malformed escape, an absolute URL) or a method outside the five throws a `TypeError`, and an error your work throws is
 rethrown, each once the key is revoked.
 
 ### 5. The budget
 
 The whole call, the work included, has 60 seconds (`DEFAULT_SIBLING_OVERALL_MS`), and each request
-the instance's hub timeout (5 seconds by default). Past the budget the call answers `unavailable` and
-revokes the key even if the work has not finished; whatever the work does afterwards reaches nobody.
+the instance's hub timeout (5 seconds by default). Past the budget the call answers `unavailable`, cuts the
+request in flight and revokes the key even if the work has not finished; whatever the work does
+afterwards reaches nobody.
 A call is one deliberate act of a person, a few requests long: do not loop over a list inside one.
 
 ### 6. A local stack, with no hub

@@ -185,7 +185,7 @@ describe('SiblingConnector · the sibling, as the person', () => {
       'POST https://twin.example.com/api/v1/sso/cli-connect',
       'DELETE https://twin.example.com/api/v1/cli/auth/key'
     ]);
-    expect(calls[0]!.body).toEqual({ token: CONNECT });
+    expect(calls[0]!.body).toEqual({ token: CONNECT, expiresInSeconds: 300 });
     expect(calls[0]!.headers.authorization).toBeUndefined();
     expect(calls[1]!.headers.authorization).toBe(`Bearer ${KEY}`);
   });

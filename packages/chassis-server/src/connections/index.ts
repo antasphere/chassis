@@ -50,6 +50,7 @@ export {
 } from './sibling.js';
 export {
   SiblingCalls,
+  asksConnectScope,
   buildSiblingDeclarations,
   type SiblingCallOutcome,
   type SiblingCallRefusal,

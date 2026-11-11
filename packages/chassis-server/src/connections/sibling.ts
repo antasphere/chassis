@@ -104,6 +104,17 @@ export const DEFAULT_SIBLING_TIMEOUT_MS = 10_000;
  */
 export const DEFAULT_SIBLING_OVERALL_MS = 60_000;
 
+/**
+ * How long the key a sibling mints for the person lives on its own, in
+ * seconds (PRDCT-4393, verifier round 1, F6): the budget, one more call (the
+ * revocation, which rides no budget) and a minute of headroom, never less
+ * than five minutes nor more than the hour the sibling accepts. The
+ * revocation stays the rule; the expiry is what holds when it could not run.
+ */
+export function siblingKeyTtlSeconds(overallMs: number, timeoutMs: number): number {
+  return Math.min(3600, Math.max(300, Math.ceil((overallMs + timeoutMs) / 1000) + 60));
+}
+
 /** The deadline of one connect, handed to every call it makes. */
 export interface SiblingBudget {
   deadlineAt: number;
@@ -283,7 +294,7 @@ export class SiblingConnector {
     budget?: SiblingBudget
   ): Promise<SiblingOutcome<T>> {
     const minted = await this.call(tool, 'POST', '/sso/cli-connect', {
-      body: { token: connectToken },
+      body: { token: connectToken, expiresInSeconds: siblingKeyTtlSeconds(this.overallMs, this.timeoutMs) },
       budget
     });
     if (minted.kind !== 'ok') return minted;
@@ -315,7 +326,12 @@ export class SiblingConnector {
     }
   }
 
-  /** `DELETE /cli/auth/key` as the key: best effort, logged, never thrown — the key expires with nothing else anyway. */
+  /**
+   * `DELETE /cli/auth/key` as the key: tried once, logged, never thrown. A
+   * key it could not revoke expires on its own (`siblingKeyTtlSeconds`) on a
+   * sibling that honours `expiresInSeconds`; on an older sibling it stays
+   * until the person revokes it, and the warning below is the trace.
+   */
   private async revoke(tool: FleetTool, key: string): Promise<void> {
     const res = await this.call(tool, 'DELETE', '/cli/auth/key', { key });
     if (res.kind !== 'ok' || res.response.status !== 200) {
@@ -452,9 +468,11 @@ export class SiblingConnector {
     method: SiblingMethod,
     path: string,
     body: unknown,
-    budget?: SiblingBudget
+    budget?: SiblingBudget,
+    /** Cuts the request when it fires: the sibling call's end, so no request outlives its call. */
+    abort?: AbortSignal
   ): Promise<SiblingOutcome<SiblingAnswer>> {
-    const res = await this.call(tool, method, path, { key, workspaceId, body, budget });
+    const res = await this.call(tool, method, path, { key, workspaceId, body, budget, abort });
     if (res.kind !== 'ok') return res;
     const { response } = res;
     if (response.status >= 200 && response.status < 300) {
@@ -503,10 +521,13 @@ export class SiblingConnector {
       workspaceId?: string | undefined;
       body?: unknown;
       budget?: SiblingBudget | undefined;
+      abort?: AbortSignal | undefined;
     } = {}
   ): Promise<{ kind: 'ok'; response: Response } | { kind: 'unavailable'; message: string }> {
-    const signal = this.signal(opts.budget);
-    if (!signal) return { kind: 'unavailable', message: 'the connect took too long' };
+    const limit = this.signal(opts.budget);
+    if (!limit) return { kind: 'unavailable', message: 'the connect took too long' };
+    if (opts.abort?.aborted) return { kind: 'unavailable', message: `the call to ${tool.name} is over` };
+    const signal = opts.abort ? AbortSignal.any([limit, opts.abort]) : limit;
     const headers: Record<string, string> = { accept: 'application/json' };
     if (opts.key) headers.authorization = `Bearer ${opts.key}`;
     if (opts.workspaceId) headers['x-workspace-id'] = opts.workspaceId;

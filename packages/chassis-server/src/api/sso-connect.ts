@@ -196,7 +196,8 @@ export function registerSsoConnectRoutes(api: OpenAPIHono, deps: SsoConnectRoute
       createdBy: user.id,
       name,
       scopes: [...cliKeyScopes],
-      expiresAt: null
+      // A sibling's key for one act expires on its own (PRDCT-4393); the CLI's never does.
+      expiresAt: body.expiresInSeconds ? new Date(Date.now() + body.expiresInSeconds * 1000) : null
     });
     const [row] = await db.select().from(apiKeysTable).where(eq(apiKeysTable.id, minted.id)).limit(1);
     if (!row) {
@@ -218,7 +219,8 @@ export function registerSsoConnectRoutes(api: OpenAPIHono, deps: SsoConnectRoute
         scopes: [...cliKeyScopes],
         via: 'sso_cli_connect',
         hubSub: assertion.sub,
-        grantChannel: body.hubRefreshToken ? 'h3_exchange' : 'stored'
+        grantChannel: body.hubRefreshToken ? 'h3_exchange' : 'stored',
+        expiresInSeconds: body.expiresInSeconds ?? null
       }
     });
 

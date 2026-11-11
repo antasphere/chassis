@@ -155,6 +155,11 @@ async function expectMadeBy(res: Response, fixture: HubUserFixture, via: string)
   });
   expect(hub.connectTokenRequests.at(-1)).toEqual({ sub: fixture.sub, resource: `${twinBase}/mcp` });
   expect(await liveTwinKeys()).toEqual([]);
+  // Every key the twin minted for a call expires on its own within the call's lifetime (round 1, F6).
+  for (const k of await twinKeys()) {
+    expect(k.expiresAt).not.toBeNull();
+    expect(k.expiresAt!.getTime()).toBeLessThanOrEqual(Date.now() + 300_000);
+  }
   const text = JSON.stringify(outcome);
   for (const k of await twinKeys()) expect(text).not.toContain(k.keyId);
 }
@@ -312,6 +317,79 @@ describe.skipIf(!host.siblings)('a tool that calls a sibling, as the person', ()
     expect(hub.connectTokenRequests.length).toBe(asked);
   });
 });
+
+describe.skipIf(!host.siblings)('the key a sibling mints for one act expires on its own', () => {
+  const mint = async (extra: Record<string, unknown>) => {
+    const { token, hubRefreshToken } = await hub.signConnectToken(ADMIN, `${twinBase}/mcp`);
+    return twin.app.request('/api/v1/sso/cli-connect', sso.json({ token, hubRefreshToken, ...extra }));
+  };
+  const expiryOf = async (res: Response) => {
+    const body = await readJson(res);
+    const id = body.apiKey.id as string;
+    // Revoke it at once: the suite keeps no live key on the twin.
+    await twin.app.request('/api/v1/cli/auth/key', {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${body.key as string}` }
+    });
+    const [row] = (await twinKeys()).filter((k) => k.id === id);
+    return row!.expiresAt;
+  };
+
+  it('a connect that asks for a lifetime gets a key that ends with it', async () => {
+    const res = await mint({ expiresInSeconds: 120 });
+    expect(res.status).toBe(201);
+    const at = await expiryOf(res);
+    expect(at).not.toBeNull();
+    const left = at!.getTime() - Date.now();
+    expect(left).toBeGreaterThan(100_000);
+    expect(left).toBeLessThanOrEqual(120_000);
+  });
+
+  it('the CLI’s connect, which asks for none, still gets a key that never expires', async () => {
+    const res = await mint({});
+    expect(res.status).toBe(201);
+    expect(await expiryOf(res)).toBeNull();
+  });
+
+  it('a lifetime outside a minute to an hour is refused, and mints nothing', async () => {
+    const keys = (await twinKeys()).length;
+    for (const expiresInSeconds of [30, 3601, 1.5]) {
+      const res = await mint({ expiresInSeconds });
+      expect(res.status).toBe(400);
+    }
+    expect((await twinKeys()).length).toBe(keys);
+  });
+});
+
+describe.skipIf(!host.siblings)(
+  'the sign-in asks for sso:connect for each kind of sibling, on its own',
+  () => {
+    it('a tool with a sibling source and no sibling call asks for it; a tool with neither does not', async () => {
+      const { siblings: _calls, ...sourceOnly } = minimalTool;
+      const neither: ToolDefinition<Record<never, never>, ThingsDomain> = {
+        ...sourceOnly,
+        connections: { sources: callerTool.connections!.sources }
+      };
+      for (const [tool, asks] of [
+        [sourceOnly, true],
+        [neither, false]
+      ] as const) {
+        const app = await makeCreateTestApp(createPlatform(tool).boot)(
+          await createDatabase(container, `call_scope_${asks ? 'source' : 'neither'}`),
+          cloudEnv('http://127.0.0.1:1'),
+          dials
+        );
+        try {
+          expect(app.siblings.declared).toEqual([]);
+          const { scope } = await sso.ssoInitiate(app as never);
+          expect(scope?.split(' ').includes('sso:connect')).toBe(asks);
+        } finally {
+          await app.stop();
+        }
+      }
+    });
+  }
+);
 
 describe.skipIf(!host.siblings)('a local instance, with no hub', () => {
   it('answers not_on_hub, never throws', async () => {

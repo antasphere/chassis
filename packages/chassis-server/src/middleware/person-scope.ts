@@ -30,6 +30,11 @@ export function runAsPerson<T>(principal: Principal, fn: () => T): T {
   );
 }
 
+/** Run `fn` with no person, whatever scope it was called from: a request that carries no principal. */
+export function runWithoutPerson<T>(fn: () => T): T {
+  return scope.exit(fn);
+}
+
 /** The person of the request being served, or null outside one. */
 export function personOfRequest(): PersonOfRequest | null {
   return scope.getStore() ?? null;

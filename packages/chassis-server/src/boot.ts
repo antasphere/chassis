@@ -60,6 +60,7 @@ import {
   ConnectionService,
   SiblingCalls,
   SiblingConnector,
+  asksConnectScope,
   buildSiblingDeclarations
 } from './connections/index.js';
 import { docsSourceAtBoot, docsSourceRoutes } from './docs-source/index.js';
@@ -370,9 +371,7 @@ export async function bootPlatform<
   // hub nothing new, and the constant HUB_SSO_SCOPES stays pure.
   // The siblings slot (PRDCT-4393) asks for the same scope: the call buys the same connect token.
   const siblingDeclarations = buildSiblingDeclarations(tool.siblings);
-  const declaresSibling =
-    siblingDeclarations.length > 0 ||
-    (tool.connections?.sources ?? []).some((source) => source.sibling !== undefined);
+  const declaresSibling = asksConnectScope(siblingDeclarations, tool.connections?.sources ?? []);
   const hubSso = hub
     ? new HubSsoService({
         db: db.db,
