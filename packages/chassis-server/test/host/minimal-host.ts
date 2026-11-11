@@ -35,5 +35,6 @@ export const host: ChassisTestHost<HostBootResult, HostBootOverrides> = {
   scopes: THINGS_SCOPES,
   probeRoute: THINGS_ROUTE,
   webhooks: true,
+  siblings: true,
   connections: { seen: connectionDeliveriesSeen, fieldsSeen: connectionFieldsSeen }
 };

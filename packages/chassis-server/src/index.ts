@@ -87,5 +87,14 @@ export type {
   ConnectionSourceDeclaration,
   ConnectionVerifier,
   ConnectionVerifierContext,
-  ConnectionVerifierVerdict
+  ConnectionVerifierVerdict,
+  SiblingAnswer,
+  SiblingCallOutcome,
+  SiblingCallRefusal,
+  SiblingDeclaration,
+  SiblingHandle,
+  SiblingMethod,
+  SiblingOutcome,
+  SiblingWork,
+  ToolSiblings
 } from './connections/index.js';

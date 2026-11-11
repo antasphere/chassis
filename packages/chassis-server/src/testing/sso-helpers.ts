@@ -101,11 +101,20 @@ export async function expectFailedLogin(app: TestApp, res: Response, errorContai
  * tool's, so each host binds its own (`openid <the tool's read scope>`).
  */
 const oauthClientIds = new WeakMap<TestApp, string>();
-export function makeOauthBearer(scope: string): (app: TestApp, cookie: string) => Promise<string> {
-  return (app, cookie) => oauthBearerFor(scope, app, cookie);
+export function makeOauthBearer(
+  scope: string,
+  /** The instance's MCP resource (`<PUBLIC_BASE_URL>/mcp`); the default instance's when absent. */
+  resource = 'http://localhost:3000/mcp'
+): (app: TestApp, cookie: string) => Promise<string> {
+  return (app, cookie) => oauthBearerFor(scope, resource, app, cookie);
 }
 
-async function oauthBearerFor(scope: string, app: TestApp, cookie: string): Promise<string> {
+async function oauthBearerFor(
+  scope: string,
+  resource: string,
+  app: TestApp,
+  cookie: string
+): Promise<string> {
   const { createHash, randomBytes } = await import('node:crypto');
   const redirectUri = 'http://127.0.0.1:19999/callback';
   let clientId = oauthClientIds.get(app);
@@ -134,7 +143,7 @@ async function oauthBearerFor(scope: string, app: TestApp, cookie: string): Prom
     state: 'helper-state',
     code_challenge: challenge,
     code_challenge_method: 'S256',
-    resource: 'http://localhost:3000/mcp'
+    resource
   });
   const authorize = await app.app.request(`/api/v1/auth/oauth2/authorize?${params}`, {
     headers: { cookie }
@@ -170,7 +179,7 @@ async function oauthBearerFor(scope: string, app: TestApp, cookie: string): Prom
       redirect_uri: redirectUri,
       client_id: clientId,
       code_verifier: verifier,
-      resource: 'http://localhost:3000/mcp'
+      resource
     })
   });
   expect(token.status).toBe(200);

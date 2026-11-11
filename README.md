@@ -59,3 +59,8 @@ is a dependency", says how a tool installs, upgrades and contributes. In short:
 - Developing a chassis change against a tool: build the chassis, `pnpm link ../../chassis/packages/chassis-server`
   (and the siblings you touch) from the tool's root, work, then `git checkout package.json pnpm-lock.yaml
 && pnpm install` before committing. `pnpm chassis:check` refuses a `link:` left behind.
+
+## Guides
+
+- [Connections and siblings](docs/connections-and-siblings.md): receiving a sibling tool's events,
+  and acting on a sibling tool as the person (`core.siblings.call`).

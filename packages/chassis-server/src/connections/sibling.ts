@@ -32,7 +32,26 @@ import type { FleetOrigins, FleetTool } from '../webhooks/fleet-origins.js';
  *    whose `centralAccountId` is our workspace's hub organization.
  *  - `createEndpoint` / `deleteEndpoint`: the sibling's own webhook routes,
  *    in that workspace.
+ *  - `request`: any route of the sibling's `/api/v1` as the key, in that
+ *    workspace: what the sibling call of a tool's service sends
+ *    (PRDCT-4393, `sibling-call.ts`).
  */
+
+/** The methods a sibling request may use. */
+export type SiblingMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+export const SIBLING_METHODS: ReadonlySet<string> = new Set<SiblingMethod>([
+  'GET',
+  'POST',
+  'PUT',
+  'PATCH',
+  'DELETE'
+]);
+
+/** A sibling's 2xx answer to a request: its status and its JSON body (null when it has none). */
+export interface SiblingAnswer {
+  status: number;
+  body: unknown;
+}
 
 export type SiblingOutcome<T> =
   | { kind: 'ok'; value: T }
@@ -48,8 +67,16 @@ export type SiblingOutcome<T> =
   | { kind: 'sibling_grant_missing' }
   /** No workspace of the sibling projects our hub organization. */
   | { kind: 'sibling_workspace_missing' }
-  /** The sibling (or the hub) refused the act for a reason of its own; the message is theirs. */
-  | { kind: 'sibling_refused'; message: string }
+  /**
+   * The sibling (or the hub) refused the act for a reason of its own; the message is theirs.
+   * A request of the sibling call (PRDCT-4393) adds the sibling's HTTP status and error code.
+   */
+  | {
+      kind: 'sibling_refused';
+      message: string;
+      status?: number | undefined;
+      code?: string | null | undefined;
+    }
   /** The hub or the sibling did not answer, or answered 5xx: nothing changed, try again. */
   | { kind: 'unavailable'; message: string };
 
@@ -94,6 +121,11 @@ const endpointsPage = z.object({
   webhooks: z.array(z.object({ id: z.string(), url: z.string() })),
   nextCursor: z.string().nullable()
 });
+
+/** A request path without its query string or fragment: what a log line may carry. */
+function pathOnly(path: string): string {
+  return path.split(/[?#]/, 1)[0] ?? '';
+}
 
 /** The sibling's error code and message, when the body is the chassis's error shape; else nothing. */
 async function readError(res: Response): Promise<{ code: string | null; message: string }> {
@@ -407,6 +439,52 @@ export class SiblingConnector {
     return this.refusal(tool, res.response, 'delete the endpoint');
   }
 
+  /**
+   * One request on the sibling's `/api/v1` as the key, in the sibling
+   * workspace: a 2xx is the answer, a 5xx or no answer is `unavailable`,
+   * any other status is `sibling_refused` with the sibling's status, code and
+   * message. The path is the caller's to check (`sibling-call.ts` does).
+   */
+  async request(
+    tool: FleetTool,
+    key: string,
+    workspaceId: string,
+    method: SiblingMethod,
+    path: string,
+    body: unknown,
+    budget?: SiblingBudget
+  ): Promise<SiblingOutcome<SiblingAnswer>> {
+    const res = await this.call(tool, method, path, { key, workspaceId, body, budget });
+    if (res.kind !== 'ok') return res;
+    const { response } = res;
+    if (response.status >= 200 && response.status < 300) {
+      const text = await response.text().catch(() => '');
+      let parsed: unknown = null;
+      if (text) {
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          return { kind: 'unavailable', message: `${tool.name}’s answer was not JSON` };
+        }
+      }
+      return { kind: 'ok', value: { status: response.status, body: parsed } };
+    }
+    if (response.status >= 500) {
+      return { kind: 'unavailable', message: `${tool.name} answered ${response.status}` };
+    }
+    const { code, message } = await readError(response);
+    this.deps.logger.warn(
+      { status: response.status, code, sibling: tool.slug, method, path: pathOnly(path) },
+      'sibling refused a request'
+    );
+    return {
+      kind: 'sibling_refused',
+      message: `${tool.name} refused: ${message}`,
+      status: response.status,
+      code
+    };
+  }
+
   private async refusal(tool: FleetTool, response: Response, act: string): Promise<SiblingRefusal> {
     if (response.status >= 500) {
       return { kind: 'unavailable', message: `${tool.name} answered ${response.status} to ${act}` };
@@ -418,7 +496,7 @@ export class SiblingConnector {
 
   private async call(
     tool: FleetTool,
-    method: 'GET' | 'POST' | 'DELETE',
+    method: SiblingMethod,
     path: string,
     opts: {
       key?: string | undefined;
@@ -443,7 +521,8 @@ export class SiblingConnector {
       });
       return { kind: 'ok', response };
     } catch (err) {
-      this.deps.logger.warn({ err, sibling: tool.slug, path }, 'the sibling did not answer');
+      // The path alone: a query string is the caller's and may carry anything.
+      this.deps.logger.warn({ err, sibling: tool.slug, path: pathOnly(path) }, 'the sibling did not answer');
       return { kind: 'unavailable', message: `${tool.name} did not answer` };
     }
   }

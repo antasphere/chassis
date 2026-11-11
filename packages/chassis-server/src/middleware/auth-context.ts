@@ -11,6 +11,7 @@ import {
   type RequestQuotaService
 } from './rate-limit.js';
 import { looksLikeJwt } from './scopes.js';
+import { runAsPerson } from './person-scope.js';
 
 declare module 'hono' {
   interface ContextVariableMap {
@@ -319,12 +320,16 @@ export function authContext({
     }
 
     c.set('principal', principal);
-    if (!quota) return next();
+    // The rest of the request runs as the principal's person (PRDCT-4393): the
+    // sibling call reads it from this scope, never from an argument.
+    const admitted = principal;
+    const run = () => (admitted ? runAsPerson(admitted, () => next()) : next());
+    if (!quota) return run();
 
     // Success path: stamp the quota headers on whatever response the route
     // produced (set on c.res so streamed/raw Response bodies get them too),
     // letting well-behaved agents self-throttle before hitting 429s.
-    await next();
+    await run();
     for (const [name, value] of quotaHeaderEntries(quota)) c.res.headers.set(name, value);
     return;
   };

@@ -8,7 +8,13 @@ import {
   defineChassisContract
 } from '@antasphere/chassis-contract';
 import { defineChassisRoutes, fileUploadRoute } from '@antasphere/chassis-contract/routes';
-import type { BootOverrides, BootResult, ToolDefinition } from '@antasphere/chassis-server';
+import type {
+  BootOverrides,
+  BootResult,
+  SiblingOutcome,
+  ToolDefinition,
+  ToolSiblings
+} from '@antasphere/chassis-server';
 import { createScopeAllowlist, requireAuth } from '@antasphere/chassis-server/middleware';
 import { z } from 'zod';
 import { THINGS_COPY, THINGS_IDENTITY, THINGS_ROUTES_COPY } from './identity.js';
@@ -49,6 +55,10 @@ export const connectionFieldsSeen: Array<{
   fields: Record<string, string | string[] | null>;
 }> = [];
 const THINGS_EXPORT_ROUTE = '/api/v1/things/export';
+/** Who the request runs as (PRDCT-4393): what the twin answers the sibling call, so the suite sees the person. */
+export const THINGS_WHOAMI_ROUTE = '/api/v1/things/whoami';
+/** The host's own use of the sibling call (PRDCT-4393): one act on the twin, as the person, by name. */
+export const THINGS_SIBLING_ROUTE = '/api/v1/things/sibling';
 
 const contract = defineChassisContract({
   scopes: [THINGS_SCOPES.read, THINGS_SCOPES.write, THINGS_SCOPES.dataExport, THINGS_SCOPES.webhooks]
@@ -56,12 +66,13 @@ const contract = defineChassisContract({
 
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type
 type NoEnv = {};
-type NoDomain = Record<string, never>;
+/** The minimal tool's domain: the sibling call alone, which its routes drive (PRDCT-4393). */
+export type ThingsDomain = { siblings: ToolSiblings };
 
 export type MinimalBootOverrides = BootOverrides;
-export type MinimalBootResult = BootResult<NoEnv, NoDomain>;
+export type MinimalBootResult = BootResult<NoEnv, ThingsDomain>;
 
-export const minimalTool: ToolDefinition<NoEnv, NoDomain> = {
+export const minimalTool: ToolDefinition<NoEnv, ThingsDomain> = {
   identity: THINGS_IDENTITY,
   runtime: {
     version: '0.0.0-test',
@@ -88,13 +99,19 @@ export const minimalTool: ToolDefinition<NoEnv, NoDomain> = {
         (path, _method, isRead) => {
           if (path === THINGS_ROUTE) return isRead ? THINGS_SCOPES.read : THINGS_SCOPES.write;
           if (path === THINGS_EXPORT_ROUTE && isRead) return THINGS_SCOPES.dataExport;
+          if (path === THINGS_WHOAMI_ROUTE && isRead) return THINGS_SCOPES.read;
+          if (path === THINGS_SIBLING_ROUTE && !isRead) return THINGS_SCOPES.write;
           return null;
         }
       ]
     }),
     contractRoutes: defineChassisRoutes(contract, THINGS_IDENTITY, THINGS_ROUTES_COPY)
   },
-  services: () => ({}),
+  services: (core) => ({ siblings: core.siblings }),
+  // The sibling call (PRDCT-4393): the suite boots a second instance of this
+  // tool as the sibling the fake hub lists under `twin`, and acts on it as
+  // the person through `POST /things/sibling`.
+  siblings: [{ toolSlug: 'twin' }],
   // The webhooks catalog (PRDCT-3482): two events over two subjects, so the
   // chassis suite can emit, match, filter and deliver a tool's event. The
   // tool re-declares the chassis's `project` subject as a LIST under
@@ -223,12 +240,37 @@ export const minimalTool: ToolDefinition<NoEnv, NoDomain> = {
     // files tests never assert member-to-member privacy (that proof is the tool's, SL-B1), so
     // nothing here reads as a policy to copy: a real tool MUST return a per-principal scope.
     filePolicy: () => ({ blobInUse: async () => false, blobReadScope: () => undefined }),
-    routes: (api) => {
+    routes: (api, _ctx, domain) => {
       api.use('/things', requireAuth());
       api.use('/things/*', requireAuth());
       api.get('/things', (c) => c.json({ things: [], nextCursor: null }, 200));
       api.post('/things', (c) => c.json({ thing: { id: 'thing' } }, 201));
       api.get('/things/export', (c) => c.json({ things: [] }, 200));
+      api.get('/things/whoami', (c) => {
+        const p = c.get('principal')!;
+        return c.json({ userId: p.userId, email: p.email, workspaceId: p.workspaceId, via: p.via }, 200);
+      });
+      // `act`: `make` creates a thing on the sibling and reads who made it; `refused` asks a
+      // route the sibling's key may not reach; `throw` fails in the work; `sibling` names the slug.
+      api.post('/things/sibling', async (c) => {
+        const { act, sibling } = (await c.req.json()) as { act: string; sibling?: string };
+        const outcome = await domain.siblings.call(
+          sibling ?? 'twin',
+          async (twin): Promise<SiblingOutcome<unknown>> => {
+            if (act === 'throw') throw new Error('the work exploded');
+            if (act === 'refused') return twin.request('GET', '/things/nowhere');
+            const made = await twin.request('POST', '/things', { body: { name: 'from a sibling' } });
+            if (made.kind !== 'ok') return made;
+            const who = await twin.request('GET', '/things/whoami');
+            if (who.kind !== 'ok') return who;
+            return {
+              kind: 'ok' as const,
+              value: { made: made.value, who: who.value.body, workspaceId: twin.workspaceId }
+            };
+          }
+        );
+        return c.json({ outcome, via: c.get('principal')?.via ?? null }, 200);
+      });
     }
   },
   // The billing rail (slot 22): the generic files upload is the one metered

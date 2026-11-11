@@ -58,7 +58,9 @@ import {
   connectionDoor,
   connectionJobs,
   ConnectionService,
-  SiblingConnector
+  SiblingCalls,
+  SiblingConnector,
+  buildSiblingDeclarations
 } from './connections/index.js';
 import { docsSourceAtBoot, docsSourceRoutes } from './docs-source/index.js';
 import { bindMembershipRemoval } from './members/removal.js';
@@ -366,7 +368,11 @@ export async function bootPlatform<
   // The sibling connect scope (PRDCT-3774) is asked of the hub ONLY by a tool
   // that declares a sibling connection source: a tool without one asks the
   // hub nothing new, and the constant HUB_SSO_SCOPES stays pure.
-  const declaresSibling = (tool.connections?.sources ?? []).some((source) => source.sibling !== undefined);
+  // The siblings slot (PRDCT-4393) asks for the same scope: the call buys the same connect token.
+  const siblingDeclarations = buildSiblingDeclarations(tool.siblings);
+  const declaresSibling =
+    siblingDeclarations.length > 0 ||
+    (tool.connections?.sources ?? []).some((source) => source.sibling !== undefined);
   const hubSso = hub
     ? new HubSsoService({
         db: db.db,
@@ -741,6 +747,20 @@ export async function bootPlatform<
           fetchImpl: overrides.siblingFetch
         })
       : null;
+  // The sibling call (PRDCT-4393): the same connector, opened to the tool's
+  // services for the siblings it declared; an oss boot answers `not_on_hub`.
+  const siblings = new SiblingCalls({
+    declared: siblingDeclarations,
+    connector: siblingConnector,
+    centralAccountOf: async (workspaceId) => {
+      const [row] = await db.db
+        .select({ centralAccountId: workspaces.centralAccountId })
+        .from(workspaces)
+        .where(eq(workspaces.id, workspaceId));
+      return row?.centralAccountId ?? null;
+    },
+    logger
+  });
   const connections = new ConnectionService<TDomain>({
     db: db.db,
     logger,
@@ -919,6 +939,7 @@ export async function bootPlatform<
       recordCheck: (workspaceId, source, ok, detail) =>
         connections.recordCheck(workspaceId, source, ok, detail)
     },
+    siblings,
     overrides: overrides.tool
   };
   const domain = tool.services(serviceCore);
@@ -1104,6 +1125,7 @@ export async function bootPlatform<
     webhooks,
     fleetOrigins,
     connections,
+    siblings,
     docsSource,
     tool: domain
   };

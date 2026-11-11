@@ -158,13 +158,15 @@ describe('cloud edition: the SSO entrance', () => {
     // EXACTLY the stated one (a scope the hub does not know fails the whole
     // sign-in, so nothing rides along unannounced; account:write never does),
     // plus the sibling connect scope (PRDCT-3774) when, and only when, the
-    // booted tool declares a sibling connection source. Read from the tool
-    // itself (the predicate boot.ts applies), never from the host descriptor:
-    // a real tool declares a sibling source (the CRM's Meet) without being the
-    // chassis's own test tool, and its sign-in rightly asks the scope.
-    const declaresSibling = [...(app.connections?.catalog.sources.values() ?? [])].some(
-      (source) => source.sibling !== undefined
-    );
+    // booted tool declares a sibling connection source or a sibling it calls
+    // (the siblings slot, PRDCT-4393). Read from the tool itself (the
+    // predicate boot.ts applies), never from the host descriptor: a real tool
+    // declares a sibling source (the CRM's Meet) or a sibling call without
+    // being the chassis's own test tool, and its sign-in rightly
+    // asks the scope.
+    const declaresSibling =
+      (app.siblings?.declared.length ?? 0) > 0 ||
+      [...(app.connections?.catalog.sources.values() ?? [])].some((source) => source.sibling !== undefined);
     const expected = declaresSibling ? [...HUB_SSO_SCOPES, HUB_SSO_CONNECT_SCOPE] : [...HUB_SSO_SCOPES];
     expect(scope.split(' ').sort()).toEqual(expected.sort());
     expect(scope.split(' ')).toContain('orgs:create');
