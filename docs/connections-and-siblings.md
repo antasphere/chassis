@@ -157,7 +157,8 @@ to 502, and the three that are about your code or your instance (`sibling_not_de
 
 An `unavailable` after a request was sent does not prove the sibling did nothing: a creation may have
 landed before its answer was lost or the budget ran out. Before a retry that creates something, read
-back what is there, or send a key of your own the sibling deduplicates on.
+back what is there. The same holds for a `2xx` whose body was cut while it was read: the call
+answers `unavailable`, and the creation may have landed.
 
 What is thrown is a bug: a `path` that would leave the sibling's `/api/v1` (`//host`, a `.` or `..` segment,
 an encoded slash or backslash, a malformed escape, an absolute URL) or a method outside the five throws a `TypeError`, and an error your work throws is

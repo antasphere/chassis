@@ -77,7 +77,10 @@ export type SiblingOutcome<T> =
       status?: number | undefined;
       code?: string | null | undefined;
     }
-  /** The hub or the sibling did not answer, or answered 5xx: nothing changed, try again. */
+  /**
+   * The hub or the sibling did not answer, answered 5xx, or the answer was cut: try again in a
+   * moment. After a request that changes something was sent, it may have landed all the same.
+   */
   | { kind: 'unavailable'; message: string };
 
 export type SiblingRefusal = Exclude<SiblingOutcome<never>, { kind: 'ok' }>;
@@ -476,7 +479,14 @@ export class SiblingConnector {
     if (res.kind !== 'ok') return res;
     const { response } = res;
     if (response.status >= 200 && response.status < 300) {
-      const text = await response.text().catch(() => '');
+      // A body cut while it was read (the per-request limit, the deadline, the call's end) is no
+      // answer at all, never an empty one (verifier round 2, N2): the act may have landed.
+      let text: string;
+      try {
+        text = await response.text();
+      } catch {
+        return { kind: 'unavailable', message: `${tool.name}’s answer was cut before it ended` };
+      }
       let parsed: unknown = null;
       if (text) {
         try {

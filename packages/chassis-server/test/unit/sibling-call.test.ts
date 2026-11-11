@@ -40,7 +40,8 @@ const ORG = 'org-hub-1';
 const PERSON: PersonOfRequest = { userId: 'user-1', workspaceId: 'ws-here-1', via: 'session' };
 
 type Call = { method: string; path: string; headers: Record<string, string>; body: unknown };
-type Reply = { status: number; body?: unknown; raw?: string; delayMs?: number } | 'network';
+type Reply =
+  { status: number; body?: unknown; raw?: string; delayMs?: number; cutBody?: boolean } | 'network';
 
 function makeLogger() {
   const lines: string[] = [];
@@ -114,6 +115,16 @@ function harness(
           reject(new DOMException('The operation was aborted', 'TimeoutError'));
         });
       });
+    }
+    if (reply.cutBody) {
+      // The headers arrive, then the body stops halfway (the request's signal fired mid-body).
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"thing":{"id":'));
+          setTimeout(() => controller.error(new DOMException('The operation was aborted', 'AbortError')), 5);
+        }
+      });
+      return new Response(stream, { status: reply.status, headers: { 'content-type': 'application/json' } });
     }
     const text = reply.raw ?? (reply.body === undefined ? null : JSON.stringify(reply.body));
     return new Response(text, { status: reply.status, headers: { 'content-type': 'application/json' } });
@@ -616,6 +627,33 @@ describe('the sibling call · what the first verifier round asked for', () => {
     expect(asksConnectScope([], [{}, { sibling: undefined }])).toBe(false);
     expect(asksConnectScope([{ toolSlug: 'twin' }], [])).toBe(true);
     expect(asksConnectScope([], [{}, { sibling: { toolSlug: 'twin', events: [] } }])).toBe(true);
+  });
+});
+
+describe('the sibling call · what the second verifier round asked for', () => {
+  it('N1: each request has its own limit inside the budget: a hanging one is cut at the limit, not the budget', async () => {
+    const script = happyScript();
+    // The harness's per-request limit is 1 s; the call's budget is the default minute.
+    script['GET /api/v1/things'] = [{ status: 200, body: { things: [] }, delayMs: 3_000 }];
+    const h = harness(script);
+    const started = Date.now();
+    const outcome = await h.siblings.call('twin', (sibling) => sibling.request('GET', '/things'));
+    const took = Date.now() - started;
+    expect(outcome.kind).toBe('unavailable');
+    expect(took).toBeGreaterThanOrEqual(900);
+    expect(took).toBeLessThan(2_000);
+    expect(h.revoked()).toHaveLength(1);
+  });
+
+  it('N2: a 2xx whose body is cut while it is read is unavailable, never ok with an empty body', async () => {
+    const script = happyScript();
+    script['POST /api/v1/things'] = [{ status: 201, cutBody: true }];
+    const h = harness(script);
+    const outcome = await h.siblings.call('twin', (sibling) =>
+      sibling.request('POST', '/things', { body: {} })
+    );
+    expect(outcome).toEqual({ kind: 'unavailable', message: 'Twin’s answer was cut before it ended' });
+    expect(h.revoked()).toHaveLength(1);
   });
 });
 
