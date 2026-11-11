@@ -39,11 +39,26 @@ export {
 export {
   DEFAULT_SIBLING_OVERALL_MS,
   DEFAULT_SIBLING_TIMEOUT_MS,
+  SIBLING_METHODS,
   SiblingConnector,
+  type SiblingAnswer,
   type SiblingBudget,
   type SiblingConnectorDeps,
+  type SiblingMethod,
   type SiblingOutcome,
   type SiblingRefusal
 } from './sibling.js';
+export {
+  SiblingCalls,
+  asksConnectScope,
+  buildSiblingDeclarations,
+  type SiblingCallOutcome,
+  type SiblingCallRefusal,
+  type SiblingCallsDeps,
+  type SiblingDeclaration,
+  type SiblingHandle,
+  type SiblingWork,
+  type ToolSiblings
+} from './sibling-call.js';
 export { CONNECTION_BODY_MAX, connectionDoor } from './door.js';
 export { connectionJobs } from './jobs.js';

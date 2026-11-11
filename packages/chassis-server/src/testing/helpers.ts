@@ -51,6 +51,8 @@ export interface BootResultLike {
    * sibling (PRDCT-3774) from here, never from the host descriptor.
    */
   connections?: { catalog: { sources: Map<string, { sibling?: unknown }> } };
+  /** The siblings slot (PRDCT-4393): the slugs the booted tool may call as the person; they ask for the connect scope too. */
+  siblings?: { declared: readonly string[] };
 }
 
 /** A tool's boot function, as `createPlatform(tool).boot` hands it out. */
@@ -122,6 +124,14 @@ export interface ChassisTestHost<TResult extends BootResultLike, TOverrides> {
    * own events in its own suite.
    */
   webhooks?: boolean;
+  /**
+   * The host's tool is the chassis's minimal test tool, which declares the
+   * sibling `twin`, answers `GET /things/whoami` with its principal and acts
+   * on the twin as the person from `POST /things/sibling` (PRDCT-4393). A
+   * real tool leaves it unset: the sibling call suite skips under its host,
+   * and the tool proves its own calls in its own suite.
+   */
+  siblings?: boolean;
 }
 
 /** Postgres `admin_shutdown`: what a backend answers a still-connected client when the server stops. */

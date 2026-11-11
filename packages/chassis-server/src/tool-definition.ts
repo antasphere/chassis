@@ -43,7 +43,12 @@ import type {
 import type { SafeFetchOptions } from './webhooks/safe-fetch.js';
 import type { FleetOrigins, FleetOriginsDials } from './webhooks/fleet-origins.js';
 import type { DocsSource } from './docs-source/index.js';
-import type { ConnectionCatalogDeclaration, ConnectionService } from './connections/index.js';
+import type {
+  ConnectionCatalogDeclaration,
+  ConnectionService,
+  SiblingDeclaration,
+  ToolSiblings
+} from './connections/index.js';
 import type { PlatformRegistry } from './platform/registry.js';
 import type { RuntimeState } from './state.js';
 import type { StorageDriver } from './storage/driver.js';
@@ -94,6 +99,14 @@ export interface ServiceCore<TEnvShape extends z.ZodRawShape, TEvents, TToolOver
    * own: the key opened, the stored fields, and a check the tool made itself.
    */
   connections: ToolConnections;
+  /**
+   * The sibling call (PRDCT-4393): run requests on a sibling tool the
+   * `siblings` slot declares, AS THE PERSON of the request being served (a
+   * session, an API key or an OAuth bearer), with the person's own rights
+   * there and nothing more. Every refusal is answered, never thrown; a local
+   * instance answers `not_on_hub`, a call outside a request `no_person`.
+   */
+  siblings: ToolSiblings;
   /** The tool's own test seams (`BootOverrides.tool`); undefined in production. */
   overrides: TToolOverrides | undefined;
 }
@@ -389,6 +402,14 @@ export interface ToolDefinition<
    * time. Absent: no source, no door.
    */
   connections?: ConnectionCatalogDeclaration<TDomain>;
+  /**
+   * The siblings slot (PRDCT-4393): the sibling tools of the same hub this
+   * tool's services may call as the person (`core.siblings.call`), by their
+   * registry slug. A call to any other slug is refused before anything is
+   * asked of the hub. Declaring one makes the sign-in ask the hub for
+   * `sso:connect`, as a sibling connection source does. Absent: no sibling.
+   */
+  siblings?: readonly SiblingDeclaration[];
 }
 
 /**
@@ -491,6 +512,8 @@ export interface BootResult<
   docsSource: DocsSource | null;
   /** The connections (PRDCT-3773): the store, the door's logic and the log, for a suite to drive directly. */
   connections: ConnectionService<TDomain>;
+  /** The sibling call (PRDCT-4393): what the services got as `core.siblings`, for a suite to read the declaration and call outside a request. */
+  siblings: ToolSiblings;
 }
 
 /**

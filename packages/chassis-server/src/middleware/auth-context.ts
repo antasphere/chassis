@@ -11,6 +11,7 @@ import {
   type RequestQuotaService
 } from './rate-limit.js';
 import { looksLikeJwt } from './scopes.js';
+import { runAsPerson, runWithoutPerson } from './person-scope.js';
 
 declare module 'hono' {
   interface ContextVariableMap {
@@ -214,7 +215,8 @@ export function authContext({
     c.set('guestForbiddenMessage', guestForbiddenMessage);
 
     if (isPublicApiPath(c.req.path)) {
-      return next();
+      // No principal, so no person, whatever scope the request was entered from (verifier round 1, F9).
+      return runWithoutPerson(() => next());
     }
 
     const authHeader = c.req.header('authorization')?.trim() ?? '';
@@ -319,13 +321,17 @@ export function authContext({
     }
 
     c.set('principal', principal);
-    if (!quota) return next();
-
-    // Success path: stamp the quota headers on whatever response the route
-    // produced (set on c.res so streamed/raw Response bodies get them too),
-    // letting well-behaved agents self-throttle before hitting 429s.
-    await next();
-    for (const [name, value] of quotaHeaderEntries(quota)) c.res.headers.set(name, value);
+    // The rest of the request runs as the principal's person (PRDCT-4393): the
+    // sibling call reads it from this scope, never from an argument.
+    // ONE path whether a quota applies or not (verifier round 1, F2: a branch
+    // of its own for the unlimited plan went untested). No principal runs
+    // with no person, whatever scope the request was entered from (F9).
+    const admitted = principal;
+    await (admitted ? runAsPerson(admitted, () => next()) : runWithoutPerson(() => next()));
+    // Stamp the quota headers on whatever response the route produced (set on
+    // c.res so streamed/raw Response bodies get them too), letting
+    // well-behaved agents self-throttle before hitting 429s.
+    if (quota) for (const [name, value] of quotaHeaderEntries(quota)) c.res.headers.set(name, value);
     return;
   };
 }

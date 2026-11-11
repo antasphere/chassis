@@ -35,6 +35,15 @@ export const ssoCliConnectSchema = z.object({
    * is refused unless a prior grant already exists (a key must never be
    * minted born-dead).
    */
-  hubRefreshToken: z.string().min(20).max(512).optional()
+  hubRefreshToken: z.string().min(20).max(512).optional(),
+  /**
+   * A key for one act of a sibling tool (PRDCT-4393): it expires on its own
+   * this many seconds after the mint, whatever becomes of its revocation (a
+   * process stopped mid-call, a revocation that failed). Absent, as the CLI
+   * sends it, the key never expires. An instance from before this field
+   * strips it and mints a key that never expires; the caller revokes it all
+   * the same.
+   */
+  expiresInSeconds: z.number().int().min(60).max(3600).optional()
 });
 export type SsoCliConnect = z.infer<typeof ssoCliConnectSchema>;

@@ -12,7 +12,7 @@ import {
   SETUP_TOKEN,
   startPostgres
 } from '@antasphere/chassis-server/testing';
-import { minimalTool } from '../host/minimal-tool.js';
+import { minimalTool, type ThingsDomain } from '../host/minimal-tool.js';
 
 /**
  * The `api.exportEntries` slot (PRDCT-2543): a tool adds named entries of rows
@@ -49,15 +49,15 @@ const filledTool: MinimalTool = {
   api: {
     ...minimalTool.api,
     exportEntries: (domain) => {
-      // Bound once, with the tool's domain (the minimal tool's is empty).
-      expect(domain).toEqual({});
+      // Bound once, with the tool's domain (the minimal tool's holds the sibling call alone).
+      expect(Object.keys(domain)).toEqual(['siblings']);
       return (db, workspaceId) => {
         seen.push({ workspaceId });
         return contribution(db, workspaceId);
       };
     }
   }
-} satisfies ToolDefinition<Record<never, never>, Record<string, never>>;
+} satisfies ToolDefinition<Record<never, never>, ThingsDomain>;
 
 const json = (body: unknown, headers: Record<string, string> = {}) => ({
   method: 'POST',
