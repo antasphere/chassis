@@ -58,6 +58,7 @@ import { idempotency } from '../middleware/index.js';
 import { crossSiteGuard } from '../middleware/index.js';
 import { jsonDepthLimit } from '../middleware/index.js';
 import { deferrableBodyCap } from '../middleware/body-cap.js';
+import { readRequestBodyOnce, readResponseBodyOnce } from '../middleware/body-once.js';
 import { noStoreAuthenticated } from '../middleware/index.js';
 import { oauthPublicEndpoints } from '../middleware/index.js';
 import { createRequestQuota, emailKeyOf, makeClientIp, rateLimit } from '../middleware/index.js';
@@ -643,14 +644,15 @@ export function createApiApp<
         // A person's OWN session revoking a pass session (a pass session is
         // refused these paths above). The caller is verified by the library
         // (`getSession`, the cookie's signature checked): a forged or dead
-        // cookie ends nothing. The body is read from a clone: the library
-        // gets the request untouched. The exact path compare loses nothing:
-        // the library's router answers 404 to any other spelling.
+        // cookie ends nothing. The body is read once and the request rebuilt
+        // on the same bytes: the library gets it whole (body-once.ts). The
+        // exact path compare loses nothing: the library's router answers 404
+        // to any other spelling.
         const verified = await auth.api.getSession({ headers: c.req.raw.headers }).catch(() => null);
         if (verified?.session?.id && verified?.user?.id) {
           let bodyToken: string | null = null;
           try {
-            const body: unknown = await c.req.raw.clone().json();
+            const body: unknown = JSON.parse((await readRequestBodyOnce(c)) ?? '');
             if (body && typeof body === 'object' && typeof (body as { token?: unknown }).token === 'string') {
               bodyToken = (body as { token: string }).token;
             }
@@ -698,16 +700,21 @@ export function createApiApp<
     const req = await rewriteChangeEmailCollision(auth, deps.authSecret, c.req.raw);
     const res = await (hubSso ? hubSso.runWithLoginScope(() => auth.handler(req)) : auth.handler(req));
     if (res.status === 200 && (res.headers.get('content-type') ?? '').includes('application/json')) {
-      const body = (await res
-        .clone()
-        .json()
-        .catch(() => null)) as { status?: unknown; user?: unknown } | null;
+      // Read once, and answer the rebuilt response, never a cloned one's
+      // original (body-once.ts, PRDCT-4441).
+      const { text, response } = await readResponseBodyOnce(res);
+      let body: { status?: unknown; user?: unknown } | null = null;
+      try {
+        body = JSON.parse(text) as { status?: unknown; user?: unknown } | null;
+      } catch {
+        body = null;
+      }
       if (body && body.status === true && body.user != null) {
         const headers = new Headers(res.headers);
         headers.delete('content-length');
         return new Response(JSON.stringify({ status: true, user: null }), { status: 200, headers });
       }
-      return res;
+      return response;
     }
     // A 3xx: constrain the Location to this origin (Major 3). Better Auth's
     // GET verify-email skips originCheck (no Origin header on a navigation) and

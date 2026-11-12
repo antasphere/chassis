@@ -4,6 +4,7 @@ import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { and, eq } from 'drizzle-orm';
 import { idempotencyKeys, type Db } from '@antasphere/chassis-db';
 import { apiError } from '../api/errors.js';
+import { readResponseBodyOnce } from './body-once.js';
 
 /**
  * Idempotency-Key middleware: an opt-in `Idempotency-Key` request header on
@@ -247,8 +248,11 @@ export function idempotency({ db, authSecret, toolTargets }: IdempotencyDeps): M
       throw e;
     }
     if (c.res.status >= 200 && c.res.status < 300) {
-      // clone() tees the stream — the client still receives the original.
-      const body = await c.res.clone().text();
+      // Read once and hand the client a response rebuilt on the same bytes:
+      // a cloned response's original is cancelled when the clone is
+      // collected during the write below (body-once.ts, PRDCT-4441).
+      const { text: body, response } = await readResponseBodyOnce(c.res);
+      c.res = response;
       try {
         await db
           .update(idempotencyKeys)

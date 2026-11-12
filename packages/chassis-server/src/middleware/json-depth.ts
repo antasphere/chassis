@@ -1,5 +1,6 @@
 import type { MiddlewareHandler } from 'hono';
 import { apiError } from '../api/errors.js';
+import { readRequestBodyOnce } from './body-once.js';
 
 /**
  * Nesting cap for request JSON. Deliberately far above anything a contract in
@@ -61,7 +62,9 @@ export function jsonDepthLimit(maxDepth: number = MAX_JSON_DEPTH): MiddlewareHan
     if (!JSON_CONTENT_TYPE.test(raw.headers.get('content-type') ?? '')) return next();
     let text: string;
     try {
-      text = await raw.clone().text();
+      // Read once and put back, never clone(): a collected clone cancels the
+      // original body (body-once.ts, PRDCT-4441).
+      text = (await readRequestBodyOnce(c)) ?? '';
     } catch {
       // Unreadable body — let the normal parser produce the normal error.
       return next();
