@@ -163,11 +163,14 @@ describe('the cached response reaches the client whole (PRDCT-4441)', () => {
     }
   };
 
-  it('the canary: a clone read, then collections, loses the original body', async () => {
-    const raw = new Request('http://local/x', { method: 'POST', body: '{"a":1}' });
-    await raw.clone().text();
+  it('the canary: the forced collections really run', async () => {
+    let finalized = false;
+    const registry = new FinalizationRegistry(() => {
+      finalized = true;
+    });
+    (() => registry.register({}, 'dropped'))();
     await collect();
-    await expect(raw.text()).rejects.toThrow(/unusable|already been read/i);
+    expect(finalized).toBe(true);
   });
 
   it('a keyed create answers its full body after collections', async () => {

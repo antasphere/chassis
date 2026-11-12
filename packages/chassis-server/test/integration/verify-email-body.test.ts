@@ -18,7 +18,7 @@ import {
  * branch where the wrapper must hand on a response it rebuilt, never the
  * original it has read or a clone's original (which Node's fetch cancels
  * once the clone is garbage collected). Collections are forced before the
- * body is read; the canary proves they happen.
+ * body is read; the canary proves they run.
  */
 setFlagsFromString('--expose-gc');
 const gc = runInNewContext('gc') as () => void;
@@ -56,11 +56,14 @@ afterAll(async () => {
   await container?.stop();
 });
 
-it('the canary: a clone read, then collections, loses the original body', async () => {
-  const raw = new Request('http://local/x', json({ a: 1 }));
-  await raw.clone().text();
+it('the canary: the forced collections really run', async () => {
+  let finalized = false;
+  const registry = new FinalizationRegistry(() => {
+    finalized = true;
+  });
+  (() => registry.register({}, 'dropped'))();
   await collect();
-  await expect(raw.text()).rejects.toThrow(/unusable|already been read/i);
+  expect(finalized).toBe(true);
 });
 
 it('verify-email without callbackURL answers a readable JSON body after collections', async () => {

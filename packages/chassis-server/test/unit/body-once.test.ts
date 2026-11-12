@@ -42,12 +42,19 @@ const postJson = (body: string) => ({
   body
 });
 
-describe('the platform, under the collection the bug needs', () => {
-  it('a clone() read then a collection loses the original body (the fault this file guards)', async () => {
-    const raw = new Request('http://local/x', postJson('{"name":"a"}'));
-    await raw.clone().text();
+describe('the forced collections', () => {
+  it('really run: an object dropped before them is finalized', async () => {
+    // Proves the collections happen, so no test below passes because gc() did
+    // nothing. Whether the platform loses a clone's original depends on the
+    // Node build (Node 22.17's undici does; a later 22 may not): the tests
+    // below hold on both.
+    let finalized = false;
+    const registry = new FinalizationRegistry(() => {
+      finalized = true;
+    });
+    (() => registry.register({}, 'dropped'))();
     await collect();
-    await expect(raw.text()).rejects.toThrow(/unusable|already been read/i);
+    expect(finalized).toBe(true);
   });
 });
 
