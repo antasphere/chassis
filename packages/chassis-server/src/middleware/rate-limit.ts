@@ -9,6 +9,7 @@ import { getConnInfo } from '@hono/node-server/conninfo';
 import type { EntitlementService, Principal } from '@antasphere/chassis-contract';
 import type { Env } from '../env.js';
 import type { Logger } from '../logger.js';
+import { readRequestBodyOnce } from './body-once.js';
 
 /**
  * Auth-surface rate limits (ours, not Better Auth's built-in): login, OTP
@@ -264,7 +265,8 @@ export function rateLimit(
  */
 export async function emailKeyOf(c: Context): Promise<string[]> {
   try {
-    const body = (await c.req.raw.clone().json()) as { email?: string };
+    // Read once and put back, never clone() (body-once.ts, PRDCT-4441).
+    const body = JSON.parse((await readRequestBodyOnce(c)) ?? '') as { email?: string };
     if (body?.email && typeof body.email === 'string') {
       return [`email:${body.email.toLowerCase().trim()}`];
     }

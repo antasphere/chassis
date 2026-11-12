@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import {
@@ -144,6 +146,44 @@ describe('api-key create replay', () => {
     expect((await post('/api/v1/api-keys', twice)).status).toBe(201);
     expect((await post('/api/v1/api-keys', twice)).status).toBe(201);
     expect(await countRows(`SELECT count(*)::int AS n FROM api_keys WHERE name = 'idem-twice'`)).toBe(2);
+  });
+});
+
+describe('the cached response reaches the client whole (PRDCT-4441)', () => {
+  // The cache reads the response before the client does. A clone() read
+  // there let the next garbage collection cancel the client's copy (Node's
+  // fetch cancels an original once its clone is collected): the create ran,
+  // the answer was lost. Collections forced before the client reads.
+  setFlagsFromString('--expose-gc');
+  const gc = runInNewContext('gc') as () => void;
+  const collect = async () => {
+    for (let i = 0; i < 4; i += 1) {
+      gc();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+
+  it('the canary: the forced collections really run', async () => {
+    let finalized = false;
+    const registry = new FinalizationRegistry(() => {
+      finalized = true;
+    });
+    (() => registry.register({}, 'dropped'))();
+    await collect();
+    expect(finalized).toBe(true);
+  });
+
+  it('a keyed create answers its full body after collections', async () => {
+    const res = await post(
+      '/api/v1/api-keys',
+      { name: 'idem-collected', scopes: [host.scopes.read] },
+      'K-GC'
+    );
+    expect(res.status).toBe(201);
+    await collect();
+    const body = JSON.parse(await res.text());
+    expect(body.apiKey.name).toBe('idem-collected');
+    expect(typeof body.key).toBe('string');
   });
 });
 

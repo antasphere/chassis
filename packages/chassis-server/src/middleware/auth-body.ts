@@ -1,6 +1,7 @@
 import type { MiddlewareHandler } from 'hono';
 import { hasNulDeep } from '@antasphere/chassis-contract';
 import { apiError } from '../api/errors.js';
+import { readRequestBodyOnce } from './body-once.js';
 
 /** Matches better-call's / Hono's JSON content-type test (the json-depth regex). */
 const JSON_CONTENT_TYPE = /^application\/([a-z0-9.+-]*\+)?json/i;
@@ -24,8 +25,8 @@ const JSON_CONTENT_TYPE = /^application\/([a-z0-9.+-]*\+)?json/i;
  *
  * A body under a JSON content-type must parse and carry no NUL anywhere;
  * non-JSON content types pass untouched (the OAuth token endpoint is
- * form-encoded), as do bodyless requests. The body is read from a clone — the
- * mount consumes the original.
+ * form-encoded), as do bodyless requests. The body is read once and the
+ * request rebuilt on the same bytes — the mount reads that one.
  */
 export function authBodyGuard(): MiddlewareHandler {
   return async (c, next) => {
@@ -34,7 +35,9 @@ export function authBodyGuard(): MiddlewareHandler {
     if (!JSON_CONTENT_TYPE.test(raw.headers.get('content-type') ?? '')) return next();
     let text: string;
     try {
-      text = await raw.clone().text();
+      // Read once and put back, never clone(): a collected clone cancels the
+      // original body the mount reads next (body-once.ts, PRDCT-4441).
+      text = (await readRequestBodyOnce(c)) ?? '';
     } catch {
       // Unreadable body — let the mount produce its own error.
       return next();
