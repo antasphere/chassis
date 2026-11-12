@@ -296,10 +296,13 @@ describe('POST /workspaces — self-hosted', () => {
         )
       ).rows[0].n as number;
     expect(await owned()).toBe(1);
-    // 30-way, on purpose: without the per-user advisory lock every request
+    // 30-way, on purpose: without the per-person serialization every request
     // counts "1 owned" before any insert commits and they ALL pass (measured:
     // 10 created, 11 owned). A small burst is bounded by luck — by the pool
-    // and the event loop — and would stay green with the lock removed.
+    // and the event loop. In ONE process the queue serializes the burst on its
+    // own (PRDCT-4441), so this test no longer tells whether the advisory lock
+    // (the replicas' half) is taken before the count: the lock is pinned on its
+    // own below ("the cap is read UNDER the advisory lock").
     const BURST = 30;
     const burst = await Promise.all(
       Array.from({ length: BURST }, (_, i) => create(memberCookie, `Burst ${i}`))
@@ -429,6 +432,13 @@ describe('a burst of one person’s creations parks ONE pooled connection on the
         'GET /me during the burst'
       );
       expect(me.status).toBe(200);
+      // …and so is another person's creation: the queue is per person.
+      const theirs = await within(
+        pooled.app.request('/api/v1/workspaces', post({ name: 'Not queued' }, { cookie: memberCookieHere })),
+        3_000,
+        'another person’s POST /workspaces during the burst'
+      );
+      expect(theirs.status).toBe(201);
       passed = true;
     } finally {
       await outside.query('SELECT pg_advisory_unlock($1, hashtext($2))', [LOCK_NAMESPACE, ownerId]);
@@ -444,6 +454,68 @@ describe('a burst of one person’s creations parks ONE pooled connection on the
     const owned = await pool.query(
       `SELECT count(*)::int AS n FROM workspace_members WHERE user_id = $1 AND role = 'owner' AND is_active`,
       [ownerId]
+    );
+    expect(owned.rows[0].n).toBe(CAP);
+  });
+
+  it('the cap is read UNDER the advisory lock: owners added while a creation waits on it are counted', async () => {
+    // The replicas' half of the guard, alone: another replica holds the
+    // person's lock and, while one creation of theirs waits on it here, gives
+    // them their last owned workspaces. Read under the lock, the count sees
+    // them and refuses; read before it, the creation would pass the cap.
+    const pool = pooled.db.pool;
+    const LATE = { email: 'late@wscreate.test', name: 'Lee Late', password: 'lee-late-password-123456' };
+    const lateId = (await pooled.auth.api.signUpEmail({ body: LATE })).user.id;
+    const first = (await pool.query(`SELECT id FROM workspaces ORDER BY created_at LIMIT 1`)).rows[0]
+      .id as string;
+    await pool.query(
+      `INSERT INTO workspace_members (workspace_id, user_id, role, origin, is_active) VALUES ($1, $2, 'member', 'local', true)`,
+      [first, lateId]
+    );
+    const lateCookie = await signIn(pooled, LATE.email, LATE.password);
+
+    const outside = new pg.Client({ connectionString: url });
+    await outside.connect();
+    const waiting = async () =>
+      (
+        await outside.query(
+          `SELECT count(*)::int AS n FROM pg_locks
+            WHERE locktype = 'advisory' AND NOT granted AND classid = $1 AND objsubid = 2
+              AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,
+          [LOCK_NAMESPACE]
+        )
+      ).rows[0].n as number;
+    await outside.query('SELECT pg_advisory_lock($1, hashtext($2))', [LOCK_NAMESPACE, lateId]);
+    let attempt: Promise<Response> | undefined;
+    try {
+      attempt = Promise.resolve(
+        pooled.app.request('/api/v1/workspaces', post({ name: 'One too many' }, { cookie: lateCookie }))
+      );
+      const deadline = Date.now() + 10_000;
+      while ((await waiting()) < 1) {
+        if (Date.now() > deadline) throw new Error('the creation never reached the lock in 10 s');
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      // The other replica's creations land while this one waits.
+      for (let i = 0; i < CAP; i += 1) {
+        const ws = (
+          await outside.query(`INSERT INTO workspaces (name) VALUES ($1) RETURNING id`, [`Elsewhere ${i}`])
+        ).rows[0].id as string;
+        await outside.query(
+          `INSERT INTO workspace_members (workspace_id, user_id, role, origin, is_active) VALUES ($1, $2, 'owner', 'local', true)`,
+          [ws, lateId]
+        );
+      }
+    } finally {
+      await outside.query('SELECT pg_advisory_unlock($1, hashtext($2))', [LOCK_NAMESPACE, lateId]);
+      await outside.end();
+    }
+    const res = await attempt!;
+    expect(res.status).toBe(403);
+    expect((await readJson(res)).error.code).toBe('workspace_limit_reached');
+    const owned = await pool.query(
+      `SELECT count(*)::int AS n FROM workspace_members WHERE user_id = $1 AND role = 'owner' AND is_active`,
+      [lateId]
     );
     expect(owned.rows[0].n).toBe(CAP);
   });

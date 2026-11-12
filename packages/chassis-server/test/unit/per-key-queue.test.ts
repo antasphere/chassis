@@ -70,6 +70,34 @@ describe('createPerKeyQueue', () => {
     expect(await next).toBe('served');
   });
 
+  it('a request arriving while the second of a key runs still waits for it', async () => {
+    // The first piece of work ends while a second is queued: the key is kept,
+    // since the second is now the tail, and a third waits behind it.
+    const queue = createPerKeyQueue();
+    const [a, b] = [gate(), gate()];
+    const log: string[] = [];
+    const first = queue.run('ada', () => a.opened);
+    const second = queue.run('ada', async () => {
+      log.push('second starts');
+      await b.opened;
+      log.push('second ends');
+    });
+    a.open();
+    await first;
+    await tick();
+    expect(log).toEqual(['second starts']);
+    expect(queue.size()).toBe(1);
+    const third = queue.run('ada', async () => {
+      log.push('third starts');
+    });
+    await tick();
+    expect(log).toEqual(['second starts']);
+    b.open();
+    await Promise.all([second, third]);
+    expect(log).toEqual(['second starts', 'second ends', 'third starts']);
+    expect(queue.size()).toBe(0);
+  });
+
   it('forgets a key once its work is all through, success or failure', async () => {
     const queue = createPerKeyQueue();
     const held = gate();
