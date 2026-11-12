@@ -163,6 +163,13 @@ describe('the cached response reaches the client whole (PRDCT-4441)', () => {
     }
   };
 
+  it('the canary: a clone read, then collections, loses the original body', async () => {
+    const raw = new Request('http://local/x', { method: 'POST', body: '{"a":1}' });
+    await raw.clone().text();
+    await collect();
+    await expect(raw.text()).rejects.toThrow(/unusable|already been read/i);
+  });
+
   it('a keyed create answers its full body after collections', async () => {
     const res = await post(
       '/api/v1/api-keys',
