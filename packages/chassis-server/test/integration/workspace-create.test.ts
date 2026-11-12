@@ -519,6 +519,65 @@ describe('a burst of one person’s creations parks ONE pooled connection on the
     );
     expect(owned.rows[0].n).toBe(CAP);
   });
+
+  it('the advisory lock is held by the creation’s own transaction until it commits', async () => {
+    // Taken on another connection (or released early), the lock would still
+    // be waited on before the count, but two replicas' count and insert would
+    // no longer be serialized. A table lock taken from outside stops the
+    // creation at its insert: at that moment the person's advisory lock must
+    // be granted, to the very backend that is waiting on the insert.
+    const HELD = { email: 'held@wscreate.test', name: 'Hal Held', password: 'hal-held-password-1234567' };
+    const pool = pooled.db.pool;
+    const heldId = (await pooled.auth.api.signUpEmail({ body: HELD })).user.id;
+    const first = (await pool.query(`SELECT id FROM workspaces ORDER BY created_at LIMIT 1`)).rows[0]
+      .id as string;
+    await pool.query(
+      `INSERT INTO workspace_members (workspace_id, user_id, role, origin, is_active) VALUES ($1, $2, 'member', 'local', true)`,
+      [first, heldId]
+    );
+    const heldCookie = await signIn(pooled, HELD.email, HELD.password);
+
+    const blocker = new pg.Client({ connectionString: url });
+    const probe = new pg.Client({ connectionString: url });
+    await blocker.connect();
+    await probe.connect();
+    await blocker.query('BEGIN');
+    await blocker.query('LOCK TABLE workspaces IN SHARE MODE');
+    const res = Promise.resolve(
+      pooled.app.request('/api/v1/workspaces', post({ name: 'Held' }, { cookie: heldCookie }))
+    );
+    let insertPids: number[] = [];
+    let lockPids: number[] = [];
+    try {
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        insertPids = (
+          await probe.query(
+            `SELECT pid FROM pg_locks WHERE locktype = 'relation' AND NOT granted
+              AND relation = 'workspaces'::regclass`
+          )
+        ).rows.map((r) => r.pid as number);
+        if (insertPids.length > 0) break;
+        if (Date.now() > deadline)
+          throw new Error('the creation’s insert never reached the table lock in 10 s');
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      lockPids = (
+        await probe.query(
+          `SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted AND classid = $1 AND objsubid = 2
+            AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,
+          [LOCK_NAMESPACE]
+        )
+      ).rows.map((r) => r.pid as number);
+    } finally {
+      await blocker.query('ROLLBACK');
+      await blocker.end();
+      await probe.end();
+    }
+    expect((await res).status).toBe(201);
+    expect(insertPids).toHaveLength(1);
+    expect(lockPids).toEqual(insertPids);
+  });
 });
 
 describe('MAX_WORKSPACES_PER_USER=0 closes creation for everyone', () => {
