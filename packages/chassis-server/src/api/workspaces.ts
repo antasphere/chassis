@@ -29,7 +29,9 @@ const err = (code: string, message: string) => ({ error: { code, message } });
  *
  * One route, two editions:
  *  - oss: `WorkspaceService.create` (the setup path) under a per-user
- *    advisory lock + the operator's `MAX_WORKSPACES_PER_USER` cap — the
+ *    advisory lock (behind a per-person queue in the process, so a burst
+ *    holds one pooled connection, not all of them) + the operator's
+ *    `MAX_WORKSPACES_PER_USER` cap — the
  *    hub's `POST /orgs` model, mirrored.
  *  - cloud: the organization is created AT THE HUB as the caller (their own
  *    stored grant, ADR 019 — no service key, no target-user parameter), then
@@ -57,6 +59,51 @@ const err = (code: string, message: string) => ({ error: { code, message } });
  * job in ITS database.
  */
 const WORKSPACE_CREATE_LOCK_NAMESPACE = 7432006;
+
+/**
+ * One creation per person at a time IN THIS PROCESS, before the transaction
+ * (PRDCT-4441). The advisory lock above serializes a person's creations
+ * across replicas, but a request waiting on it waits INSIDE an open
+ * transaction, on a connection of the shared pool: a burst of one person's
+ * creations (the rate wall lets sixty through in an hour) parked every
+ * connection of the pool (ten) on that one lock, and every other request of
+ * the instance, anyone's, waited for a connection behind them; on a loaded
+ * machine some waited past the pool's connect timeout and answered 500. A
+ * person's later requests now wait here, on a promise, holding nothing: each
+ * replica parks at most ONE connection per person on the lock, and the
+ * answers are the ones the lock alone gave (201 under the cap, 403 past it).
+ *
+ * The queue is keyed per person and forgets a person once their last
+ * request is through. A waiter is never rejected by the queue itself: the
+ * previous holder's failure releases the next one exactly as its success.
+ */
+export interface PerKeyQueue {
+  /** Run `work` once every earlier piece of work of `key` is through. */
+  run<T>(key: string, work: () => Promise<T>): Promise<T>;
+  /** How many keys have work running or waiting (0 once all is through). */
+  size(): number;
+}
+
+export function createPerKeyQueue(): PerKeyQueue {
+  const tails = new Map<string, Promise<void>>();
+  return {
+    async run(key, work) {
+      const previous = tails.get(key) ?? Promise.resolve();
+      let release!: () => void;
+      const mine = new Promise<void>((resolve) => (release = resolve));
+      const tail = previous.then(() => mine);
+      tails.set(key, tail);
+      try {
+        await previous;
+        return await work();
+      } finally {
+        release();
+        if (tails.get(key) === tail) tails.delete(key);
+      }
+    },
+    size: () => tails.size
+  };
+}
 
 /** Why this caller may not create a workspace right now — also the wire error code. */
 export type WorkspaceCreationRefusal =
@@ -257,6 +304,7 @@ export function workspaceCreationPolicy(
 export function registerWorkspaceRoutes(api: OpenAPIHono, deps: WorkspaceRouteDeps): void {
   const { db, auth, audit, registry, logger, cloud } = deps;
   const policy = workspaceCreationPolicy(deps);
+  const oneCreationPerPerson = createPerKeyQueue();
   const REFUSAL_MESSAGES: Record<WorkspaceCreationRefusal, string> = {
     ...CHASSIS_REFUSAL_MESSAGES,
     guest_forbidden: deps.guestForbiddenMessage,
@@ -318,30 +366,34 @@ export function registerWorkspaceRoutes(api: OpenAPIHono, deps: WorkspaceRouteDe
     if (!cloud) {
       // ── oss: local creation under the per-user lock ─────────────────────
       try {
-        workspaceId = await db.transaction(async (tx) => {
-          // Serializes THIS user's creations: two concurrent requests can
-          // never both count "one under the cap". Transaction-scoped — it
-          // cannot leak.
-          await tx.execute(
-            sql`SELECT pg_advisory_xact_lock(${WORKSPACE_CREATE_LOCK_NAMESPACE}, hashtext(${userId}))`
-          );
-          const refusal = await workspaceCreationRefusal(tx, policy, actor);
-          if (refusal) throw new CreationRefused(refusal);
-          // The registry's WorkspaceService (ADR 014), joined to this
-          // transaction exactly as setup does: workspace + ACTIVE OWNER
-          // membership (origin defaults to 'local') or nothing.
-          const created = await registry.workspaces.create(name, userId, tx);
-          await tx
-            .update(workspaces)
-            .set({
-              lookTheme: look.theme,
-              lookPattern: look.pattern,
-              lookField: look.field,
-              lookGrain: look.grain
-            })
-            .where(eq(workspaces.id, created.workspaceId));
-          return created.workspaceId;
-        });
+        // Queued per person first (createPerKeyQueue): a waiting request
+        // holds no connection of the pool.
+        workspaceId = await oneCreationPerPerson.run(userId, () =>
+          db.transaction(async (tx) => {
+            // Serializes THIS user's creations across replicas: two concurrent
+            // requests can never both count "one under the cap".
+            // Transaction-scoped — it cannot leak.
+            await tx.execute(
+              sql`SELECT pg_advisory_xact_lock(${WORKSPACE_CREATE_LOCK_NAMESPACE}, hashtext(${userId}))`
+            );
+            const refusal = await workspaceCreationRefusal(tx, policy, actor);
+            if (refusal) throw new CreationRefused(refusal);
+            // The registry's WorkspaceService (ADR 014), joined to this
+            // transaction exactly as setup does: workspace + ACTIVE OWNER
+            // membership (origin defaults to 'local') or nothing.
+            const created = await registry.workspaces.create(name, userId, tx);
+            await tx
+              .update(workspaces)
+              .set({
+                lookTheme: look.theme,
+                lookPattern: look.pattern,
+                lookField: look.field,
+                lookGrain: look.grain
+              })
+              .where(eq(workspaces.id, created.workspaceId));
+            return created.workspaceId;
+          })
+        );
       } catch (cause) {
         if (cause instanceof CreationRefused) {
           return c.json(err(cause.refusal, REFUSAL_MESSAGES[cause.refusal]), 403);

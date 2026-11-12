@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import pg from 'pg';
 import type { StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import {
   createDatabase,
@@ -334,6 +335,117 @@ describe('POST /workspaces — self-hosted', () => {
     expect(await canCreate(memberCookie)).toBe(true);
     expect((await create(memberCookie, 'Room again')).status).toBe(201);
     expect((await create(memberCookie, 'Over')).status).toBe(403);
+  });
+});
+
+describe('a burst of one person’s creations parks ONE pooled connection on the lock (PRDCT-4441)', () => {
+  // The per-person advisory lock is waited on INSIDE a transaction. Before
+  // PRDCT-4441 every request of a burst waited there on a connection of its
+  // own: one person's burst held every connection of the pool, and the rest
+  // of the instance (anyone's request) queued behind it for a connection,
+  // until the pool's connect timeout answered 500 on a loaded machine (the
+  // flake of the cap test above, seen in a tool's forced suite). Holding the
+  // lock from outside (another replica mid-creation) makes it deterministic:
+  // with the queue, one request waits on the lock and the instance answers;
+  // without it, the whole pool waits there.
+  const LOCK_NAMESPACE = 7432006; // WORKSPACE_CREATE_LOCK_NAMESPACE (api/workspaces.ts)
+  let pooled: TestApp;
+  let url = '';
+  let ownerCookieHere = '';
+  let memberCookieHere = '';
+
+  beforeAll(async () => {
+    url = await createDatabase(container, 'ws_create_pool');
+    pooled = await createTestApp(url, { MAX_WORKSPACES_PER_USER: String(CAP) });
+    const setup = await pooled.app.request(
+      '/api/v1/setup',
+      post({ setupToken: 'integration-test-setup-token', instanceName: 'Pooled', owner: OWNER })
+    );
+    expect(setup.status).toBe(201);
+    const workspaceId = (await readJson(setup)).workspaceId as string;
+    ownerCookieHere = await signIn(pooled, OWNER.email, OWNER.password);
+    const member = (await pooled.auth.api.signUpEmail({ body: MEMBER })).user.id;
+    await pooled.db.pool.query(
+      `INSERT INTO workspace_members (workspace_id, user_id, role, origin, is_active) VALUES ($1, $2, 'member', 'local', true)`,
+      [workspaceId, member]
+    );
+    memberCookieHere = await signIn(pooled, MEMBER.email, MEMBER.password);
+  }, 240_000);
+
+  afterAll(async () => {
+    await pooled?.stop();
+  });
+
+  it('while the lock is held elsewhere, one request of the burst waits on it, the pool stays free, and another person is served', async () => {
+    const pool = pooled.db.pool;
+    // More requests than the pool has connections, whatever the tool sets.
+    const BURST = (pool as unknown as { options: { max: number } }).options.max + 5;
+    const ownerId = (await pool.query(`SELECT id FROM "user" WHERE email = $1`, [OWNER.email])).rows[0]
+      .id as string;
+
+    const outside = new pg.Client({ connectionString: url });
+    await outside.connect();
+    // Waiters on THIS lock, read from a connection that is not the pool's.
+    const waiters = async () =>
+      (
+        await outside.query(
+          `SELECT count(*)::int AS n FROM pg_locks
+            WHERE locktype = 'advisory' AND NOT granted AND classid = $1 AND objsubid = 2
+              AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,
+          [LOCK_NAMESPACE]
+        )
+      ).rows[0].n as number;
+    const within = <T>(work: T | Promise<T>, ms: number, what: string) =>
+      Promise.race([
+        work,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`${what}: no answer in ${ms} ms`)), ms)
+        )
+      ]);
+
+    await outside.query('SELECT pg_advisory_lock($1, hashtext($2))', [LOCK_NAMESPACE, ownerId]);
+    let burst: Promise<Response[]> | undefined;
+    let passed = false;
+    try {
+      burst = Promise.all(
+        Array.from({ length: BURST }, (_, i) =>
+          pooled.app.request('/api/v1/workspaces', post({ name: `Queued ${i}` }, { cookie: ownerCookieHere }))
+        )
+      );
+      // The first creation reaches the lock…
+      const deadline = Date.now() + 10_000;
+      while ((await waiters()) < 1) {
+        if (Date.now() > deadline) throw new Error('no creation reached the lock in 10 s');
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      // …and the others had every chance to reach it too.
+      await new Promise((r) => setTimeout(r, 750));
+      expect(await waiters()).toBe(1);
+      expect(pool.waitingCount).toBe(0);
+      // Another person's request is served while the burst waits.
+      const me = await within(
+        pooled.app.request('/api/v1/me', { headers: { cookie: memberCookieHere } }),
+        3_000,
+        'GET /me during the burst'
+      );
+      expect(me.status).toBe(200);
+      passed = true;
+    } finally {
+      await outside.query('SELECT pg_advisory_unlock($1, hashtext($2))', [LOCK_NAMESPACE, ownerId]);
+      await outside.end();
+      // A red run still lets the burst finish before the app stops.
+      if (!passed) await burst?.catch(() => undefined);
+    }
+
+    // Released, the burst ends exactly as the cap test says: the room left, then 403.
+    const statuses = (await burst).map((r) => r.status);
+    expect(statuses.filter((st) => st === 201)).toHaveLength(CAP - 1);
+    expect(statuses.filter((st) => st === 403)).toHaveLength(BURST - (CAP - 1));
+    const owned = await pool.query(
+      `SELECT count(*)::int AS n FROM workspace_members WHERE user_id = $1 AND role = 'owner' AND is_active`,
+      [ownerId]
+    );
+    expect(owned.rows[0].n).toBe(CAP);
   });
 });
 
