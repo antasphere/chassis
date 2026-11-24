@@ -37,6 +37,7 @@ const ORG_RIGHT = '11111111-aaaa-4bbb-8ccc-000000000005';
 const ORG_DARK = '11111111-aaaa-4bbb-8ccc-000000000006';
 const ORG_DUSK = '11111111-aaaa-4bbb-8ccc-000000000008';
 const ORG_WEIRD = '11111111-aaaa-4bbb-8ccc-000000000007';
+const ORG_NAMES = '11111111-aaaa-4bbb-8ccc-000000000009';
 
 const json = (body: unknown) => ({
   method: 'POST',
@@ -433,6 +434,132 @@ describe('cloud edition: the SSO entrance', () => {
       { central_account_id: ORG_LEFT, role: 'owner' },
       { central_account_id: ORG_RIGHT, role: 'member' }
     ]);
+  });
+
+  describe('the name: what the person gave the hub, never a guess from the address', () => {
+    let seq = 0;
+    const named = (name: string): HubUserFixture => {
+      seq += 1;
+      return {
+        sub: `hub-named-${seq}`,
+        email: `sofie.maes${seq}@names.test`,
+        name,
+        workspaceId: ORG_NAMES,
+        role: 'member',
+        workspaceName: 'Names Org'
+      };
+    };
+    const localPart = (email: string) => email.split('@')[0]!;
+
+    async function storedName(email: string): Promise<string> {
+      const { rows } = await app.db.pool.query(`SELECT name FROM "user" WHERE email = $1`, [email]);
+      expect(rows).toHaveLength(1);
+      return rows[0].name as string;
+    }
+
+    async function setName(email: string, name: string): Promise<void> {
+      await app.db.pool.query(`UPDATE "user" SET name = $1 WHERE email = $2`, [name, email]);
+    }
+
+    it('a first sign-in whose id token name is not usable (blank, 201 characters, NUL, line break): the whole address', async () => {
+      for (const bad of ['', '   ', 'a'.repeat(201), 'Sofie\u0000Maes', 'Sofie\nMaes']) {
+        const p = named(bad);
+        await ssoLogin(app, p);
+        expect({ bad, stored: await storedName(p.email) }).toEqual({ bad, stored: p.email });
+      }
+    });
+
+    it('§9 on the browser path: only zero-width spaces, a U+202E, a lone surrogate give the whole address, and the sign-in lands', async () => {
+      for (const bad of ['\u200B\u200B', 'Sofie\u202EMaes', 'Sofie\uD800Maes']) {
+        const p = named(bad);
+        await ssoLogin(app, p);
+        expect({ bad, stored: await storedName(p.email) }).toEqual({ bad, stored: p.email });
+      }
+    });
+
+    it('a first sign-in whose id token name has spaces around it: stored trimmed', async () => {
+      const p = named('  Sofie Maes  ');
+      await ssoLogin(app, p);
+      expect(await storedName(p.email)).toBe('Sofie Maes');
+    });
+
+    it('a NUL byte in the name of a person who already holds a placeholder: the sign-in succeeds, the placeholder stays', async () => {
+      const p = named('');
+      await ssoLogin(app, p);
+      await setName(p.email, localPart(p.email));
+      await ssoLogin(app, { ...p, name: 'Sofie\u0000Maes' });
+      expect(await storedName(p.email)).toBe(localPart(p.email));
+    });
+
+    it('the old placeholder (the first part of the address) is replaced by a sign-in carrying the name', async () => {
+      const p = named('');
+      await ssoLogin(app, p);
+      await setName(p.email, localPart(p.email));
+      await ssoLogin(app, { ...p, name: 'Sofie Maes' });
+      expect(await storedName(p.email)).toBe('Sofie Maes');
+    });
+
+    it('the new placeholder (the whole address) is replaced by a sign-in carrying the name', async () => {
+      const p = named('');
+      await ssoLogin(app, p);
+      expect(await storedName(p.email)).toBe(p.email);
+      await ssoLogin(app, { ...p, name: 'Sofie Maes' });
+      expect(await storedName(p.email)).toBe('Sofie Maes');
+    });
+
+    it('a name the person or an owner chose is never changed by a sign-in, whatever the token says', async () => {
+      const p = named('First Given');
+      await ssoLogin(app, p);
+      await ssoLogin(app, { ...p, name: 'Another Name' });
+      expect(await storedName(p.email)).toBe('First Given');
+      await setName(p.email, 'Chosen By Owner');
+      await ssoLogin(app, { ...p, name: 'Sofie Maes' });
+      expect(await storedName(p.email)).toBe('Chosen By Owner');
+    });
+
+    it('an id token whose name IS a placeholder, exactly (the address, or its first part), writes nothing', async () => {
+      const p = named('');
+      await ssoLogin(app, p);
+      await setName(p.email, localPart(p.email));
+      await ssoLogin(app, { ...p, name: p.email });
+      expect(await storedName(p.email)).toBe(localPart(p.email));
+      await setName(p.email, p.email);
+      await ssoLogin(app, { ...p, name: localPart(p.email) });
+      expect(await storedName(p.email)).toBe(p.email);
+    });
+
+    it('an id token name that differs from the address only by a capital is a name: it replaces either placeholder (P3)', async () => {
+      const capital = (email: string) => 'S' + localPart(email).slice(1);
+      const whole = named('');
+      await ssoLogin(app, whole);
+      expect(await storedName(whole.email)).toBe(whole.email);
+      await ssoLogin(app, { ...whole, name: capital(whole.email) });
+      expect(await storedName(whole.email)).toBe(capital(whole.email));
+
+      const firstPart = named('');
+      await ssoLogin(app, firstPart);
+      await setName(firstPart.email, localPart(firstPart.email));
+      await ssoLogin(app, { ...firstPart, name: capital(firstPart.email) });
+      expect(await storedName(firstPart.email)).toBe(capital(firstPart.email));
+    });
+
+    it('a placeholder is recognised exactly: the address with a capital is a chosen name and is kept by a sign-in', async () => {
+      const p = named('');
+      await ssoLogin(app, p);
+      const capitalised = 'S' + p.email.slice(1);
+      await setName(p.email, capitalised);
+      await ssoLogin(app, { ...p, name: 'Sofie Maes' });
+      expect(await storedName(p.email)).toBe(capitalised);
+    });
+
+    it('the placeholder of the address before a change is replaced at the sign-in that changes it', async () => {
+      const p = named('');
+      await ssoLogin(app, p);
+      await setName(p.email, localPart(p.email));
+      const moved = { ...p, email: `moved.${p.email}`, name: 'Sofie Maes' };
+      await ssoLogin(app, moved);
+      expect(await storedName(moved.email)).toBe('Sofie Maes');
+    });
   });
 
   describe('the FAIL-CLOSED login reconcile (a login without its projection must not exist)', () => {

@@ -234,6 +234,257 @@ describe('cloud edition, released with its CLI package', () => {
   });
 });
 
+describe('the name a person gets through the exchange: what they gave the hub, never a guess from the address', () => {
+  let app: TestApp;
+
+  beforeAll(async () => {
+    app = await createTestApp(await createDatabase(container, 'cli_package_names'), cloudEnv());
+    await setUp(app, 'Names');
+  });
+
+  afterAll(async () => {
+    await app.stop();
+  });
+
+  /** One exchange through /sso/cli-connect, with the `name` claim when given. */
+  async function exchange(fixture: HubUserFixture, name?: unknown): Promise<void> {
+    const minted = await hub.signConnectToken(fixture, RESOURCE, name === undefined ? {} : { name });
+    const res = await app.app.request(
+      '/api/v1/sso/cli-connect',
+      sso.json({ token: minted.token, hubRefreshToken: minted.hubRefreshToken })
+    );
+    expect(res.status).toBe(201);
+  }
+
+  async function storedName(email: string): Promise<string> {
+    const { rows } = await app.db.pool.query(`SELECT name FROM "user" WHERE email = $1`, [email]);
+    expect(rows).toHaveLength(1);
+    return rows[0].name as string;
+  }
+
+  async function setName(email: string, name: string): Promise<void> {
+    await app.db.pool.query(`UPDATE "user" SET name = $1 WHERE email = $2`, [name, email]);
+  }
+
+  const localPart = (email: string) => email.split('@')[0]!;
+
+  it('first contact with a name claim: the row holds the full name, trimmed', async () => {
+    const p = person();
+    await exchange(p, '  Sofie Maes  ');
+    expect(await storedName(p.email)).toBe('Sofie Maes');
+  });
+
+  it('first contact without the claim (an older hub): the whole address, never its first part', async () => {
+    const p = person();
+    await exchange(p);
+    expect(await storedName(p.email)).toBe(p.email);
+  });
+
+  it('a blank name, a name of spaces, of 201 characters, a NUL byte, a line break, a number: the whole address', async () => {
+    for (const name of [
+      '',
+      '   ',
+      'a'.repeat(201),
+      'Sofie\u0000Maes',
+      'Sofie\nMaes',
+      'Sofie\u0085Maes',
+      42
+    ]) {
+      const p = person();
+      await exchange(p, name);
+      expect({ name, stored: await storedName(p.email) }).toEqual({ name, stored: p.email });
+    }
+  });
+
+  // The contract's §9: the one set of examples the hub and the chassis both test.
+  const USABLE: Array<[string, string]> = [
+    ['accents and punctuation', "Zoë O'Brien-Smith"],
+    ['Han characters', '李小龙'],
+    ['Arabic', 'محمد'],
+    ['a Persian name holding U+200C', 'نیک\u200Cنام'],
+    ['a name holding U+200F', 'Sofie\u200F Maes'],
+    ['a non-breaking space inside', 'Sofie\u00A0Maes'],
+    ['digits only', '007']
+  ];
+  const UNUSABLE: Array<[string, unknown]> = [
+    ['only zero-width spaces', '\u200B\u200B\u200B'],
+    ['a name holding U+202E', 'Sofie\u202EMaes'],
+    ['a name holding U+2028', 'Sofie\u2028Maes'],
+    ['a name holding U+2029', 'Sofie\u2029Maes'],
+    ['a name holding an isolate, U+2066 and U+2069', 'Sofie\u2066Maes\u2069'],
+    ['a lone combining mark', '\u0301'],
+    ['a lone high surrogate', 'Sofie\uD800Maes'],
+    ['a lone low surrogate alone', '\uDC00'],
+    ['an emoji alone', '🙂'],
+    ['a NUL byte', 'Sofie\u0000Maes'],
+    ['a line break', 'Sofie\nMaes'],
+    ['201 characters', 'a'.repeat(201)],
+    ['spaces only', '   ']
+  ];
+
+  it('§9, usable: every example is taken, as given', async () => {
+    for (const [label, name] of USABLE) {
+      const p = person();
+      await exchange(p, name);
+      expect({ label, stored: await storedName(p.email) }).toEqual({ label, stored: name });
+    }
+  });
+
+  it('§9, not usable: every example gives the whole address, the exchange never fails, nothing of the name is stored', async () => {
+    for (const [label, name] of UNUSABLE) {
+      const p = person();
+      await exchange(p, name);
+      expect({ label, stored: await storedName(p.email) }).toEqual({ label, stored: p.email });
+    }
+  });
+
+  it('§9, not usable, over a placeholder: a lone surrogate leaves the placeholder as it was', async () => {
+    const p = person();
+    await exchange(p);
+    await setName(p.email, localPart(p.email));
+    await exchange(p, 'Sofie\uD800Maes');
+    expect(await storedName(p.email)).toBe(localPart(p.email));
+  });
+
+  it('a NUL byte in the name of a person who already holds a placeholder: the exchange succeeds, the placeholder stays', async () => {
+    const p = person();
+    await exchange(p);
+    await setName(p.email, localPart(p.email));
+    await exchange(p, 'Sofie\u0000Maes');
+    expect(await storedName(p.email)).toBe(localPart(p.email));
+  });
+
+  it('a name of exactly 200 characters is taken', async () => {
+    const p = person();
+    await exchange(p, 'b'.repeat(200));
+    expect(await storedName(p.email)).toBe('b'.repeat(200));
+  });
+
+  it('a person named by the old placeholder (the first part of the address): an exchange with their name replaces it', async () => {
+    const p = person();
+    await exchange(p);
+    await setName(p.email, localPart(p.email));
+    await exchange(p, 'Sofie Maes');
+    expect(await storedName(p.email)).toBe('Sofie Maes');
+  });
+
+  it('a person named by the new placeholder (the whole address): an exchange with their name replaces it', async () => {
+    const p = person();
+    await exchange(p);
+    expect(await storedName(p.email)).toBe(p.email);
+    await exchange(p, 'Sofie Maes');
+    expect(await storedName(p.email)).toBe('Sofie Maes');
+  });
+
+  it('a name the person or an owner chose is never changed, whatever the token says', async () => {
+    const p = person();
+    await exchange(p, 'First Given');
+    await exchange(p, 'Another Name');
+    expect(await storedName(p.email)).toBe('First Given');
+    await setName(p.email, 'Chosen By Owner');
+    await exchange(p, 'Sofie Maes');
+    await exchange(p);
+    expect(await storedName(p.email)).toBe('Chosen By Owner');
+  });
+
+  it('a token whose name IS a placeholder, exactly (the address, or its first part), writes nothing', async () => {
+    const p = person();
+    await exchange(p);
+    await setName(p.email, localPart(p.email));
+    await exchange(p, p.email);
+    expect(await storedName(p.email)).toBe(localPart(p.email));
+    await setName(p.email, p.email);
+    await exchange(p, ` ${localPart(p.email)} `);
+    expect(await storedName(p.email)).toBe(p.email);
+  });
+
+  it('a hub name that differs from the address only by a capital is a name: it replaces either placeholder (P3)', async () => {
+    const whole = person();
+    await exchange(whole);
+    expect(await storedName(whole.email)).toBe(whole.email);
+    const capital = (email: string) => localPart(email).charAt(0).toUpperCase() + localPart(email).slice(1);
+    await exchange(whole, capital(whole.email));
+    expect(await storedName(whole.email)).toBe(capital(whole.email));
+
+    const firstPart = person();
+    await exchange(firstPart);
+    await setName(firstPart.email, localPart(firstPart.email));
+    await exchange(firstPart, capital(firstPart.email));
+    expect(await storedName(firstPart.email)).toBe(capital(firstPart.email));
+  });
+
+  it('a placeholder is recognised exactly: the address with a capital is a chosen name and is kept, the lower-case one is replaced', async () => {
+    const chosen = person();
+    await exchange(chosen);
+    const capitalised = localPart(chosen.email).charAt(0).toUpperCase() + localPart(chosen.email).slice(1);
+    await setName(chosen.email, capitalised);
+    await exchange(chosen, 'Sofie Maes');
+    expect(await storedName(chosen.email)).toBe(capitalised);
+
+    const placeholder = person();
+    await exchange(placeholder);
+    await setName(placeholder.email, localPart(placeholder.email));
+    await exchange(placeholder, 'Sofie Maes');
+    expect(await storedName(placeholder.email)).toBe('Sofie Maes');
+  });
+
+  it('the rename is this person alone: two people with the same old placeholder, one exchange, one renamed', async () => {
+    const first = { ...person(), email: 'alex.same@first-domain.test' };
+    const second = { ...person(), email: 'alex.same@second-domain.test' };
+    await exchange(first);
+    await exchange(second);
+    await setName(first.email, 'alex.same');
+    await setName(second.email, 'alex.same');
+    await exchange(first, 'Alex First');
+    expect(await storedName(first.email)).toBe('Alex First');
+    expect(await storedName(second.email)).toBe('alex.same');
+  });
+
+  it('an exchange that changes the address replaces the old placeholder of the OLD address (the name is synced first)', async () => {
+    const p = person();
+    await exchange(p);
+    await setName(p.email, localPart(p.email));
+    const moved = { ...p, email: `moved.${p.email}` };
+    await exchange(moved, 'Sofie Maes');
+    expect(await storedName(moved.email)).toBe('Sofie Maes');
+  });
+
+  it('a name chosen between the read and the write of the sync is kept (the write is conditional on the name read)', async () => {
+    const p = person();
+    await exchange(p);
+    const placeholder = await storedName(p.email);
+    expect(placeholder).toBe(p.email);
+    // A second connection chooses a name inside a transaction and holds the
+    // row; the exchange reads the old placeholder (a read is never blocked),
+    // then its write waits on the row until the choice commits.
+    const holder = await app.db.pool.connect();
+    try {
+      await holder.query('BEGIN');
+      await holder.query(`UPDATE "user" SET name = 'Chosen Between' WHERE email = $1`, [p.email]);
+      const minted = await hub.signConnectToken(p, RESOURCE, { name: 'Sofie Maes' });
+      const pending = app.app.request(
+        '/api/v1/sso/cli-connect',
+        sso.json({ token: minted.token, hubRefreshToken: minted.hubRefreshToken })
+      );
+      const deadline = Date.now() + 15_000;
+      for (;;) {
+        const { rows } = await app.db.pool.query(
+          `SELECT count(*)::int AS waiting FROM pg_stat_activity
+           WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE 'update "user"%'`
+        );
+        if (rows[0].waiting > 0) break;
+        if (Date.now() > deadline) throw new Error('the exchange never waited on the held row');
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      await holder.query('COMMIT');
+      expect((await pending).status).toBe(201);
+    } finally {
+      holder.release();
+    }
+    expect(await storedName(p.email)).toBe('Chosen Between');
+  });
+});
+
 describe('cloud edition, released without its CLI package', () => {
   let app: TestApp;
 
