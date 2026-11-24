@@ -361,6 +361,62 @@ describe('the name a person gets through the exchange: what they gave the hub, n
     await exchange(placeholder, 'Sofie Maes');
     expect(await storedName(placeholder.email)).toBe('Sofie Maes');
   });
+
+  it('the rename is this person alone: two people with the same old placeholder, one exchange, one renamed', async () => {
+    const first = { ...person(), email: 'alex.same@first-domain.test' };
+    const second = { ...person(), email: 'alex.same@second-domain.test' };
+    await exchange(first);
+    await exchange(second);
+    await setName(first.email, 'alex.same');
+    await setName(second.email, 'alex.same');
+    await exchange(first, 'Alex First');
+    expect(await storedName(first.email)).toBe('Alex First');
+    expect(await storedName(second.email)).toBe('alex.same');
+  });
+
+  it('an exchange that changes the address replaces the old placeholder of the OLD address (the name is synced first)', async () => {
+    const p = person();
+    await exchange(p);
+    await setName(p.email, localPart(p.email));
+    const moved = { ...p, email: `moved.${p.email}` };
+    await exchange(moved, 'Sofie Maes');
+    expect(await storedName(moved.email)).toBe('Sofie Maes');
+  });
+
+  it('a name chosen between the read and the write of the sync is kept (the write is conditional on the name read)', async () => {
+    const p = person();
+    await exchange(p);
+    const placeholder = await storedName(p.email);
+    expect(placeholder).toBe(p.email);
+    // A second connection chooses a name inside a transaction and holds the
+    // row; the exchange reads the old placeholder (a read is never blocked),
+    // then its write waits on the row until the choice commits.
+    const holder = await app.db.pool.connect();
+    try {
+      await holder.query('BEGIN');
+      await holder.query(`UPDATE "user" SET name = 'Chosen Between' WHERE email = $1`, [p.email]);
+      const minted = await hub.signConnectToken(p, RESOURCE, { name: 'Sofie Maes' });
+      const pending = app.app.request(
+        '/api/v1/sso/cli-connect',
+        sso.json({ token: minted.token, hubRefreshToken: minted.hubRefreshToken })
+      );
+      const deadline = Date.now() + 15_000;
+      for (;;) {
+        const { rows } = await app.db.pool.query(
+          `SELECT count(*)::int AS waiting FROM pg_stat_activity
+           WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE 'update "user"%'`
+        );
+        if (rows[0].waiting > 0) break;
+        if (Date.now() > deadline) throw new Error('the exchange never waited on the held row');
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      await holder.query('COMMIT');
+      expect((await pending).status).toBe(201);
+    } finally {
+      holder.release();
+    }
+    expect(await storedName(p.email)).toBe('Chosen Between');
+  });
 });
 
 describe('cloud edition, released without its CLI package', () => {
