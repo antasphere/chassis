@@ -509,6 +509,12 @@ export class FakeHub {
       omitJti?: boolean | undefined;
       /** Replacement purpose; null = omit the claim. Default 'sso-connect'. */
       purpose?: string | null | undefined;
+      /**
+       * The `name` claim the hub signs from the name the person gave it;
+       * absent = no claim (an older hub). Typed `unknown` so a negative test
+       * can sign a claim of the wrong type.
+       */
+      name?: unknown;
     } = {}
   ): Promise<{ token: string; jti: string; hubRefreshToken: string }> {
     const key = this.signingKey();
@@ -521,6 +527,7 @@ export class FakeHub {
       workspace_id: fixture.workspaceId,
       ...(fixture.workspaceName === null ? {} : { workspace_name: fixture.workspaceName ?? 'Fake Org' }),
       email: fixture.email,
+      ...(opts.name === undefined ? {} : { name: opts.name }),
       ...(purpose === null ? {} : { purpose }),
       ...(opts.omitJti ? {} : { jti }),
       aud: o.accessAud ?? resource

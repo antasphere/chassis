@@ -394,7 +394,9 @@ export class HubSsoService {
    *
    *  1. single-hub-identity guard — undo an email-match link that would
    *     merge two hub subjects into one local user;
-   *  2. email re-sync (D10) with the explicit duplicate-email collision
+   *  2. name sync: a placeholder name (the address, or its first part) is
+   *     replaced by the name the hub asserts; any other name is kept;
+   *     then the email re-sync (D10) with the explicit duplicate-email collision
    *     path (fail the login, corrupt nothing);
    *  3. the FAIL-CLOSED login reconcile: one forced pass reading the user's
    *     org list from the hub with the callback access token — reconcile IS
@@ -412,6 +414,7 @@ export class HubSsoService {
    */
   async assertLogin(localUserId: string, assertion: LoginScopeAssertion): Promise<void> {
     await this.guardSingleHubIdentity(localUserId, assertion.sub);
+    await this.syncName(localUserId, assertion);
     await this.syncEmail(localUserId, assertion);
     if (!this.reconciler) {
       // Boot always binds on cloud; a missing binding is a wiring bug and
@@ -497,11 +500,13 @@ export class HubSsoService {
       // The hub mints exchange tokens only for a live, authenticated hub
       // user — an identity whose email the hub itself verified (H3 re-reads
       // emailVerified LIVE at mint). The H3 contract carries no
-      // email_verified or name claim, so the honest mirror of the SSO
-      // id_token's `email_verified: true` is asserted here, and the display
-      // name falls back exactly like an SSO login with a blank profile name.
+      // email_verified claim, so the honest mirror of the SSO id_token's
+      // `email_verified: true` is asserted here. The hub signs the `name`
+      // the person gave it, when they have one; a hub that signs none (an
+      // older one), or a claim that is not a usable name, leaves the whole
+      // address as the name: a name is never guessed from an address.
       emailVerified: true,
-      name: normalizedEmail.split('@')[0]!,
+      name: connectTokenName(claims.name) ?? normalizedEmail,
       jti,
       expiresAt: new Date(claims.exp * 1000)
     };
@@ -544,6 +549,7 @@ export class HubSsoService {
       }
     }
     await this.guardSingleHubIdentity(userId, assertion.sub);
+    await this.syncName(userId, assertion);
     await this.syncEmail(userId, assertion);
     // Re-read AFTER the D10 sync may have just rewritten the email; the
     // response must carry what the database now holds.
@@ -673,6 +679,34 @@ export class HubSsoService {
   }
 
   /**
+   * A sign-in replaces a placeholder name, and only a placeholder. The
+   * stored name is overwritten with the asserted one ONLY when the stored
+   * name is a placeholder (the stored or the asserted address, or the first
+   * part of either), the asserted name is a real one (non-blank, not itself
+   * a placeholder) and the two differ. A name a person or an owner chose is
+   * never touched, which is why `overrideUserInfo` stays off. Runs BEFORE
+   * the email sync, so the stored address is still the one the placeholder
+   * was made from; the write is conditional on the name read, so a name
+   * chosen in between is never overwritten.
+   */
+  private async syncName(localUserId: string, assertion: HubSsoAssertion): Promise<void> {
+    const [row] = await this.opts.db
+      .select({ email: userTable.email, name: userTable.name })
+      .from(userTable)
+      .where(eq(userTable.id, localUserId))
+      .limit(1);
+    if (!row) throw new HubSsoLoginError('sso_login_failed', 'user row missing after callback');
+    const emails = [row.email, assertion.email];
+    if (!isPlaceholderName(row.name, emails)) return;
+    const asserted = assertion.name.trim();
+    if (!asserted || isPlaceholderName(asserted, emails) || asserted === row.name) return;
+    await this.opts.db
+      .update(userTable)
+      .set({ name: asserted, updatedAt: new Date() })
+      .where(and(eq(userTable.id, localUserId), eq(userTable.name, row.name)));
+  }
+
+  /**
    * D10: the hub is the identity source on cloud, so the local email FOLLOWS
    * the (verified) hub email at every login — email-keyed features (the
    * collaborator grant sweep) must see the current address. A collision with
@@ -724,6 +758,34 @@ export class HubSsoService {
   }
 }
 
+/** The longest `name` claim of an exchange token taken as a person's name. */
+const MAX_CONNECT_NAME_LENGTH = 200;
+
+/**
+ * The exchange token's `name` claim, trimmed, when it is a usable name: a
+ * string, non-blank once trimmed, at most 200 characters. Anything else is
+ * null and the caller falls back to the whole address.
+ */
+function connectTokenName(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const name = raw.trim();
+  if (!name || name.length > MAX_CONNECT_NAME_LENGTH) return null;
+  return name;
+}
+
+/**
+ * A name nobody gave: once trimmed and lower-cased it equals one of the
+ * addresses, or the first part of one (what versions before this one wrote
+ * when the token carried no name).
+ */
+function isPlaceholderName(name: string, emails: readonly string[]): boolean {
+  const n = name.trim().toLowerCase();
+  return emails.some((raw) => {
+    const email = raw.toLowerCase();
+    return n === email || n === email.split('@')[0];
+  });
+}
+
 /** The SSO-login user assertion, from the VERIFIED id_token ONLY. */
 function buildUserAssertion(idClaims: JWTPayload): HubSsoAssertion {
   const sub = idClaims.sub;
@@ -734,7 +796,8 @@ function buildUserAssertion(idClaims: JWTPayload): HubSsoAssertion {
   }
   const normalizedEmail = email.toLowerCase();
   const rawName = idClaims.name;
-  const name = typeof rawName === 'string' && rawName.trim() ? rawName : normalizedEmail.split('@')[0]!;
+  // A blank profile name leaves the whole address: never its first part.
+  const name = typeof rawName === 'string' && rawName.trim() ? rawName : normalizedEmail;
   return {
     sub,
     email: normalizedEmail,

@@ -234,6 +234,104 @@ describe('cloud edition, released with its CLI package', () => {
   });
 });
 
+describe('the name a person gets through the exchange: what they gave the hub, never a guess from the address', () => {
+  let app: TestApp;
+
+  beforeAll(async () => {
+    app = await createTestApp(await createDatabase(container, 'cli_package_names'), cloudEnv());
+    await setUp(app, 'Names');
+  });
+
+  afterAll(async () => {
+    await app.stop();
+  });
+
+  /** One exchange through /sso/cli-connect, with the `name` claim when given. */
+  async function exchange(fixture: HubUserFixture, name?: unknown): Promise<void> {
+    const minted = await hub.signConnectToken(fixture, RESOURCE, name === undefined ? {} : { name });
+    const res = await app.app.request(
+      '/api/v1/sso/cli-connect',
+      sso.json({ token: minted.token, hubRefreshToken: minted.hubRefreshToken })
+    );
+    expect(res.status).toBe(201);
+  }
+
+  async function storedName(email: string): Promise<string> {
+    const { rows } = await app.db.pool.query(`SELECT name FROM "user" WHERE email = $1`, [email]);
+    expect(rows).toHaveLength(1);
+    return rows[0].name as string;
+  }
+
+  async function setName(email: string, name: string): Promise<void> {
+    await app.db.pool.query(`UPDATE "user" SET name = $1 WHERE email = $2`, [name, email]);
+  }
+
+  const localPart = (email: string) => email.split('@')[0]!;
+
+  it('first contact with a name claim: the row holds the full name, trimmed', async () => {
+    const p = person();
+    await exchange(p, '  Sofie Maes  ');
+    expect(await storedName(p.email)).toBe('Sofie Maes');
+  });
+
+  it('first contact without the claim (an older hub): the whole address, never its first part', async () => {
+    const p = person();
+    await exchange(p);
+    expect(await storedName(p.email)).toBe(p.email);
+  });
+
+  it('a blank name, a name of spaces, a name of 201 characters, a number: the whole address', async () => {
+    for (const name of ['', '   ', 'a'.repeat(201), 42]) {
+      const p = person();
+      await exchange(p, name);
+      expect({ name, stored: await storedName(p.email) }).toEqual({ name, stored: p.email });
+    }
+  });
+
+  it('a name of exactly 200 characters is taken', async () => {
+    const p = person();
+    await exchange(p, 'b'.repeat(200));
+    expect(await storedName(p.email)).toBe('b'.repeat(200));
+  });
+
+  it('a person named by the old placeholder (the first part of the address): an exchange with their name replaces it', async () => {
+    const p = person();
+    await exchange(p);
+    await setName(p.email, localPart(p.email));
+    await exchange(p, 'Sofie Maes');
+    expect(await storedName(p.email)).toBe('Sofie Maes');
+  });
+
+  it('a person named by the new placeholder (the whole address): an exchange with their name replaces it', async () => {
+    const p = person();
+    await exchange(p);
+    expect(await storedName(p.email)).toBe(p.email);
+    await exchange(p, 'Sofie Maes');
+    expect(await storedName(p.email)).toBe('Sofie Maes');
+  });
+
+  it('a name the person or an owner chose is never changed, whatever the token says', async () => {
+    const p = person();
+    await exchange(p, 'First Given');
+    await exchange(p, 'Another Name');
+    expect(await storedName(p.email)).toBe('First Given');
+    await setName(p.email, 'Chosen By Owner');
+    await exchange(p, 'Sofie Maes');
+    await exchange(p);
+    expect(await storedName(p.email)).toBe('Chosen By Owner');
+  });
+
+  it('a token whose name is itself the address or its first part writes nothing', async () => {
+    const p = person();
+    await exchange(p);
+    await setName(p.email, localPart(p.email));
+    await exchange(p, p.email.toUpperCase());
+    expect(await storedName(p.email)).toBe(localPart(p.email));
+    await exchange(p, ` ${localPart(p.email).toUpperCase()} `);
+    expect(await storedName(p.email)).toBe(localPart(p.email));
+  });
+});
+
 describe('cloud edition, released without its CLI package', () => {
   let app: TestApp;
 
