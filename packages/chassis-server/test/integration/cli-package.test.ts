@@ -384,14 +384,30 @@ describe('the name a person gets through the exchange: what they gave the hub, n
     expect(await storedName(p.email)).toBe('Chosen By Owner');
   });
 
-  it('a token whose name is itself the address or its first part writes nothing', async () => {
+  it('a token whose name IS a placeholder, exactly (the address, or its first part), writes nothing', async () => {
     const p = person();
     await exchange(p);
     await setName(p.email, localPart(p.email));
-    await exchange(p, p.email.toUpperCase());
+    await exchange(p, p.email);
     expect(await storedName(p.email)).toBe(localPart(p.email));
-    await exchange(p, ` ${localPart(p.email).toUpperCase()} `);
-    expect(await storedName(p.email)).toBe(localPart(p.email));
+    await setName(p.email, p.email);
+    await exchange(p, ` ${localPart(p.email)} `);
+    expect(await storedName(p.email)).toBe(p.email);
+  });
+
+  it('a hub name that differs from the address only by a capital is a name: it replaces either placeholder (P3)', async () => {
+    const whole = person();
+    await exchange(whole);
+    expect(await storedName(whole.email)).toBe(whole.email);
+    const capital = (email: string) => localPart(email).charAt(0).toUpperCase() + localPart(email).slice(1);
+    await exchange(whole, capital(whole.email));
+    expect(await storedName(whole.email)).toBe(capital(whole.email));
+
+    const firstPart = person();
+    await exchange(firstPart);
+    await setName(firstPart.email, localPart(firstPart.email));
+    await exchange(firstPart, capital(firstPart.email));
+    expect(await storedName(firstPart.email)).toBe(capital(firstPart.email));
   });
 
   it('a placeholder is recognised exactly: the address with a capital is a chosen name and is kept, the lower-case one is replaced', async () => {

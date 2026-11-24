@@ -517,14 +517,30 @@ describe('cloud edition: the SSO entrance', () => {
       expect(await storedName(p.email)).toBe('Chosen By Owner');
     });
 
-    it('an id token whose name is itself the address or its first part writes nothing', async () => {
+    it('an id token whose name IS a placeholder, exactly (the address, or its first part), writes nothing', async () => {
       const p = named('');
       await ssoLogin(app, p);
       await setName(p.email, localPart(p.email));
-      await ssoLogin(app, { ...p, name: p.email.toUpperCase() });
+      await ssoLogin(app, { ...p, name: p.email });
       expect(await storedName(p.email)).toBe(localPart(p.email));
+      await setName(p.email, p.email);
       await ssoLogin(app, { ...p, name: localPart(p.email) });
-      expect(await storedName(p.email)).toBe(localPart(p.email));
+      expect(await storedName(p.email)).toBe(p.email);
+    });
+
+    it('an id token name that differs from the address only by a capital is a name: it replaces either placeholder (P3)', async () => {
+      const capital = (email: string) => 'S' + localPart(email).slice(1);
+      const whole = named('');
+      await ssoLogin(app, whole);
+      expect(await storedName(whole.email)).toBe(whole.email);
+      await ssoLogin(app, { ...whole, name: capital(whole.email) });
+      expect(await storedName(whole.email)).toBe(capital(whole.email));
+
+      const firstPart = named('');
+      await ssoLogin(app, firstPart);
+      await setName(firstPart.email, localPart(firstPart.email));
+      await ssoLogin(app, { ...firstPart, name: capital(firstPart.email) });
+      expect(await storedName(firstPart.email)).toBe(capital(firstPart.email));
     });
 
     it('a placeholder is recognised exactly: the address with a capital is a chosen name and is kept by a sign-in', async () => {
