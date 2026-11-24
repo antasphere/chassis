@@ -303,12 +303,15 @@ describe('the name a person gets through the exchange: what they gave the hub, n
     ['Arabic', 'محمد'],
     ['a Persian name holding U+200C', 'نیک\u200Cنام'],
     ['a name holding U+200F', 'Sofie\u200F Maes'],
-    ['a non-breaking space inside', 'Sofie\u00A0Maes']
+    ['a non-breaking space inside', 'Sofie\u00A0Maes'],
+    ['digits only', '007']
   ];
   const UNUSABLE: Array<[string, unknown]> = [
     ['only zero-width spaces', '\u200B\u200B\u200B'],
     ['a name holding U+202E', 'Sofie\u202EMaes'],
     ['a name holding U+2028', 'Sofie\u2028Maes'],
+    ['a name holding U+2029', 'Sofie\u2029Maes'],
+    ['a name holding an isolate, U+2066 and U+2069', 'Sofie\u2066Maes\u2069'],
     ['a lone combining mark', '\u0301'],
     ['a lone high surrogate', 'Sofie\uD800Maes'],
     ['a lone low surrogate alone', '\uDC00'],
