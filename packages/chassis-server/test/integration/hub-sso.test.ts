@@ -461,12 +461,26 @@ describe('cloud edition: the SSO entrance', () => {
       await app.db.pool.query(`UPDATE "user" SET name = $1 WHERE email = $2`, [name, email]);
     }
 
-    it('a first sign-in whose id token carries a blank name: the whole address, never its first part', async () => {
-      for (const blank of ['', '   ']) {
-        const p = named(blank);
+    it('a first sign-in whose id token name is not usable (blank, 201 characters, NUL, line break): the whole address', async () => {
+      for (const bad of ['', '   ', 'a'.repeat(201), 'Sofie\u0000Maes', 'Sofie\nMaes']) {
+        const p = named(bad);
         await ssoLogin(app, p);
-        expect(await storedName(p.email)).toBe(p.email);
+        expect({ bad, stored: await storedName(p.email) }).toEqual({ bad, stored: p.email });
       }
+    });
+
+    it('a first sign-in whose id token name has spaces around it: stored trimmed', async () => {
+      const p = named('  Sofie Maes  ');
+      await ssoLogin(app, p);
+      expect(await storedName(p.email)).toBe('Sofie Maes');
+    });
+
+    it('a NUL byte in the name of a person who already holds a placeholder: the sign-in succeeds, the placeholder stays', async () => {
+      const p = named('');
+      await ssoLogin(app, p);
+      await setName(p.email, localPart(p.email));
+      await ssoLogin(app, { ...p, name: 'Sofie\u0000Maes' });
+      expect(await storedName(p.email)).toBe(localPart(p.email));
     });
 
     it('the old placeholder (the first part of the address) is replaced by a sign-in carrying the name', async () => {

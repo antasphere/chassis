@@ -280,12 +280,28 @@ describe('the name a person gets through the exchange: what they gave the hub, n
     expect(await storedName(p.email)).toBe(p.email);
   });
 
-  it('a blank name, a name of spaces, a name of 201 characters, a number: the whole address', async () => {
-    for (const name of ['', '   ', 'a'.repeat(201), 42]) {
+  it('a blank name, a name of spaces, of 201 characters, a NUL byte, a line break, a number: the whole address', async () => {
+    for (const name of [
+      '',
+      '   ',
+      'a'.repeat(201),
+      'Sofie\u0000Maes',
+      'Sofie\nMaes',
+      'Sofie\u0085Maes',
+      42
+    ]) {
       const p = person();
       await exchange(p, name);
       expect({ name, stored: await storedName(p.email) }).toEqual({ name, stored: p.email });
     }
+  });
+
+  it('a NUL byte in the name of a person who already holds a placeholder: the exchange succeeds, the placeholder stays', async () => {
+    const p = person();
+    await exchange(p);
+    await setName(p.email, localPart(p.email));
+    await exchange(p, 'Sofie\u0000Maes');
+    expect(await storedName(p.email)).toBe(localPart(p.email));
   });
 
   it('a name of exactly 200 characters is taken', async () => {

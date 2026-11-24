@@ -506,7 +506,7 @@ export class HubSsoService {
       // older one), or a claim that is not a usable name, leaves the whole
       // address as the name: a name is never guessed from an address.
       emailVerified: true,
-      name: connectTokenName(claims.name) ?? normalizedEmail,
+      name: usableHubName(claims.name) ?? normalizedEmail,
       jti,
       expiresAt: new Date(claims.exp * 1000)
     };
@@ -758,18 +758,23 @@ export class HubSsoService {
   }
 }
 
-/** The longest `name` claim of an exchange token taken as a person's name. */
-const MAX_CONNECT_NAME_LENGTH = 200;
+/** The longest name the hub asserts that is taken as a person's name. */
+const MAX_HUB_NAME_LENGTH = 200;
+
+/** A control character (Unicode category Cc: NUL, the C0 and C1 controls, a line break). */
+const CONTROL_CHARACTER = /\p{Cc}/u;
 
 /**
- * The exchange token's `name` claim, trimmed, when it is a usable name: a
- * string, non-blank once trimmed, at most 200 characters. Anything else is
- * null and the caller falls back to the whole address.
+ * The ONE rule for a name the hub asserts, on both paths (the exchange
+ * token's `name` claim, the id token's `name`): a string, trimmed,
+ * non-blank, at most 200 characters, holding no control character. A
+ * usable name is returned trimmed; anything else is null and the caller
+ * falls back to the whole address. Nothing fails on a bad name.
  */
-function connectTokenName(raw: unknown): string | null {
+function usableHubName(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
   const name = raw.trim();
-  if (!name || name.length > MAX_CONNECT_NAME_LENGTH) return null;
+  if (!name || name.length > MAX_HUB_NAME_LENGTH || CONTROL_CHARACTER.test(name)) return null;
   return name;
 }
 
@@ -795,9 +800,9 @@ function buildUserAssertion(idClaims: JWTPayload): HubSsoAssertion {
     throw new Error('id_token carries no usable email claim');
   }
   const normalizedEmail = email.toLowerCase();
-  const rawName = idClaims.name;
-  // A blank profile name leaves the whole address: never its first part.
-  const name = typeof rawName === 'string' && rawName.trim() ? rawName : normalizedEmail;
+  // The same rule as the exchange: a name that is not usable (blank, too
+  // long, a control character) leaves the whole address, never its first part.
+  const name = usableHubName(idClaims.name) ?? normalizedEmail;
   return {
     sub,
     email: normalizedEmail,
