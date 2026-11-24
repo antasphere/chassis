@@ -762,20 +762,34 @@ export class HubSsoService {
 /** The longest name the hub asserts that is taken as a person's name. */
 const MAX_HUB_NAME_LENGTH = 200;
 
-/** A control character (Unicode category Cc: NUL, the C0 and C1 controls, a line break). */
-const CONTROL_CHARACTER = /\p{Cc}/u;
+/** A name holds at least one letter or digit. */
+const LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
+
+/**
+ * What a name never holds: a control character (Cc: NUL, the C0 and C1
+ * controls, a line break), a line or paragraph separator (Zl, Zp), a lone
+ * surrogate (Cs: with the `u` flag a paired surrogate is one code point and
+ * never matches, a lone one does), a bidirectional embedding, override or
+ * isolate control (U+202A to U+202E, U+2066 to U+2069). The joiners
+ * (U+200C, U+200D), the two directional marks (U+200E, U+200F) and a
+ * non-breaking space stay allowed: some scripts need them.
+ */
+const FORBIDDEN_IN_NAME = /[\p{Cc}\p{Zl}\p{Zp}\p{Cs}‪-‮⁦-⁩]/u;
 
 /**
  * The ONE rule for a name the hub asserts, on both paths (the exchange
- * token's `name` claim, the id token's `name`): a string, trimmed,
- * non-blank, at most 200 characters, holding no control character. A
- * usable name is returned trimmed; anything else is null and the caller
- * falls back to the whole address. Nothing fails on a bad name.
+ * token's `name` claim, the id token's `name`), the contract's §9, the same
+ * rule the hub applies before it signs the claim: a string, trimmed,
+ * non-blank, at most 200 characters, at least one letter or digit, none of
+ * the forbidden characters. A usable name is returned trimmed; anything else
+ * is null and the caller falls back to the whole address. Nothing fails on a
+ * bad name, and a bad one (a lone surrogate included) is never stored.
  */
 function usableHubName(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
   const name = raw.trim();
-  if (!name || name.length > MAX_HUB_NAME_LENGTH || CONTROL_CHARACTER.test(name)) return null;
+  if (!name || name.length > MAX_HUB_NAME_LENGTH) return null;
+  if (!LETTER_OR_DIGIT.test(name) || FORBIDDEN_IN_NAME.test(name)) return null;
   return name;
 }
 

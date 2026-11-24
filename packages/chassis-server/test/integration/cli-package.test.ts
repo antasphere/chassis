@@ -296,6 +296,53 @@ describe('the name a person gets through the exchange: what they gave the hub, n
     }
   });
 
+  // The contract's §9: the one set of examples the hub and the chassis both test.
+  const USABLE: Array<[string, string]> = [
+    ['accents and punctuation', "Zoë O'Brien-Smith"],
+    ['Han characters', '李小龙'],
+    ['Arabic', 'محمد'],
+    ['a Persian name holding U+200C', 'نیک‌نام'],
+    ['a name holding U+200F', 'Sofie‏ Maes'],
+    ['a non-breaking space inside', 'Sofie Maes']
+  ];
+  const UNUSABLE: Array<[string, unknown]> = [
+    ['only zero-width spaces', '​​​'],
+    ['a name holding U+202E', 'Sofie‮Maes'],
+    ['a name holding U+2028', 'Sofie Maes'],
+    ['a lone combining mark', '́'],
+    ['a lone high surrogate', 'Sofie\uD800Maes'],
+    ['a lone low surrogate alone', '\uDC00'],
+    ['an emoji alone', '🙂'],
+    ['a NUL byte', 'Sofie\u0000Maes'],
+    ['a line break', 'Sofie\nMaes'],
+    ['201 characters', 'a'.repeat(201)],
+    ['spaces only', '   ']
+  ];
+
+  it('§9, usable: every example is taken, as given', async () => {
+    for (const [label, name] of USABLE) {
+      const p = person();
+      await exchange(p, name);
+      expect({ label, stored: await storedName(p.email) }).toEqual({ label, stored: name });
+    }
+  });
+
+  it('§9, not usable: every example gives the whole address, the exchange never fails, nothing of the name is stored', async () => {
+    for (const [label, name] of UNUSABLE) {
+      const p = person();
+      await exchange(p, name);
+      expect({ label, stored: await storedName(p.email) }).toEqual({ label, stored: p.email });
+    }
+  });
+
+  it('§9, not usable, over a placeholder: a lone surrogate leaves the placeholder as it was', async () => {
+    const p = person();
+    await exchange(p);
+    await setName(p.email, localPart(p.email));
+    await exchange(p, 'Sofie\uD800Maes');
+    expect(await storedName(p.email)).toBe(localPart(p.email));
+  });
+
   it('a NUL byte in the name of a person who already holds a placeholder: the exchange succeeds, the placeholder stays', async () => {
     const p = person();
     await exchange(p);
