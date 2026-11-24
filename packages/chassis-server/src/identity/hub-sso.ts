@@ -681,9 +681,10 @@ export class HubSsoService {
   /**
    * A sign-in replaces a placeholder name, and only a placeholder. The
    * stored name is overwritten with the asserted one ONLY when the stored
-   * name is a placeholder (the stored or the asserted address, or the first
-   * part of either), the asserted name is a real one (non-blank, not itself
-   * a placeholder) and the two differ. A name a person or an owner chose is
+   * name is a placeholder (exactly, case-sensitive: the lower-cased stored
+   * or asserted address, or the first part of either), the asserted name is
+   * a real one (non-blank, not an address or its first part in any case)
+   * and the two differ. A name a person or an owner chose is
    * never touched, which is why `overrideUserInfo` stays off. Runs BEFORE
    * the email sync, so the stored address is still the one the placeholder
    * was made from; the write is conditional on the name read, so a name
@@ -697,9 +698,9 @@ export class HubSsoService {
       .limit(1);
     if (!row) throw new HubSsoLoginError('sso_login_failed', 'user row missing after callback');
     const emails = [row.email, assertion.email];
-    if (!isPlaceholderName(row.name, emails)) return;
+    if (!isStoredPlaceholder(row.name, emails)) return;
     const asserted = assertion.name.trim();
-    if (!asserted || isPlaceholderName(asserted, emails) || asserted === row.name) return;
+    if (!asserted || isAddressLikeName(asserted, emails) || asserted === row.name) return;
     await this.opts.db
       .update(userTable)
       .set({ name: asserted, updatedAt: new Date() })
@@ -779,16 +780,27 @@ function usableHubName(raw: unknown): string | null {
 }
 
 /**
- * A name nobody gave: once trimmed and lower-cased it equals one of the
- * addresses, or the first part of one (what versions before this one wrote
- * when the token carried no name).
+ * A STORED name nobody gave: once trimmed it equals, exactly (case-sensitive),
+ * one of the lower-cased addresses or the first part of one. Every version
+ * that wrote a placeholder wrote it in lower case (the normalized address, or
+ * its first part before this one), so a name with a capital in it is someone's
+ * choice and is never taken for a placeholder.
  */
-function isPlaceholderName(name: string, emails: readonly string[]): boolean {
-  const n = name.trim().toLowerCase();
+function isStoredPlaceholder(name: string, emails: readonly string[]): boolean {
+  const n = name.trim();
   return emails.some((raw) => {
     const email = raw.toLowerCase();
     return n === email || n === email.split('@')[0];
   });
+}
+
+/**
+ * An ASSERTED name that is only an address in disguise: once trimmed and
+ * lower-cased it equals one of the addresses or the first part of one. Such
+ * a name is never written over a placeholder (it would be a placeholder too).
+ */
+function isAddressLikeName(name: string, emails: readonly string[]): boolean {
+  return isStoredPlaceholder(name.toLowerCase(), emails);
 }
 
 /** The SSO-login user assertion, from the VERIFIED id_token ONLY. */

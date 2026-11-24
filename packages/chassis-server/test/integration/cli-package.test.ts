@@ -346,6 +346,21 @@ describe('the name a person gets through the exchange: what they gave the hub, n
     await exchange(p, ` ${localPart(p.email).toUpperCase()} `);
     expect(await storedName(p.email)).toBe(localPart(p.email));
   });
+
+  it('a placeholder is recognised exactly: the address with a capital is a chosen name and is kept, the lower-case one is replaced', async () => {
+    const chosen = person();
+    await exchange(chosen);
+    const capitalised = localPart(chosen.email).charAt(0).toUpperCase() + localPart(chosen.email).slice(1);
+    await setName(chosen.email, capitalised);
+    await exchange(chosen, 'Sofie Maes');
+    expect(await storedName(chosen.email)).toBe(capitalised);
+
+    const placeholder = person();
+    await exchange(placeholder);
+    await setName(placeholder.email, localPart(placeholder.email));
+    await exchange(placeholder, 'Sofie Maes');
+    expect(await storedName(placeholder.email)).toBe('Sofie Maes');
+  });
 });
 
 describe('cloud edition, released without its CLI package', () => {

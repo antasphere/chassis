@@ -519,6 +519,15 @@ describe('cloud edition: the SSO entrance', () => {
       expect(await storedName(p.email)).toBe(localPart(p.email));
     });
 
+    it('a placeholder is recognised exactly: the address with a capital is a chosen name and is kept by a sign-in', async () => {
+      const p = named('');
+      await ssoLogin(app, p);
+      const capitalised = 'S' + p.email.slice(1);
+      await setName(p.email, capitalised);
+      await ssoLogin(app, { ...p, name: 'Sofie Maes' });
+      expect(await storedName(p.email)).toBe(capitalised);
+    });
+
     it('the placeholder of the address before a change is replaced at the sign-in that changes it', async () => {
       const p = named('');
       await ssoLogin(app, p);
