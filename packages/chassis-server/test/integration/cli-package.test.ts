@@ -301,15 +301,15 @@ describe('the name a person gets through the exchange: what they gave the hub, n
     ['accents and punctuation', "Zoë O'Brien-Smith"],
     ['Han characters', '李小龙'],
     ['Arabic', 'محمد'],
-    ['a Persian name holding U+200C', 'نیک‌نام'],
-    ['a name holding U+200F', 'Sofie‏ Maes'],
-    ['a non-breaking space inside', 'Sofie Maes']
+    ['a Persian name holding U+200C', 'نیک\u200Cنام'],
+    ['a name holding U+200F', 'Sofie\u200F Maes'],
+    ['a non-breaking space inside', 'Sofie\u00A0Maes']
   ];
   const UNUSABLE: Array<[string, unknown]> = [
-    ['only zero-width spaces', '​​​'],
-    ['a name holding U+202E', 'Sofie‮Maes'],
-    ['a name holding U+2028', 'Sofie Maes'],
-    ['a lone combining mark', '́'],
+    ['only zero-width spaces', '\u200B\u200B\u200B'],
+    ['a name holding U+202E', 'Sofie\u202EMaes'],
+    ['a name holding U+2028', 'Sofie\u2028Maes'],
+    ['a lone combining mark', '\u0301'],
     ['a lone high surrogate', 'Sofie\uD800Maes'],
     ['a lone low surrogate alone', '\uDC00'],
     ['an emoji alone', '🙂'],

@@ -470,7 +470,7 @@ describe('cloud edition: the SSO entrance', () => {
     });
 
     it('§9 on the browser path: only zero-width spaces, a U+202E, a lone surrogate give the whole address, and the sign-in lands', async () => {
-      for (const bad of ['​​', 'Sofie‮Maes', 'Sofie\uD800Maes']) {
+      for (const bad of ['\u200B\u200B', 'Sofie\u202EMaes', 'Sofie\uD800Maes']) {
         const p = named(bad);
         await ssoLogin(app, p);
         expect({ bad, stored: await storedName(p.email) }).toEqual({ bad, stored: p.email });

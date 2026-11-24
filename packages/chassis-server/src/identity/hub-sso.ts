@@ -774,7 +774,7 @@ const LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
  * (U+200C, U+200D), the two directional marks (U+200E, U+200F) and a
  * non-breaking space stay allowed: some scripts need them.
  */
-const FORBIDDEN_IN_NAME = /[\p{Cc}\p{Zl}\p{Zp}\p{Cs}‪-‮⁦-⁩]/u;
+const FORBIDDEN_IN_NAME = /[\p{Cc}\p{Zl}\p{Zp}\p{Cs}\u202A-\u202E\u2066-\u2069]/u;
 
 /**
  * The ONE rule for a name the hub asserts, on both paths (the exchange
