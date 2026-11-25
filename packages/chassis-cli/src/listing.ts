@@ -228,17 +228,10 @@ export function servedKey(plan: SignInPlan, profile: CliProfile | undefined): st
   return plan.via === 'key' ? text(profile?.apiKey) : plan.keptKey?.apiKey;
 }
 
-/** A copy of a profile without one key (its own, a kept key, or an old slot): what is left once a site refused it. */
-function withoutKey(profile: CliProfile, apiKey: string): CliProfile {
+/** A copy of a profile without its own key: how `login` sees it once its site refused that key. */
+function withoutOwnKey(profile: CliProfile): CliProfile {
   const copy = structuredClone(profile);
-  const is = (k: unknown): boolean => typeof k === 'string' && k.trim() === apiKey.trim();
-  const keyOf = (entry: unknown): unknown =>
-    typeof entry === 'object' && entry !== null ? (entry as { apiKey?: unknown }).apiKey : undefined;
-  if (is(copy.apiKey)) delete copy.apiKey;
-  if (Array.isArray(copy.hubKeys)) copy.hubKeys = copy.hubKeys.filter((k) => !is(keyOf(k)));
-  if (typeof copy.connectKeys === 'object' && copy.connectKeys !== null) {
-    copy.connectKeys = Object.fromEntries(Object.entries(copy.connectKeys).filter(([, e]) => !is(keyOf(e))));
-  }
+  delete copy.apiKey;
   return copy;
 }
 
@@ -386,11 +379,14 @@ function entryOf(input: DescribeProfilesInput, row: ProfileRow, isDefault: boole
   let state: ProfileSignInState = plan.state;
   let fix = fixOfPlan(plan, row, bin);
   if (check?.checked === 'key_refused') {
-    // The site refused the key a command would send: the login of its site, decided without that key.
+    // The site refused the key a command would send: the login its site asks for. A refused own key
+    // is planned without it (what `login` reads). A refused kept key still tells `login` which hub
+    // and which login signed the profile in, so `login` alone signs it in again.
     state = 'needs_login';
-    const refused = servedKey(plan, planned);
-    const rest = planned && refused ? withoutKey(planned, refused) : planned;
-    fix = loginFixOf(planFor(identity, env, row.name, rest, row.site), row, bin);
+    fix =
+      plan.via === 'key' && planned
+        ? loginFixOf(planFor(identity, env, row.name, withoutOwnKey(planned), row.site), row, bin)
+        : { kind: 'hub_login', argv: loginArgv(row, bin) };
   } else if (check?.checked === 'unreachable') {
     // A leftover at a loopback or private address may be forgotten; a remote site that is down is an
     // outage, and only an attempt again is offered (PRDCT-3060).
