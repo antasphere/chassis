@@ -4,8 +4,8 @@ import {
   type CliConfig,
   type CliSiteFacts
 } from '@antasphere/cli-core';
-import type { Route } from '@antasphere/chassis-cli/testing';
-import { cli } from '@chassis-cli-test/host';
+import { routedHarness, type Route } from '@antasphere/chassis-cli/testing';
+import { cli, run } from '@chassis-cli-test/host';
 
 /**
  * The shared fixtures of the sign-in suites (PRDCT-2947): `login`, `logout`,
@@ -237,6 +237,16 @@ export function seedHubLogin(env: Record<string, string | undefined>, name = 'de
 export function fresh(hub: string | null, federated = true): CliSiteFacts {
   return { hub, federated, name: 'Inst', cliVersion: '1.0.0', seenAt: new Date().toISOString() };
 }
+
+/** The version of the CLI under test, as its own `--version` prints it (each host's own). */
+export async function cliVersionOf(): Promise<string> {
+  const h = routedHarness([]);
+  await run(['--version'], h.io);
+  return h.out().trim();
+}
+
+/** A version newer than `version` (its major, plus one). */
+export const newerThan = (version: string): string => `${Number(version.split('.')[0]) + 1}.0.0`;
 
 /** A kept key of a profile, filed by hub and account (cli-core 0.7.0 `hubKeys`). */
 export function kept(hub: string, email: string, apiKey: string) {

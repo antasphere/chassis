@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { HUB_TOOL, loadConfig as loadCoreConfig } from '@antasphere/cli-core';
-import { routedHarness, tempConfigEnv, type Route } from '@antasphere/chassis-cli/testing';
+import { tempConfigEnv } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
-import { cloudInstanceBody, fresh, kept, meBody, MINTED_META, seedHub, seedTool } from './signin-fixtures.js';
+import { fresh, kept, seedHub, seedTool } from './signin-fixtures.js';
+import { ADA, BEA, CY, fleet, HUB_A, HUB_B, OLD, SITE_A, SITE_B, trace } from './fleet.js';
 
 /**
  * The sign-in follows the site (R2, PRDCT-3521, PRDCT-5192), and the two
@@ -21,214 +22,8 @@ import { cloudInstanceBody, fresh, kept, meBody, MINTED_META, seedHub, seedTool 
  */
 
 const { loadConfig } = cli;
-const { bin, envPrefix: P, keyPrefix: K, cloudUrl } = cli.identity;
+const { bin, envPrefix: P, cloudUrl } = cli.identity;
 const CLOUD = new URL(cloudUrl).origin;
-
-const HUB_A = 'https://hub-a.example.com';
-const HUB_B = 'https://hub-b.example.com';
-const SITE_A = 'https://site-a.example.com';
-const SITE_B = 'https://site-b.example.com';
-const OLD = 'https://old.example.com';
-
-const ADA = 'ada@example.com';
-const BEA = 'bea@example.com';
-const CY = 'cy@example.com';
-
-interface Site {
-  origin: string;
-  names: string | null;
-  trusts: string;
-}
-
-const SITES: Site[] = [
-  { origin: SITE_A, names: HUB_A, trusts: HUB_A },
-  { origin: SITE_B, names: HUB_B, trusts: HUB_B },
-  { origin: OLD, names: null, trusts: HUB_A }
-];
-
-type Harness = ReturnType<typeof routedHarness>;
-
-const deny = (status: number, code: string, message: string) => ({
-  status,
-  body: { error: { code, message } }
-});
-const bearer = (headers: Headers) => headers.get('authorization')?.replace(/^Bearer /, '') ?? '';
-const hostOf = (origin: string) => new URL(origin).hostname.split('.')[0]!;
-const nameOf = (email: string) => email.split('@')[0]!.replace(/^./, (c) => c.toUpperCase());
-
-function fleet() {
-  const hubKeys = new Map<string, { hub: string; email: string; alive: boolean }>();
-  const toolKeys = new Map<string, { site: string; email: string; alive: boolean }>();
-  const tokens = new Map<string, { hub: string; email: string; resource: string }>();
-  const harnesses: Harness[] = [];
-  let seq = 0;
-  let exchanges = 0;
-
-  function hubKey(hub: string, email: string): string {
-    seq += 1;
-    const k = `ant_${hostOf(hub)}${seq}_secretsecretsecret`;
-    hubKeys.set(k, { hub, email, alive: true });
-    return k;
-  }
-
-  function toolKey(site: string, email: string, kind = 'kept'): string {
-    seq += 1;
-    const k = `${K}_${hostOf(site)}${seq}_${kind}${kind}${kind}`;
-    toolKeys.set(k, { site, email, alive: true });
-    return k;
-  }
-
-  const routes: Route[] = [];
-  for (const hub of [HUB_A, HUB_B]) {
-    routes.push(
-      {
-        method: 'POST',
-        origin: hub,
-        path: /\/api\/v1\/sso\/tool-token$/,
-        reply: ({ headers, body }) => {
-          const who = hubKeys.get(bearer(headers));
-          if (!who || who.hub !== hub || !who.alive) return deny(401, 'unauthenticated', 'unknown hub key');
-          const resource = (body as { resource?: string }).resource ?? '';
-          const site = SITES.find((s) => `${s.origin}/mcp` === resource);
-          if (!site || site.trusts !== hub) {
-            return deny(400, 'unknown_resource', 'This resource is not a registered tool');
-          }
-          seq += 1;
-          const token = `jwt-${seq}`;
-          tokens.set(token, { hub, email: who.email, resource });
-          return { body: { token, expiresAt: '2026-11-25T00:02:00.000Z', hubRefreshToken: `hrt-${seq}` } };
-        }
-      },
-      {
-        method: 'POST',
-        origin: hub,
-        path: /\/api\/v1\/cli\/auth\/request$/,
-        reply: () => ({ body: { sent: true } })
-      },
-      {
-        method: 'POST',
-        origin: hub,
-        path: /\/api\/v1\/cli\/auth\/complete$/,
-        reply: ({ body }) => {
-          const email = (body as { email: string }).email;
-          return {
-            status: 201,
-            body: {
-              key: hubKey(hub, email),
-              apiKey: MINTED_META,
-              user: { id: 'u1', email, name: nameOf(email) },
-              workspaceId: 'org-1'
-            }
-          };
-        }
-      },
-      {
-        method: 'DELETE',
-        origin: hub,
-        path: /\/api\/v1\/cli\/auth\/key$/,
-        reply: ({ headers }) => {
-          const held = hubKeys.get(bearer(headers));
-          if (!held || held.hub !== hub || !held.alive) return deny(401, 'unauthenticated', 'unknown key');
-          held.alive = false;
-          return { body: { revoked: true, id: 'k' } };
-        }
-      }
-    );
-  }
-  for (const site of SITES) {
-    routes.push(
-      {
-        method: 'GET',
-        origin: site.origin,
-        path: /\/api\/v1\/instance$/,
-        reply: () => ({ body: cloudInstanceBody(site.names ?? undefined) })
-      },
-      {
-        method: 'POST',
-        origin: site.origin,
-        path: /\/api\/v1\/sso\/cli-connect$/,
-        reply: ({ body }) => {
-          const token = (body as { token?: string }).token ?? '';
-          const claim = tokens.get(token);
-          if (!claim || claim.resource !== `${site.origin}/mcp` || claim.hub !== site.trusts) {
-            return deny(401, 'invalid_token', 'token refused');
-          }
-          tokens.delete(token);
-          exchanges += 1;
-          const k = toolKey(site.origin, claim.email, 'mint');
-          return {
-            status: 201,
-            body: {
-              key: k,
-              apiKey: MINTED_META,
-              user: { id: 'u1', email: claim.email, name: nameOf(claim.email) },
-              workspaceId: null
-            }
-          };
-        }
-      },
-      {
-        method: 'GET',
-        origin: site.origin,
-        path: /\/api\/v1\/me$/,
-        reply: ({ headers }) => {
-          const held = toolKeys.get(bearer(headers));
-          if (!held || held.site !== site.origin || !held.alive) {
-            return deny(401, 'invalid_api_key', 'API key not recognized');
-          }
-          return { body: meBody({ name: nameOf(held.email), email: held.email }) };
-        }
-      },
-      {
-        method: 'DELETE',
-        origin: site.origin,
-        path: /\/api\/v1\/cli\/auth\/key$/,
-        reply: ({ headers }) => {
-          const held = toolKeys.get(bearer(headers));
-          if (!held || held.site !== site.origin || !held.alive)
-            return deny(401, 'unauthenticated', 'unknown key');
-          held.alive = false;
-          return { body: { revoked: true, id: 'k' } };
-        }
-      }
-    );
-  }
-
-  return {
-    hubKey,
-    toolKey,
-    exchanges: () => exchanges,
-    alive: (k: string) => hubKeys.get(k)?.alive ?? toolKeys.get(k)?.alive ?? false,
-    /** A harness on the fleet, watched by the invariants. */
-    harness(env: Record<string, string | undefined>): Harness {
-      const h = routedHarness(routes, env);
-      harnesses.push(h);
-      return h;
-    },
-    /** Every request of the test's harnesses that carried a key to another origin than its own. */
-    violations(): string[] {
-      const found: string[] = [];
-      for (const h of harnesses) {
-        for (const c of h.wire) {
-          const carried = `${c.auth ?? ''} ${JSON.stringify(c.body ?? null)} ${c.path}`;
-          for (const [k, home] of hubKeys) {
-            if (carried.includes(k) && c.origin !== home.hub) {
-              found.push(`hub key of ${home.hub} sent to ${c.origin}${c.path}`);
-            }
-          }
-          for (const [k, home] of toolKeys) {
-            if (carried.includes(k) && c.origin !== home.site) {
-              found.push(`tool key of ${home.site} sent to ${c.origin}${c.path}`);
-            }
-          }
-        }
-      }
-      return found;
-    },
-    /** How many requests the test's harnesses sent. */
-    requests: () => harnesses.reduce((n, h) => n + h.wire.length, 0)
-  };
-}
 
 let f: ReturnType<typeof fleet>;
 
@@ -239,8 +34,6 @@ beforeEach(() => {
 afterEach(() => {
   expect(f.violations()).toEqual([]);
 });
-
-const trace = (h: Harness) => h.wire.map((c) => `${c.method} ${c.origin}${c.path}`);
 
 /** A machine with a login at each hub (ada at hub-a, bea at hub-b), `active` being the hub file's active one. */
 async function twoLogins(active: 'a' | 'b' = 'a') {

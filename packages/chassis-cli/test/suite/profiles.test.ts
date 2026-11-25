@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { routedHarness, tempConfigEnv } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
 import {
+  cliVersionOf,
   cloudInstanceRoute,
   exchangeRoutes,
   filesRoute,
@@ -280,7 +281,7 @@ describe('profiles, use, config show', () => {
       ['', 'bare', 'http://bare', `not reached yet: ${bin} profiles --check`, '-']
     ]);
     expect(h.out().split('\n\n')[1]).toBe(
-      `This CLI 0.0.1 on a-host-name.\nAntasphere logins: ada@x.co at ${HUB} (default).\n`
+      `This CLI ${await cliVersionOf()} on a-host-name.\nAntasphere logins: ada@x.co at ${HUB} (default).\n`
     );
     for (const tag of ['own', 'hub', 'old', 'stray']) expect(h.out()).not.toContain(key(tag).slice(0, 13));
     expect(h.wire).toEqual([]);
@@ -295,7 +296,7 @@ describe('profiles, use, config show', () => {
       ['*', 'cloud', CLOUD, `not reached yet: ${bin} profiles --check`, '-']
     ]);
     expect(h.out().split('\n\n')[1]).toBe(
-      'This CLI 0.0.1 on a-host-name.\nNo Antasphere login on this machine.\n'
+      `This CLI ${await cliVersionOf()} on a-host-name.\nNo Antasphere login on this machine.\n`
     );
   });
 
@@ -328,7 +329,7 @@ describe('profiles, use, config show', () => {
     });
     expect(JSON.parse(h.out())).toEqual({
       machine: 'a-host-name',
-      cliVersion: '0.0.1',
+      cliVersion: await cliVersionOf(),
       defaultSite: 'http://own',
       environment: { url: null, key: false, hubUrl: null },
       logins: [{ hub: HUB, email: 'ada@x.co', name: 'default' }],
