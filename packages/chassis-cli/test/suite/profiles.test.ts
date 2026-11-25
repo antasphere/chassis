@@ -479,3 +479,61 @@ describe('profiles, use, config show', () => {
     }
   });
 });
+
+describe('the profiles commands never resolve a command’s context', () => {
+  it(`with ${P}_API_KEY exported and no ${P}_URL, the default at another site than the cloud: each answers, and the listing says the key's effect`, async () => {
+    const env = await tempConfigEnv();
+    seedTool(env, {
+      activeProfile: 'own',
+      profiles: {
+        own: { apiKey: key('own'), baseUrl: 'https://own.example.com' },
+        spare: { apiKey: key('spare'), baseUrl: 'https://spare.example.com' }
+      }
+    });
+    const exported = { ...env, [`${P}_API_KEY`]: key('exported') };
+    const revoke = {
+      method: 'DELETE',
+      path: /\/api\/v1\/cli\/auth\/key$/,
+      reply: () => ({ body: { revoked: true, id: 'k' } })
+    };
+    // A command that resolves its context is refused there (the key belongs to the cloud)...
+    const refused = routedHarness([], exported);
+    expect(await run(['whoami'], refused.io)).toBe(1);
+    expect(refused.err()).toContain(`${P}_API_KEY is a key of ${CLOUD}`);
+
+    // ...the profiles commands are not: the variable is an effect the listing shows.
+    const list = routedHarness([], exported);
+    expect(await run(['profiles'], list.io)).toBe(0);
+    expect(list.out()).toContain(
+      `${P}_API_KEY is exported: commands on ${CLOUD} use it; commands on other sites refuse.`
+    );
+    const json = routedHarness([], exported);
+    expect(await run(['profiles', '--json'], json.io)).toBe(0);
+    const listing = JSON.parse(json.out()) as {
+      environment: { key: boolean };
+      profiles: Array<{ name: string; environment: Array<{ variable: string; effect: string }> }>;
+    };
+    expect(listing.environment.key).toBe(true);
+    expect(Object.fromEntries(listing.profiles.map((p) => [p.name, p.environment]))).toEqual({
+      cloud: [{ variable: `${P}_API_KEY`, effect: 'replaces' }],
+      own: [{ variable: `${P}_API_KEY`, effect: 'refuses' }],
+      spare: [{ variable: `${P}_API_KEY`, effect: 'refuses' }]
+    });
+    const add = routedHarness([ossInstanceRoute], exported);
+    expect(await run(['profiles', 'add', 'https://new.example.com'], add.io)).toBe(0);
+    const check = routedHarness([ossInstanceRoute, meRoute()], exported);
+    expect(await run(['profiles', '--check'], check.io)).toBe(0);
+    const rename = routedHarness([], exported);
+    expect(await run(['profiles', 'rename', 'spare', 'second'], rename.io)).toBe(0);
+    const remove = routedHarness([revoke], exported);
+    expect(await run(['profiles', 'remove', 'second'], remove.io)).toBe(0);
+    expect(remove.wire.map((c) => `${c.method} ${c.origin} ${c.auth}`)).toEqual([
+      `DELETE https://spare.example.com Bearer ${key('spare')}`
+    ]);
+    // The exported key never left this machine.
+    for (const h of [list, json, add, check, rename, remove]) {
+      expect(JSON.stringify(h.wire)).not.toContain(key('exported'));
+    }
+    expect(Object.keys(loadConfig(env).profiles)).toEqual(['own', 'new.example.com']);
+  });
+});
