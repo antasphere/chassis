@@ -1,21 +1,16 @@
 import { PlatformApiError, type ChassisClient, type ClientOptions } from '@antasphere/chassis-sdk';
 import type { Command } from 'commander';
 import {
-  cachedConnectKey,
   CLOUD_PROFILE,
-  CliAuthClient,
+  CliAuthError,
   CliUsageError,
   connectOnDemand,
   firstSet,
-  HUB_TOOL,
-  loadConfig as loadCoreConfig,
+  normalizeUrl,
   printJson as corePrintJson,
   refreshConnectKey,
-  resolveApiKey,
   resolveBaseUrl,
   sameInstance,
-  saveConfig as saveCoreConfig,
-  selectHubProfile,
   selectProfile,
   type CliIo as CoreCliIo,
   type ConnectOnDemandOptions,
@@ -157,13 +152,111 @@ export function printJson(io: CliIo, value: unknown): void {
   corePrintJson(rawSinks.get(io) ?? io, value);
 }
 
+// ── What one run met on the wire ─────────────────────────────────────────────
+
+/**
+ * What the runner learns of one invocation, for the two sentences only it
+ * can say (program.ts): the context the command resolved, whether a request
+ * carrying the profile's OWN key was answered 401, and the requests that
+ * could not connect at all (the error each threw, and the origin it was sent
+ * to). Keyed by the run's io: `beginRun` makes it, `resolveContext` fills it.
+ */
+interface RunState {
+  ctx: CliContext | undefined;
+  ownKeyRefused: boolean;
+  failures: WeakMap<object, string>;
+  lastFailure: { error: object; origin: string } | undefined;
+}
+
+const runs = new WeakMap<CliIo, RunState>();
+
+/** The origin of a URL, or undefined when it does not parse. */
+function originOf(url: string): string | undefined {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A system error's `code` (`ECONNREFUSED`, …), when it carries one. */
+function codeOf(e: unknown): string | undefined {
+  if (typeof e !== 'object' || e === null || !('code' in e)) return undefined;
+  const code = (e as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+/** Whether a fetch rejection means nothing answered: the fetch's TypeError, or a refused or unknown host. */
+function cannotConnect(e: unknown): e is object {
+  if (e instanceof TypeError) return true;
+  const code = codeOf(e) ?? codeOf((e as { cause?: unknown } | null)?.cause);
+  return code === 'ECONNREFUSED' || code === 'ENOTFOUND';
+}
+
+/**
+ * The io one invocation runs on (the runner calls it once): every human sink
+ * sanitized (`ttySafeIo`), and a fetch that remembers each request that could
+ * not connect, so the runner can name the profile whose site does not answer
+ * (PRDCT-3060) instead of printing the bare network error.
+ */
+export function beginRun(rawIo: CliIo): CliIo {
+  const state: RunState = {
+    ctx: undefined,
+    ownKeyRefused: false,
+    failures: new WeakMap(),
+    lastFailure: undefined
+  };
+  const base = rawIo.fetch ?? globalThis.fetch.bind(globalThis);
+  const recording = (async (input: string | URL | Request, init?: RequestInit) => {
+    try {
+      return await base(input, init);
+    } catch (e) {
+      if (cannotConnect(e)) {
+        const origin = originOf(input instanceof Request ? input.url : input.toString()) ?? '';
+        state.failures.set(e, origin);
+        state.lastFailure = { error: e, origin };
+      }
+      throw e;
+    }
+  }) as typeof globalThis.fetch;
+  const io = ttySafeIo({ ...rawIo, fetch: recording });
+  runs.set(io, state);
+  return io;
+}
+
+/** Whether a site is at a loopback or private address (where a leftover profile is a dead dev server). */
+export function isLocalSite(url: string): boolean {
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
+  if (host === 'localhost' || host.endsWith('.localhost') || host === '::1') return true;
+  const ip = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!ip) return false;
+  const [a, b, c, d] = ip.slice(1).map(Number) as [number, number, number, number];
+  if ([a, b, c, d].some((n) => n > 255)) return false;
+  return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+// ── The context ──────────────────────────────────────────────────────────────
+
 /**
  * Where this invocation's credential came from, in the order it resolves:
  * the flag (or `--api-key-stdin`), the tool's key variable, the profile's own
- * key (the tool's login), the key the hub exchange cached on the profile, a
- * fresh hub exchange run by this very command, or nothing yet.
+ * key (the tool's login), a key the profile keeps from an Antasphere login
+ * (served with no exchange), a fresh hub exchange run by this very command,
+ * or nothing yet.
  */
 export type CredentialSource = 'flag' | 'env' | 'profile' | 'hub-cache' | 'hub-exchange' | 'none';
+
+/** The Antasphere login that signed a command in: its hub, and its account's address. */
+export interface CliSignedInLogin {
+  hub: string;
+  email: string;
+}
 
 export interface CliContext<TClient extends ChassisClient<string> = ChassisClient<string>> {
   client: TClient;
@@ -171,13 +264,20 @@ export interface CliContext<TClient extends ChassisClient<string> = ChassisClien
   apiKey: string | undefined;
   /** Where `apiKey` came from (`whoami` says it; the recovery reads it). */
   credentialSource: CredentialSource;
+  /**
+   * The Antasphere login that signed this command in (`hub-cache` or
+   * `hub-exchange`), null otherwise: the login at the hub the SITE names,
+   * never the machine's active one (`whoami` names it, PRDCT-3364).
+   */
+  login: CliSignedInLogin | null;
   json: boolean;
   io: CliIo;
   /**
    * The profile this run selected (cli-core `selectProfile`: --profile, the
    * instance URL, the active profile, the implicit `cloud` profile). Always
    * named on a tool with a cloud URL; `profileCreated` says it is not on
-   * disk yet.
+   * disk yet. It is always the profile OF `baseUrl`: a profile and a URL that
+   * name two sites are refused before any request.
    */
   profileName: string | undefined;
   profileSource: ProfileSource | undefined;
@@ -206,6 +306,12 @@ interface GlobalOpts {
 /** The context whose selection reached the wire, for the runner's error path. */
 const appliedContexts = new WeakMap<CliIo, CliContext>();
 
+/** What `login --hub` and `login --email` hand the exchange (`connectOptions`). */
+export interface CliSignInChoice {
+  hubUrl?: string | undefined;
+  email?: string | undefined;
+}
+
 /** What `createContext` hands back: the context functions of ONE tool. */
 export interface CliContextKit<TClient extends ChassisClient<string>> {
   resolveProfile(
@@ -217,14 +323,30 @@ export interface CliContextKit<TClient extends ChassisClient<string>> {
   workspaceSource(ctx: CliContext<TClient>): WorkspaceSource;
   explainWorkspaceRefusal(io: CliIo, e: unknown): Promise<string | null>;
   workspaceNotFoundHint(io: CliIo): string;
+  /**
+   * The sentence for a 401 answered to the profile's OWN key (PRDCT-3522):
+   * the key is stale, and `login` on that profile is the fix. Null otherwise.
+   */
+  explainStaleKey(io: CliIo, e: unknown): string | null;
+  /**
+   * The sentence for a request to the profile's site that could not connect
+   * (PRDCT-3060): at a loopback or private address, the profile is named with
+   * its fixes (another site, or forgetting it); anywhere else, check and
+   * retry. Never the removal for a remote site. Null for any other error.
+   */
+  explainUnreachable(io: CliIo, e: unknown): string | null;
   /** The instance a profile names: its `baseUrl`, else the tool's cloud URL. */
   profileUrl(profile: CliProfile | undefined): string;
-  /** The `connectOnDemand` options of one context (the tool, the instance, the profile, the wire). */
-  connectOptions(ctx: CliContext<TClient>): ConnectOnDemandOptions;
   /**
-   * The hub exchange of one context: cli-core `connectOnDemand` with
-   * `connectOptions(ctx)` and `overrides`, and, after a fresh exchange, the
-   * hub profile healed with the address the hub answered when it has none.
+   * The `connectOnDemand` options of one context (the tool, the site, the
+   * profile, the wire, the binary of the sentences), with the hub and the
+   * account a command gives (`login --hub`, `login --email`).
+   */
+  connectOptions(ctx: CliContext<TClient>, given?: CliSignInChoice): ConnectOnDemandOptions;
+  /**
+   * The sign-in of one context: cli-core `connectOnDemand` with
+   * `connectOptions(ctx)` and `overrides`; the login's address the hub
+   * replaced is said on stderr.
    */
   connect(
     ctx: CliContext<TClient>,
@@ -240,13 +362,15 @@ export interface CliContextKit<TClient extends ChassisClient<string>> {
 export function createContext<TClient extends ChassisClient<string>>(input: {
   identity: CliIdentity;
   createClient: (options: ClientOptions) => TClient;
-  config: Pick<CliConfigStore, 'loadConfig' | 'removeConnectKey'>;
+  config: Pick<CliConfigStore, 'loadConfig'>;
   workspace: CliWorkspace;
 }): CliContextKit<TClient> {
   const { identity, createClient } = input;
-  const { loadConfig, removeConnectKey } = input.config;
+  const { loadConfig } = input.config;
   const { describeSelection, explainRefusal, pickWorkspaceSelection } = input.workspace;
   const unknownHint = `run \`${identity.bin} profiles\` to list them.`;
+  const URL_VAR = `${identity.envPrefix}_URL`;
+  const KEY_VAR = `${identity.envPrefix}_API_KEY`;
 
   /** The named (or active) profile, erroring on an explicitly named missing one. */
   function resolveProfile(
@@ -257,8 +381,19 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
     return { name, profile };
   }
 
+  /** A profile's site: its `baseUrl` (a blank one is none), else the tool's cloud URL (cli-core's rule). */
   function profileUrl(profile: CliProfile | undefined): string {
-    return profile?.baseUrl ?? identity.cloudUrl;
+    return firstSet(profile?.baseUrl) ?? identity.cloudUrl;
+  }
+
+  /** The URL a command was given, and by what: `--api-url`, `--url`, or the tool's URL variable. */
+  function givenUrl(opts: GlobalOpts, env: CliIo['env']): { url: string; by: string } | undefined {
+    const flag = firstSet(opts.apiUrl);
+    if (flag) return { url: flag, by: '--api-url' };
+    const alias = firstSet(opts.url);
+    if (alias) return { url: alias, by: '--url' };
+    const fromEnv = firstSet(env[URL_VAR]);
+    return fromEnv ? { url: fromEnv, by: URL_VAR } : undefined;
   }
 
   /**
@@ -269,76 +404,94 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
    *              profile (`<bin> use`) → the implicit `cloud` profile
    *   base URL:  --api-url (or --url) → <PREFIX>_URL → profile baseUrl → the
    *              tool's cloud URL
-   *   API key:   --api-key → <PREFIX>_API_KEY → profile apiKey
-   *              → the hub-connect key cached on the profile (cloud instances)
+   *   API key:   --api-key (or --api-key-stdin) → <PREFIX>_API_KEY (paired
+   *              with its site) → the profile's own key → nothing: the
+   *              sign-in runs in `requireApiKey` (cli-core `connectOnDemand`,
+   *              the login at the hub the SITE names)
    *   workspace: --org / --workspace → <PREFIX>_ORG / <PREFIX>_WORKSPACE
    *              → none (the server's default; workspace.ts)
    *
-   * A profile is an instance (cli-core 0.5.0): a cached hub key is read only
-   * when the profile names the instance this request goes to, so a key
-   * minted for the cloud can never be sent to some other instance named by
-   * --api-url / <PREFIX>_URL. A self-hosted CLI names its instance once, as a
-   * profile; the cloud needs no flag at all.
+   * Two refusals before any request (R2, R3): `--profile` naming a saved
+   * profile at another site than the URL the command was given (PRDCT-3039,
+   * PRDCT-3044), and an exported `<PREFIX>_API_KEY` whose site (`<PREFIX>_URL`,
+   * else the cloud) is not the command's (PRDCT-5192). A key given on the
+   * command line goes where the command goes; a profile's own key only to its
+   * own site.
    */
   function resolveContext(cmd: Command, io: CliIo): CliContext<TClient> {
     const opts = cmd.optsWithGlobals() as GlobalOpts;
     const config = loadConfig(io.env);
-    const apiUrl = opts.apiUrl ?? opts.url ?? io.env[`${identity.envPrefix}_URL`];
+    const given = givenUrl(opts, io.env);
     const selected = selectProfile({
       config,
       requested: opts.profile,
-      apiUrl,
+      apiUrl: given?.url,
       cloudUrl: identity.cloudUrl,
       unknownHint
     });
     const { name: profileName, profile } = selected;
 
     const baseUrl = resolveBaseUrl({
-      flag: apiUrl,
+      flag: given?.url,
       env: io.env,
-      envVar: `${identity.envPrefix}_URL`,
+      envVar: URL_VAR,
       profile,
       cloudUrl: identity.cloudUrl
     });
-    // A profile's own key is sent only to the instance the profile names
-    // (verifier round 1, F5): `--profile a --api-url <b>` must never hand
-    // a's key to b, exactly as the connect cache below never does.
-    const sameProfileInstance = sameInstance(profileUrl(profile), baseUrl);
-    let apiKey = resolveApiKey({
-      flag: opts.apiKey ?? stdinApiKeys.get(io),
-      env: io.env,
-      envVar: `${identity.envPrefix}_API_KEY`,
-      profile: sameProfileInstance ? profile : undefined
-    });
-    let credentialSource: CredentialSource =
-      opts.apiKey !== undefined || stdinApiKeys.get(io) !== undefined
-        ? 'flag'
-        : io.env[`${identity.envPrefix}_API_KEY`]
-          ? 'env'
-          : apiKey
-            ? 'profile'
-            : 'none';
-    if (!apiKey && sameProfileInstance) {
-      // No direct key: the connect cache's slot is the hub profile of this
-      // run (the one ANTASPHERE_URL names, else the active one: what
-      // `antasphere login` stored), org-independent by design. A key is
-      // served only to the address that minted it (cli-core
-      // `cachedConnectKey`): another account's key is the other person's
-      // credential (PRDCT-3032), and a missing address on either side, the
-      // entry's or the hub profile's, is unknown, so nothing is served
-      // (PRDCT-3046); connectForKey retires the entry. This read repeats
-      // cli-core's own (connectOnDemand step 0) on purpose: the credential
-      // source and the recovering fetch are decided here.
-      const hub = selectHubProfile(io.env, { cloudUrl: DEFAULT_HUB_URL });
-      if (hub.name) apiKey = cachedConnectKey(profile, hub.name, hub.profile?.email);
-      if (apiKey) credentialSource = 'hub-cache';
+    const site = normalizeUrl(baseUrl);
+
+    // 1. A profile and a URL that name two sites (PRDCT-3039, PRDCT-3044).
+    if (selected.source === 'flag' && given && profile && !sameInstance(profileUrl(profile), given.url)) {
+      const back =
+        given.by === URL_VAR
+          ? `unset ${URL_VAR} to run on "${profileName}".`
+          : `drop ${given.by} to run on "${profileName}".`;
+      throw new CliUsageError(
+        `Profile "${profileName}" is the site ${normalizeUrl(profileUrl(profile))}, and this command targets ${site}. ` +
+          `Drop --profile to run on the profile of ${site}, or ${back}`
+      );
     }
+
+    // 2. An exported key travels only to the site the environment names (PRDCT-5192).
+    const lineKey = firstSet(opts.apiKey, stdinApiKeys.get(io));
+    const envKey = lineKey ? undefined : firstSet(io.env[KEY_VAR]);
+    if (envKey) {
+      const envUrl = firstSet(io.env[URL_VAR]);
+      const keySite = envUrl ?? identity.cloudUrl;
+      if (!sameInstance(keySite, baseUrl)) {
+        const named = envUrl
+          ? `(${URL_VAR} names it)`
+          : `(${URL_VAR} is not set, so it belongs to the cloud)`;
+        throw new CliUsageError(
+          `${KEY_VAR} is a key of ${normalizeUrl(keySite)} ${named}, and this command targets ${site}. ` +
+            `Unset ${KEY_VAR} to run on the profile's own sign-in, or set ${URL_VAR} to the site the key was ` +
+            'issued for.'
+        );
+      }
+    }
+
+    // The direct credentials; nothing else resolves synchronously.
+    const ownKey =
+      profile && sameInstance(profileUrl(profile), baseUrl) ? firstSet(profile.apiKey) : undefined;
+    const apiKey = lineKey ?? envKey ?? ownKey;
+    const credentialSource: CredentialSource = lineKey
+      ? 'flag'
+      : envKey
+        ? 'env'
+        : ownKey
+          ? 'profile'
+          : 'none';
     const fetchImpl = io.fetch ?? globalThis.fetch.bind(globalThis);
     const ctx: CliContext<TClient> = {
-      client: createClient({ baseUrl, ...(apiKey ? { apiKey } : {}), fetch: fetchImpl }),
+      client: createClient({
+        baseUrl,
+        ...(apiKey ? { apiKey } : {}),
+        fetch: credentialSource === 'profile' ? ownKeyFetch(io, fetchImpl) : fetchImpl
+      }),
       baseUrl,
       apiKey,
       credentialSource,
+      login: null,
       json: Boolean(opts.json),
       io,
       profileName,
@@ -352,60 +505,94 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
       }),
       workspaceId: undefined
     };
-    if (credentialSource === 'hub-cache' && apiKey) {
-      // A cached key may have been revoked at the hub since it was minted
-      // (a swept membership, a logout elsewhere): the client's fetch recovers
-      // once, below, instead of stranding the person on a 401.
-      ctx.client = createClient({ baseUrl, apiKey, fetch: recoveringFetch(ctx, fetchImpl) });
-    }
+    const run = runs.get(io);
+    if (run) run.ctx = ctx as CliContext;
     return ctx;
+  }
+
+  /** The fetch of a client carrying the profile's own key: a 401 answered to it is remembered for the runner. */
+  function ownKeyFetch(io: CliIo, base: typeof globalThis.fetch): typeof globalThis.fetch {
+    return async (input, init) => {
+      const res = await base(input, init);
+      const run = runs.get(io);
+      if (res.status === 401 && run) run.ownKeyRefused = true;
+      return res;
+    };
   }
 
   const NO_KEY_MESSAGE =
     `An API key is required. Sign in (\`${identity.bin} login\`), pass --api-key, or set ` +
     `${identity.envPrefix}_API_KEY.`;
 
-  /** The tool's own copy for the cli-core seam: the one-command login is the remedy. */
-  const MISSING_HUB_LOGIN_MESSAGE =
-    `This ${identity.displayName} instance signs in through Antasphere. Run \`${identity.bin} login\` once ` +
-    `(or \`antasphere login\`), then retry — or pass --api-key <${identity.keyPrefix}_…> / set ` +
-    `${identity.envPrefix}_API_KEY.`;
-
-  function connectOptions(ctx: CliContext<TClient>): ConnectOnDemandOptions {
+  function connectOptions(ctx: CliContext<TClient>, given: CliSignInChoice = {}): ConnectOnDemandOptions {
     const { io } = ctx;
+    const hubUrl = firstSet(given.hubUrl);
+    const email = firstSet(given.email);
     return {
       tool: identity.tool,
       toolBaseUrl: ctx.baseUrl,
       // A profile with no baseUrl of its own is at the cloud URL (cli-core 0.5.0).
       cloudUrl: identity.cloudUrl,
-      // The same for a hub profile (cli-core 0.6.0, verifier round 1, F4):
-      // one with no baseUrl is at the default hub, so ANTASPHERE_URL naming
-      // that hub finds it, and the slot it names is the one this kit reads.
+      // A login of the hub file with no baseUrl of its own is at the default
+      // hub (cli-core `listLogins`); a login's own baseUrl always wins.
       hubCloudUrl: DEFAULT_HUB_URL,
+      // The binary cli-core names in its sentences (a hub to pick, a login to pick).
+      bin: identity.bin,
+      ...(hubUrl ? { hubUrl } : {}),
+      ...(email ? { email } : {}),
       profileName: ctx.profileName ?? CLOUD_PROFILE,
       env: io.env,
       // Thread the injected fetch so the probe + exchange stay on the test
       // harness wire (and any proxying the runner set up).
       ...(io.fetch ? { fetch: io.fetch } : {}),
-      notify: (line) => io.err.write(line),
-      messages: { missingHubLogin: MISSING_HUB_LOGIN_MESSAGE }
+      notify: (line) => io.err.write(line)
     };
+  }
+
+  /** The login's address the hub's answer replaced, said on stderr (an absent one is filled in silently). */
+  function sayHealed(io: CliIo, outcome: ConnectOnDemandOutcome): void {
+    if (outcome.outcome !== 'connected' || !outcome.healed?.from) return;
+    io.err.write(
+      `The Antasphere login's address is now ${outcome.healed.to}, replaced from ${outcome.healed.from} ` +
+        "(the hub's own answer).\n"
+    );
+  }
+
+  /**
+   * What the recovery of a refused kept key hands the exchange again: the
+   * account that signed the command in, and its hub when the site names none.
+   * cli-core evicts the refused key before it plans, so a site from before
+   * sites named their hub would otherwise have no kept key left to say which
+   * hub signs it in, and the recovery would end on « pick the hub ».
+   */
+  function recoveryChoice(ctx: CliContext<TClient>): CliSignInChoice {
+    if (!ctx.login) return {};
+    const remembered: unknown = ctx.profileName
+      ? loadConfig(ctx.io.env).profiles[ctx.profileName]?.site
+      : undefined;
+    const namesHub =
+      typeof remembered === 'object' &&
+      remembered !== null &&
+      typeof (remembered as { hub?: unknown }).hub === 'string';
+    return { email: ctx.login.email, ...(namesHub ? {} : { hubUrl: ctx.login.hub }) };
   }
 
   /**
    * The stranded-key recovery (PRDCT-2947): a fetch that, on the FIRST 401
-   * answered to a key served from the connect cache, evicts that key, runs
-   * the hub exchange again (cli-core `refreshConnectKey`) and replays the
-   * request once with the new key. A second 401 stands. A hub refusal on the
-   * way (a restricted tool, a swept account) is the hub's own sentence, exit
-   * 3, through the runner. An instance that is no longer cloud recovers
-   * nothing and the 401 stands as it is.
+   * answered to a kept key the sign-in served, runs cli-core's
+   * `refreshConnectKey` (compare-and-evict, then the kept key another command
+   * stored meanwhile, else the exchange again) and replays the request once
+   * with the new key. A second 401 stands. A hub refusal on the way (a
+   * restricted tool, a swept account) is the hub's own sentence, exit 3,
+   * through the runner. A site that no longer signs in through a hub
+   * recovers nothing and the 401 stands as it is.
    */
   function recoveringFetch(ctx: CliContext<TClient>, base: typeof globalThis.fetch): typeof globalThis.fetch {
     let recovered = false;
     return async (input, init) => {
       const res = await base(input, init);
-      if (res.status !== 401 || recovered || ctx.credentialSource !== 'hub-cache') return res;
+      const refused = ctx.apiKey;
+      if (res.status !== 401 || recovered || ctx.credentialSource !== 'hub-cache' || !refused) return res;
       recovered = true;
       // A 401 under a workspace selection may be the SELECTION's refusal:
       // the server answers a workspace the person does not belong to exactly
@@ -413,25 +600,27 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
       // key answers there, it is alive and nothing is evicted, exchanged or
       // replayed (verifier round 1, F2: a refused --org leaked a live key per
       // command). The runner then explains the refusal.
-      if (ctx.workspaceId !== undefined && ctx.apiKey) {
+      if (ctx.workspaceId !== undefined) {
         const probe = await base(`${ctx.baseUrl}/api/v1/me`, {
-          headers: { authorization: `Bearer ${ctx.apiKey}` }
+          headers: { authorization: `Bearer ${refused}` }
         }).catch(() => null);
         // Only a probe that ANSWERS 401 proves the key dead (verifier round 2,
         // F10): a probe with no answer, or any other status, keeps the key and
         // lets the 401 stand.
         if (!probe || probe.status !== 401) return res;
       }
-      const outcome = await refreshConnectKey(connectOptions(ctx));
+      const outcome = await refreshConnectKey({
+        ...connectOptions(ctx, recoveryChoice(ctx)),
+        refusedKey: refused
+      });
       if (outcome.outcome === 'not_cloud') return res;
       // The cause before its consequence (verifier round 3, F1): the sign-in
       // is said first, then what the fresh mint healed.
       ctx.io.err.write('The cached key was refused; signed in again through Antasphere.\n');
-      // A fresh mint like any other: the hub profile is healed here too, or
-      // the next run would retire the key just minted (verifier round 2, F1).
-      healHubAddress(ctx, outcome);
+      sayHealed(ctx.io, outcome);
       ctx.apiKey = outcome.key;
-      ctx.credentialSource = 'hub-exchange';
+      ctx.credentialSource = outcome.cached ? 'hub-cache' : 'hub-exchange';
+      ctx.login = { hub: outcome.login.hub, email: outcome.login.email };
       const headers = new Headers(init?.headers);
       headers.set('authorization', `Bearer ${outcome.key}`);
       return base(input, { ...init, headers });
@@ -441,15 +630,14 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
   /**
    * Requires an API key; throws a friendly message the runner turns into exit 1.
    *
-   * When nothing resolved, this is the connect-on-demand seam (binding
-   * patterns §7, gcloud model), owned by @antasphere/cli-core since 0.3.0:
-   * if — and only if — discovery says the instance is an Antasphere-cloud
-   * one, the stored `antasphere login` credential is exchanged (hub → tool)
-   * for a USER-scoped tool-local API key, which is cached on the selected
-   * profile under the hub profile's name and used for this invocation — and
-   * served from that cache on every subsequent run (no re-exchange, no fresh
-   * mint). Self-hosted instances never take this branch: they get the
-   * classic error unchanged.
+   * When nothing direct resolved, this is the sign-in (binding patterns §7,
+   * gcloud model), owned by @antasphere/cli-core: on a site that signs in
+   * through an Antasphere hub, the login AT THE HUB THE SITE NAMES (never the
+   * machine's active one) is exchanged (hub → tool) for a USER-scoped key the
+   * profile keeps, filed by hub and account; a kept key is served with zero
+   * network on every later run (discovery read again once a day). A site
+   * that signs in by itself never takes this branch: it gets the classic
+   * error unchanged.
    */
   async function requireApiKey(
     ctx: CliContext<TClient>,
@@ -526,88 +714,76 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
     return ` (looked in the ${noun} "${selection.value}", selected by ${describeSelection(selection)})`;
   }
 
+  /** The name a context's profile goes by in a sentence. */
+  function nameOf(ctx: CliContext): string {
+    return ctx.profileName ?? CLOUD_PROFILE;
+  }
+
+  function explainStaleKey(io: CliIo, e: unknown): string | null {
+    const run = runs.get(io);
+    const ctx = run?.ctx;
+    if (!ctx || !run.ownKeyRefused || ctx.credentialSource !== 'profile') return null;
+    if (!(e instanceof PlatformApiError || e instanceof CliAuthError) || e.status !== 401) return null;
+    const name = nameOf(ctx);
+    return (
+      `The key of profile "${name}" was refused by ${normalizeUrl(ctx.baseUrl)} (${e.code}): it is stale. ` +
+      `Run ${identity.bin} --profile ${name} login to sign in again.`
+    );
+  }
+
+  /** The sentence for the profile's site that does not answer (PRDCT-3060). */
+  function unreachableSentence(ctx: CliContext): string {
+    const url = normalizeUrl(ctx.baseUrl);
+    const name = nameOf(ctx);
+    // Only a profile ON DISK can be forgotten, and only a local one is offered
+    // the removal: a remote site that is down is an outage, not a leftover.
+    if (!ctx.profileCreated && isLocalSite(url)) {
+      return (
+        `Profile "${name}" is ${url}, and nothing answers there. Run on another site with --profile <name> or ` +
+        `${identity.bin} use <name>, or forget this one: ${identity.bin} profiles remove ${name}.`
+      );
+    }
+    return `Nothing answers at ${url} (profile "${name}"). Check the address, or try again.`;
+  }
+
+  function explainUnreachable(io: CliIo, e: unknown): string | null {
+    const run = runs.get(io);
+    const ctx = run?.ctx;
+    if (!ctx || typeof e !== 'object' || e === null) return null;
+    const origin = run.failures.get(e);
+    if (origin === undefined || origin !== originOf(ctx.baseUrl)) return null;
+    return unreachableSentence(ctx);
+  }
+
   async function connect(
     ctx: CliContext<TClient>,
     overrides: Partial<ConnectOnDemandOptions> = {}
   ): Promise<ConnectOnDemandOutcome> {
-    const outcome = await connectOnDemand({ ...connectOptions(ctx), ...overrides });
-    healHubAddress(ctx, outcome);
+    const outcome = await connectOnDemand({ ...connectOptions(ctx, overrides), ...overrides });
+    sayHealed(ctx.io, outcome);
     return outcome;
-  }
-
-  /**
-   * The hub profile healed with the address the hub answered, after a fresh
-   * exchange: when it carries none or a blank one (an older login, a
-   * hand-edited file), or one the hub no longer answers (the account changed
-   * its address at the hub). Without it the slot would be refused and a key
-   * re-minted and revoked on every run, since a key is served only to the
-   * address that minted it. The answer is the key owner's own current
-   * address, so no other person's address can be written. That profile
-   * only, nothing else of the hub's file moves. A replaced address is said
-   * on stderr; an absent one is filled in silently. Called after every
-   * fresh exchange the kit runs: `connect` and the stranded-key recovery.
-   */
-  function healHubAddress(ctx: CliContext<TClient>, outcome: ConnectOnDemandOutcome): void {
-    // `!outcome.cached`: a served key implies a hub address already equal to
-    // the entry's, so only a fresh exchange can have anything to heal; the
-    // guard states that intent.
-    if (outcome.outcome !== 'connected' || outcome.cached || !outcome.result) return;
-    // A chassis tool never answers a blank address; a foreign one must not
-    // blank the profile.
-    const answered = firstSet(outcome.result.user.email);
-    if (!answered) return;
-    const hub = selectHubProfile(ctx.io.env, { cloudUrl: DEFAULT_HUB_URL });
-    const hubConfig = loadCoreConfig(ctx.io.env, HUB_TOOL);
-    const stored = hub.name ? hubConfig.profiles[hub.name] : undefined;
-    const had = firstSet(stored?.email);
-    if (!hub.name || !stored || had?.toLowerCase() === answered.toLowerCase()) return;
-    hubConfig.profiles[hub.name] = { ...stored, email: answered };
-    saveCoreConfig(ctx.io.env, HUB_TOOL, hubConfig);
-    if (had) {
-      ctx.io.err.write(
-        `The Antasphere login's address is now ${answered}, replaced from ${had} (the hub's own answer).\n`
-      );
-    }
   }
 
   async function connectForKey(ctx: CliContext<TClient>): Promise<string> {
     const { io } = ctx;
-    // An entry on the slot the cache refuses to serve (another account's
-    // key, the hub login on the slot having changed, PRDCT-3032; or a key
-    // whose address, or the hub profile's, is missing, PRDCT-3046) is
-    // revoked on its instance and forgotten before the exchange runs for the
-    // account now signed in, so the fresh mint never strands it live. Best
-    // effort: a dead key answers 401 and is forgotten all the same.
-    const hub = selectHubProfile(io.env, { cloudUrl: DEFAULT_HUB_URL });
-    if (ctx.profileName && hub.name) {
-      const profile = loadConfig(io.env).profiles[ctx.profileName];
-      const stale = profile?.connectKeys?.[hub.name];
-      if (stale && !cachedConnectKey(profile, hub.name, hub.profile?.email)) {
-        // A blank address is no address: it never reaches a sentence.
-        const hubEmail = firstSet(hub.profile?.email);
-        io.err.write(
-          `The ${identity.displayName} key cached for ${firstSet(stale.email) ?? 'an unknown login'} is retired: ` +
-            (hubEmail
-              ? `the Antasphere login is now ${hubEmail}.\n`
-              : 'the Antasphere login carries no address to match it with.\n')
-        );
-        const auth = new CliAuthClient({
-          baseUrl: profileUrl(profile),
-          ...(io.fetch ? { fetch: io.fetch } : {})
-        });
-        await auth.revoke(stale.apiKey).catch(() => undefined);
-        removeConnectKey(io.env, ctx.profileName, hub.name);
-      }
-    }
+    const run = runs.get(io);
+    const before = run?.lastFailure;
     const outcome = await connect(ctx);
     if (outcome.outcome === 'not_cloud') {
-      // Self-hosted / unreachable: the classic error, byte-identical.
+      // A site whose discovery could not even connect is not « a site that
+      // signs in by itself »: it is a site that does not answer (PRDCT-3060).
+      const failed = run?.lastFailure;
+      if (failed && failed !== before && failed.origin === originOf(ctx.baseUrl)) {
+        throw new CliUsageError(unreachableSentence(ctx as CliContext));
+      }
+      // Self-hosted: the classic error, byte-identical.
       throw new CliUsageError(NO_KEY_MESSAGE);
     }
 
-    // The minted key becomes this invocation's credential.
+    // The key becomes this invocation's credential.
     ctx.apiKey = outcome.key;
     ctx.credentialSource = outcome.cached ? 'hub-cache' : 'hub-exchange';
+    ctx.login = { hub: outcome.login.hub, email: outcome.login.email };
     const fetchImpl = io.fetch ?? globalThis.fetch.bind(globalThis);
     ctx.client = createClient({
       baseUrl: ctx.baseUrl,
@@ -624,6 +800,8 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
     workspaceSource,
     explainWorkspaceRefusal,
     workspaceNotFoundHint,
+    explainStaleKey,
+    explainUnreachable,
     profileUrl,
     connectOptions,
     connect

@@ -1,25 +1,28 @@
 import { describe, expect, it } from 'vitest';
 import { routedHarness, tempConfigEnv } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
-import { redactKey } from '@antasphere/chassis-cli';
 import {
   cloudInstanceRoute,
   exchangeRoutes,
   filesRoute,
+  fresh,
+  HUB,
+  kept,
   key,
   meRoute,
   ossInstanceRoute,
-  seedHubLogin
+  seedHubLogin,
+  seedTool
 } from './signin-fixtures.js';
 
 /**
  * A profile IS an instance (cli-core 0.5.0 `selectProfile`, PRDCT-2947):
  * --profile, else the profile of the URL the run names, else the active one,
  * else the implicit `cloud` profile at the tool's cloud URL. `profiles`
- * lists them with how each signs in.
+ * lists them with how each signs in, and no listing prints any part of a key.
  */
 
-const { loadConfig, saveConfig } = cli;
+const { loadConfig } = cli;
 const { bin, envPrefix: P, cloudUrl } = cli.identity;
 const CLOUD = new URL(cloudUrl).origin;
 
@@ -29,7 +32,7 @@ const instanceLine = (out: string) => out.split('\n').find((l) => l.startsWith('
 describe('which profile a command runs on', () => {
   it('--profile wins, and must exist', async () => {
     const env = await tempConfigEnv();
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'a',
       profiles: { a: { apiKey: key('a'), baseUrl: 'http://a' }, b: { apiKey: key('b'), baseUrl: 'http://b' } }
     });
@@ -47,7 +50,7 @@ describe('which profile a command runs on', () => {
 
   it('--api-url selects the saved profile of that instance (trailing slash and case aside)', async () => {
     const env = await tempConfigEnv();
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'a',
       profiles: {
         a: { apiKey: key('a'), baseUrl: 'http://a' },
@@ -62,7 +65,7 @@ describe('which profile a command runs on', () => {
 
   it(`${P}_URL selects it the same way`, async () => {
     const env = await tempConfigEnv();
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'a',
       profiles: { a: { apiKey: key('a'), baseUrl: 'http://a' }, b: { apiKey: key('b'), baseUrl: 'http://b' } }
     });
@@ -77,12 +80,12 @@ describe('which profile a command runs on', () => {
       first: { apiKey: key('first'), baseUrl: 'http://same' },
       second: { apiKey: key('second'), baseUrl: 'http://same' }
     };
-    saveConfig(env, { activeProfile: 'second', profiles });
+    seedTool(env, { activeProfile: 'second', profiles });
     const active = routedHarness([meRoute()], env);
     expect(await run(['whoami', '--api-url', 'http://same'], active.io)).toBe(0);
     expect(active.wire[0]?.auth).toBe(`Bearer ${key('second')}`);
 
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'elsewhere',
       profiles: { ...profiles, elsewhere: { baseUrl: 'http://x' } }
     });
@@ -90,7 +93,7 @@ describe('which profile a command runs on', () => {
     expect(await run(['whoami', '--api-url', 'http://same'], first.io)).toBe(0);
     expect(first.wire[0]?.auth).toBe(`Bearer ${key('first')}`);
 
-    saveConfig(env, {
+    seedTool(env, {
       profiles: { mine: { apiKey: key('mine') }, cloud: { apiKey: key('cloud'), baseUrl: CLOUD } }
     });
     const cloud = routedHarness([meRoute()], env);
@@ -100,7 +103,7 @@ describe('which profile a command runs on', () => {
 
   it('a profile with no URL of its own is at the cloud URL', async () => {
     const env = await tempConfigEnv();
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'x',
       profiles: { x: { baseUrl: 'http://x' }, mine: { apiKey: key('mine') } }
     });
@@ -116,7 +119,7 @@ describe('which profile a command runs on', () => {
     [cloudUrl, 'cloud']
   ])('no profile saved at %s: one in memory named %s, never written', async (url, name) => {
     const env = await tempConfigEnv();
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'work',
       profiles: { work: { apiKey: key('work'), baseUrl: 'http://inst' } }
     });
@@ -128,7 +131,7 @@ describe('which profile a command runs on', () => {
 
   it("the active profile's key never goes to another instance named by --api-url", async () => {
     const env = await tempConfigEnv();
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'work',
       profiles: { work: { apiKey: key('work'), baseUrl: 'http://inst' } }
     });
@@ -139,30 +142,37 @@ describe('which profile a command runs on', () => {
     ]);
   });
 
-  it("--profile's own key never goes to the other instance --api-url names (verifier round 1, F5)", async () => {
+  it('--profile with --api-url of another site is refused before any request: its own key goes nowhere (verifier round 1, F5; PRDCT-3039, PRDCT-3044)', async () => {
     const env = await tempConfigEnv();
-    saveConfig(env, { profiles: { oss: { apiKey: key('oss'), baseUrl: 'http://oss' } } });
+    seedTool(env, { profiles: { oss: { apiKey: key('oss'), baseUrl: 'http://oss' } } });
     const h = routedHarness([ossInstanceRoute, filesRoute, meRoute()], env);
     expect(await run(['files', 'list', '--profile', 'oss', '--api-url', 'http://cloud'], h.io)).toBe(1);
-    expect(h.wire).toEqual([
-      { method: 'GET', origin: 'http://cloud', path: '/api/v1/instance', auth: undefined }
-    ]);
-    expect(h.wire.some((c) => c.auth?.includes(key('oss')))).toBe(false);
-    expect(h.err()).toContain(
-      `An API key is required. Sign in (\`${bin} login\`), pass --api-key, or set ${P}_API_KEY.`
+    expect(h.wire).toEqual([]);
+    expect(h.err()).toBe(
+      'Error: Profile "oss" is the site http://oss, and this command targets http://cloud. Drop --profile to ' +
+        'run on the profile of http://cloud, or drop --api-url to run on "oss".\n'
     );
   });
 
-  it.each([
-    ['the --api-key flag', ['--api-key', key('flag')], {}],
-    ['the key variable', [], { [`${P}_API_KEY`]: key('flag') }]
-  ] as const)('%s still goes to any URL', async (_label, args, extraEnv) => {
+  it('the --api-key flag goes where the command goes', async () => {
     const env = await tempConfigEnv();
-    saveConfig(env, { profiles: { oss: { apiKey: key('oss'), baseUrl: 'http://oss' } } });
-    const h = routedHarness([filesRoute], { ...env, ...extraEnv });
-    expect(await run(['files', 'list', '--profile', 'oss', '--api-url', 'http://cloud', ...args], h.io)).toBe(
-      0
-    );
+    seedTool(env, { activeProfile: 'oss', profiles: { oss: { apiKey: key('oss'), baseUrl: 'http://oss' } } });
+    const h = routedHarness([filesRoute], env);
+    expect(await run(['files', 'list', '--api-url', 'http://cloud', '--api-key', key('flag')], h.io)).toBe(0);
+    expect(h.wire).toEqual([
+      { method: 'GET', origin: 'http://cloud', path: '/api/v1/files', auth: `Bearer ${key('flag')}` }
+    ]);
+  });
+
+  it(`the key variable goes to the site ${P}_URL names, and wins over the profile's own key there`, async () => {
+    const env = await tempConfigEnv();
+    seedTool(env, { profiles: { oss: { apiKey: key('oss'), baseUrl: 'http://cloud' } } });
+    const h = routedHarness([filesRoute], {
+      ...env,
+      [`${P}_URL`]: 'http://cloud',
+      [`${P}_API_KEY`]: key('flag')
+    });
+    expect(await run(['files', 'list'], h.io)).toBe(0);
     expect(h.wire).toEqual([
       { method: 'GET', origin: 'http://cloud', path: '/api/v1/files', auth: `Bearer ${key('flag')}` }
     ]);
@@ -170,7 +180,7 @@ describe('which profile a command runs on', () => {
 
   it('else the active profile', async () => {
     const env = await tempConfigEnv();
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'work',
       profiles: { work: { apiKey: key('work'), baseUrl: 'http://inst' } }
     });
@@ -181,7 +191,7 @@ describe('which profile a command runs on', () => {
 
   it('else the `cloud` profile on disk', async () => {
     const env = await tempConfigEnv();
-    saveConfig(env, { profiles: { cloud: { apiKey: key('cloud') }, other: { baseUrl: 'http://o' } } });
+    seedTool(env, { profiles: { cloud: { apiKey: key('cloud') }, other: { baseUrl: 'http://o' } } });
     const h = routedHarness([meRoute()], env);
     expect(await run(['whoami'], h.io)).toBe(0);
     expect(h.wire[0]).toMatchObject({ origin: CLOUD, auth: `Bearer ${key('cloud')}` });
@@ -196,8 +206,8 @@ describe('which profile a command runs on', () => {
     expect(loadConfig(env)).toEqual({ profiles: {} });
   });
 
-  it('the first hub connect writes the in-memory profile, active only when the tool had none', async () => {
-    const env = await tempConfigEnv();
+  it('the first sign-in writes the in-memory profile, the default only when the tool had none', async () => {
+    const env = { ...(await tempConfigEnv()), ANTASPHERE_URL: HUB };
     seedHubLogin(env);
     const h = routedHarness([cloudInstanceRoute, ...exchangeRoutes([key('minted')]), filesRoute], env);
     expect(await run(['files', 'list'], h.io)).toBe(0);
@@ -205,33 +215,28 @@ describe('which profile a command runs on', () => {
     let config = loadConfig(env);
     expect(config.activeProfile).toBe('cloud');
     expect(config.profiles.cloud?.baseUrl).toBe(CLOUD);
-    expect(config.profiles.cloud?.connectKeys?.default?.apiKey).toBe(key('minted'));
+    expect(config.profiles.cloud?.hubKeys?.[0]?.apiKey).toBe(key('minted'));
 
     const second = routedHarness([cloudInstanceRoute, ...exchangeRoutes([key('other')]), filesRoute], env);
     expect(await run(['files', 'list', '--api-url', 'http://tool'], second.io)).toBe(0);
     config = loadConfig(env);
     expect(config.activeProfile).toBe('cloud');
     expect(config.profiles.tool?.baseUrl).toBe('http://tool');
-    expect(config.profiles.tool?.connectKeys?.default?.apiKey).toBe(key('other'));
+    expect(config.profiles.tool?.hubKeys?.[0]?.apiKey).toBe(key('other'));
   });
 
-  it("a cached key is read only when the selected profile names the request's instance", async () => {
+  it("a kept key is read only for the profile's own site: --profile with another site is refused, on its own site it serves", async () => {
     const env = await tempConfigEnv();
     seedHubLogin(env);
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'work',
       profiles: {
-        work: {
-          baseUrl: 'http://tool',
-          connectKeys: { default: { apiKey: key('cached'), email: 'ada@x.co' } }
-        }
+        work: { baseUrl: 'http://tool', site: fresh(HUB), hubKeys: [kept(HUB, 'ada@x.co', key('cached'))] }
       }
     });
     const h = routedHarness([ossInstanceRoute, filesRoute], env);
     expect(await run(['files', 'list', '--profile', 'work', '--api-url', 'http://other'], h.io)).toBe(1);
-    expect(h.wire).toEqual([
-      { method: 'GET', origin: 'http://other', path: '/api/v1/instance', auth: undefined }
-    ]);
+    expect(h.wire).toEqual([]);
 
     const home = routedHarness([filesRoute], env);
     expect(await run(['files', 'list', '--profile', 'work'], home.io)).toBe(0);
@@ -242,17 +247,15 @@ describe('which profile a command runs on', () => {
 });
 
 describe('profiles, use, config show', () => {
-  it('lists the implicit cloud row first, the active mark, and the three kinds of credential', async () => {
+  it('lists the implicit cloud row first, the active mark, and how each signs in, never any part of a key', async () => {
     const env = await tempConfigEnv();
     seedHubLogin(env);
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'own',
       profiles: {
         own: { apiKey: key('own'), baseUrl: 'http://own' },
-        hubbed: {
-          baseUrl: 'http://hubbed',
-          connectKeys: { default: { apiKey: key('hub'), email: 'ada@x.co' } }
-        },
+        hubbed: { baseUrl: 'http://hubbed', hubKeys: [kept(HUB, 'ada@x.co', key('hub'))] },
+        old: { baseUrl: 'http://old', connectKeys: { default: { apiKey: key('old'), email: 'ada@x.co' } } },
         stray: { baseUrl: 'http://stray', connectKeys: { personal: { apiKey: key('stray') } } },
         bare: { baseUrl: 'http://bare' }
       }
@@ -266,12 +269,14 @@ describe('profiles, use, config show', () => {
       .map((l) => l.split(/\s{2,}/));
     expect(rows).toEqual([
       ['', 'cloud', CLOUD, '(not signed in)'],
-      ['*', 'own', 'http://own', redactKey(key('own'))],
-      ['', 'hubbed', 'http://hubbed', 'via Antasphere (ada@x.co)'],
-      ['', 'stray', 'http://stray', 'via Antasphere (login "personal", not the active one)'],
+      ['*', 'own', 'http://own', 'its own key'],
+      ['', 'hubbed', 'http://hubbed', `via Antasphere (ada@x.co at ${HUB})`],
+      ['', 'old', 'http://old', `via Antasphere (ada@x.co at ${HUB})`],
+      ['', 'stray', 'http://stray', '(not signed in)'],
       ['', 'bare', 'http://bare', '(not signed in)']
     ]);
-    expect(h.out()).not.toContain(key('own'));
+    for (const tag of ['own', 'hub', 'old', 'stray']) expect(h.out()).not.toContain(key(tag).slice(0, 13));
+    expect(h.wire).toEqual([]);
   });
 
   it('with nothing saved, the cloud row is the active one', async () => {
@@ -285,56 +290,50 @@ describe('profiles, use, config show', () => {
     ).toEqual(['*', 'cloud', CLOUD, '(not signed in)']);
   });
 
-  it('--json', async () => {
+  it('--json, with no key in it', async () => {
     const env = await tempConfigEnv();
     seedHubLogin(env);
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'own',
       profiles: {
         own: { apiKey: key('own'), baseUrl: 'http://own', email: 'ada@x.co' },
         hubbed: {
           baseUrl: 'http://hubbed',
-          connectKeys: { default: { apiKey: key('hub'), email: 'bo@x.co' } }
-        }
+          connectKeys: { default: { apiKey: key('hub'), email: 'ada@x.co' } }
+        },
+        replaced: { baseUrl: 'http://replaced', hubKeys: [kept(HUB, 'bo@x.co', key('bo'))] }
       }
     });
     const h = routedHarness([], env);
     expect(await run(['profiles', '--json'], h.io)).toBe(0);
     expect(JSON.parse(h.out())).toEqual({
       activeProfile: 'own',
-      hubProfile: 'default',
       profiles: {
-        cloud: {
-          baseUrl: CLOUD,
-          saved: false,
-          credential: 'none',
-          apiKey: null,
-          email: null,
-          hubProfiles: []
-        },
-        own: {
-          baseUrl: 'http://own',
-          saved: true,
-          credential: 'key',
-          apiKey: redactKey(key('own')),
-          email: 'ada@x.co',
-          hubProfiles: []
-        },
+        cloud: { baseUrl: CLOUD, saved: false, credential: 'none', email: null, hubProfiles: [] },
+        own: { baseUrl: 'http://own', saved: true, credential: 'key', email: 'ada@x.co', hubProfiles: [] },
         hubbed: {
           baseUrl: 'http://hubbed',
           saved: true,
           credential: 'hub',
-          apiKey: null,
-          email: 'bo@x.co',
+          email: 'ada@x.co',
           hubProfiles: ['default']
+        },
+        // Another account's key, now that the login at its hub is ada's: nothing serves it.
+        replaced: {
+          baseUrl: 'http://replaced',
+          saved: true,
+          credential: 'none',
+          email: null,
+          hubProfiles: []
         }
       }
     });
+    for (const tag of ['own', 'hub', 'bo']) expect(h.out()).not.toContain(key(tag).slice(0, 13));
   });
 
   it('`use cloud` writes the cloud profile when it is not on disk, and activates it', async () => {
     const env = await tempConfigEnv();
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'own',
       profiles: { own: { apiKey: key('own'), baseUrl: 'http://own' } }
     });
@@ -349,7 +348,7 @@ describe('profiles, use, config show', () => {
 
   it('`use <name>` switches; an unknown name errors and writes nothing', async () => {
     const env = await tempConfigEnv();
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'a',
       profiles: { a: { baseUrl: 'http://a' }, b: { baseUrl: 'http://b' } }
     });
@@ -364,22 +363,37 @@ describe('profiles, use, config show', () => {
     expect(loadConfig(env).activeProfile).toBe('b');
   });
 
-  it('config show: baseUrl, redacted key, email, redacted connect keys', async () => {
+  it('config show: each profile’s site and what it holds, by kind, and no key material at all (decision 4)', async () => {
     const env = await tempConfigEnv();
-    saveConfig(env, {
+    const path = seedTool(env, {
       activeProfile: 'own',
       profiles: {
-        own: { apiKey: key('own'), baseUrl: 'http://own', email: 'ada@x.co' },
-        mine: { connectKeys: { default: { apiKey: key('hub') } } }
+        own: { apiKey: key('own'), baseUrl: 'http://own/', email: 'ada@x.co' },
+        mine: {
+          hubKeys: [kept(HUB, 'ada@x.co', key('kept'))],
+          connectKeys: { default: { apiKey: key('hub') } }
+        }
       }
     });
     const h = routedHarness([], env);
     expect(await run(['config', 'show', '--json'], h.io)).toBe(0);
-    expect(JSON.parse(h.out()).profiles).toEqual({
-      own: { baseUrl: 'http://own', apiKey: redactKey(key('own')), email: 'ada@x.co', connectKeys: {} },
-      mine: { baseUrl: CLOUD, apiKey: null, email: null, connectKeys: { default: redactKey(key('hub')) } }
+    expect(JSON.parse(h.out())).toEqual({
+      path,
+      defaultProfile: 'own',
+      profiles: {
+        own: { site: 'http://own', ownKey: true, keptKeys: [], oldSlots: 0 },
+        mine: { site: CLOUD, ownKey: false, keptKeys: [{ hub: HUB, email: 'ada@x.co' }], oldSlots: 1 }
+      }
     });
-    expect(h.out()).not.toContain(key('own'));
-    expect(h.out()).not.toContain(key('hub'));
+
+    const text = routedHarness([], env);
+    expect(await run(['config', 'show'], text.io)).toBe(0);
+    expect(text.out().split('\n')[0]).toBe(`config: ${path}`);
+    for (const out of [h.out(), text.out()]) {
+      for (const tag of ['own', 'kept', 'hub']) {
+        expect(out).not.toContain(key(tag).slice(0, 13));
+        expect(out).not.toContain(key(tag).slice(-4));
+      }
+    }
   });
 });

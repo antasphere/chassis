@@ -2,23 +2,28 @@ import { describe, expect, it } from 'vitest';
 import { routedHarness, tempConfigEnv } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
 import {
-  cloudInstanceRoute,
   exchangeRoutes,
+  fresh,
+  HUB,
+  kept,
   key,
   meBody,
   meRoute,
+  namingInstanceRoute,
   ORG,
   seedHubLogin,
+  seedTool,
   wsRow
 } from './signin-fixtures.js';
 
 /**
  * `whoami` says who, where, and WITH WHAT (PRDCT-2947): the credential the
- * run resolved, and what became of the Antasphere login.
+ * run resolved, and, when an Antasphere login signed it in, which one: the
+ * login at the hub the site names, never another (PRDCT-3364). There is no
+ * line about a login that did not sign the command in.
  */
 
-const { saveConfig } = cli;
-const { bin, envPrefix: P, cloudUrl } = cli.identity;
+const { envPrefix: P, cloudUrl } = cli.identity;
 const CLOUD = new URL(cloudUrl).origin;
 
 function lines(out: string, prefix: string): string[] {
@@ -40,14 +45,13 @@ describe('whoami', () => {
         `  organization: ${ORG}\n` +
         "  chosen by: the server's default (nothing selected)\n" +
         '  signed in with: the --api-key flag\n' +
-        '  Antasphere login: ada@x.co (not used: the --api-key flag wins)\n' +
         '  role:      owner (via api_key)\n' +
         '  scopes:    a:read\n' +
         '  key expires: never\n'
     );
   });
 
-  it('the key variable', async () => {
+  it('the key variable, paired with the site its URL variable names', async () => {
     const env = await tempConfigEnv();
     seedHubLogin(env);
     const h = routedHarness([meRoute()], {
@@ -57,15 +61,13 @@ describe('whoami', () => {
     });
     expect(await run(['whoami'], h.io)).toBe(0);
     expect(lines(h.out(), '  signed in with:')).toEqual(['  signed in with: the API key variable']);
-    expect(lines(h.out(), '  Antasphere login:')).toEqual([
-      '  Antasphere login: ada@x.co (not used: the API key variable wins)'
-    ]);
+    expect(h.out()).not.toContain('Antasphere login');
     expect(h.out()).not.toContain('organization:');
   });
 
-  it("the profile's own key; no Antasphere line off the cloud with no hub login", async () => {
+  it("the profile's own key", async () => {
     const env = await tempConfigEnv();
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'work',
       profiles: { work: { apiKey: key('own'), baseUrl: 'http://inst' } }
     });
@@ -76,84 +78,80 @@ describe('whoami', () => {
     expect(h.out()).not.toContain('Antasphere login');
   });
 
-  it("the profile's own key, with a hub login stored: not used", async () => {
+  it("the profile's own key, with an Antasphere login on the machine: the login is not named (PRDCT-3364)", async () => {
     const env = await tempConfigEnv();
     seedHubLogin(env);
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'work',
       profiles: { work: { apiKey: key('own'), baseUrl: 'http://inst' } }
     });
     const h = routedHarness([meRoute()], env);
     expect(await run(['whoami'], h.io)).toBe(0);
-    expect(lines(h.out(), '  Antasphere login:')).toEqual([
-      '  Antasphere login: ada@x.co (not used: the key of profile "work" wins)'
-    ]);
+    expect(lines(h.out(), '  signed in with:')).toEqual(['  signed in with: the key of profile "work"']);
+    expect(h.out()).not.toContain('Antasphere login');
   });
 
-  it('the cached key of the Antasphere login', async () => {
+  it('the key the profile keeps from the Antasphere login, served with no exchange', async () => {
     const env = await tempConfigEnv();
     seedHubLogin(env);
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'work',
       profiles: {
-        work: {
-          baseUrl: 'http://tool',
-          connectKeys: { default: { apiKey: key('cached'), email: 'ada@x.co' } }
-        }
+        work: { baseUrl: 'http://tool', site: fresh(HUB), hubKeys: [kept(HUB, 'ada@x.co', key('cached'))] }
       }
     });
     const h = routedHarness([meRoute()], env);
     expect(await run(['whoami'], h.io)).toBe(0);
-    expect(h.wire[0]?.auth).toBe(`Bearer ${key('cached')}`);
-    expect(lines(h.out(), '  signed in with:')).toEqual([
-      '  signed in with: the Antasphere login (cached key)'
+    expect(h.wire.map((c) => `${c.method} ${c.path} ${c.auth}`)).toEqual([
+      `GET /api/v1/me Bearer ${key('cached')}`
     ]);
-    expect(lines(h.out(), '  Antasphere login:')).toEqual(['  Antasphere login: ada@x.co']);
+    expect(lines(h.out(), '  signed in with:')).toEqual([
+      `  signed in with: the Antasphere login ada@x.co at ${HUB} (kept key)`
+    ]);
+    expect(lines(h.out(), '  Antasphere login:')).toEqual([]);
   });
 
-  it('a fresh exchange', async () => {
+  it('a fresh sign-in', async () => {
     const env = await tempConfigEnv();
     seedHubLogin(env);
-    const h = routedHarness([cloudInstanceRoute, ...exchangeRoutes([key('fresh')]), meRoute()], env);
+    const h = routedHarness([namingInstanceRoute(HUB), ...exchangeRoutes([key('fresh')]), meRoute()], env);
     expect(await run(['whoami', '--api-url', 'http://tool'], h.io)).toBe(0);
     expect(lines(h.out(), '  signed in with:')).toEqual([
-      '  signed in with: the Antasphere login (fresh exchange)'
+      `  signed in with: the Antasphere login ada@x.co at ${HUB} (fresh sign-in)`
     ]);
-    expect(lines(h.out(), '  Antasphere login:')).toEqual(['  Antasphere login: ada@x.co']);
+    expect(lines(h.out(), '  Antasphere login:')).toEqual([]);
   });
 
-  it('on the cloud with no Antasphere login: not connected', async () => {
+  it('on the cloud with a key on the command line: the flag, and nothing about a login', async () => {
     const env = await tempConfigEnv();
     const h = routedHarness([meRoute()], env);
     expect(await run(['whoami', '--api-key', key('flag')], h.io)).toBe(0);
     expect(h.wire[0]?.origin).toBe(CLOUD);
     expect(lines(h.out(), '  instance:')).toEqual([`  instance:  ${CLOUD} (profile "cloud")`]);
-    expect(lines(h.out(), '  Antasphere login:')).toEqual([
-      `  Antasphere login: not connected (run \`${bin} login\`)`
-    ]);
+    expect(lines(h.out(), '  signed in with:')).toEqual(['  signed in with: the --api-key flag']);
+    expect(h.out()).not.toContain('Antasphere login');
   });
 
-  it('--json adds the sources, the profile and the hub login', async () => {
+  it('--json adds the sources, the profile and the login that signed it in', async () => {
     const env = await tempConfigEnv();
     seedHubLogin(env);
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'work',
       profiles: {
-        work: {
-          baseUrl: 'http://tool',
-          connectKeys: { default: { apiKey: key('cached'), email: 'ada@x.co' } }
-        }
+        work: { baseUrl: 'http://tool', site: fresh(HUB), hubKeys: [kept(HUB, 'ada@x.co', key('cached'))] }
       }
     });
     const h = routedHarness([meRoute()], env);
     expect(await run(['whoami', '--json', '--workspace', 'w1'], h.io)).toBe(0);
-    expect(JSON.parse(h.out())).toMatchObject({
+    const answer = JSON.parse(h.out()) as Record<string, unknown>;
+    expect(answer).toMatchObject({
       user: { id: 'u1', name: 'Ada', email: 'ada@x.co' },
       workspaceSource: 'flag',
       credentialSource: 'hub-cache',
       profile: 'work',
-      hubLogin: { profile: 'default', email: 'ada@x.co' }
+      login: { hub: HUB, email: 'ada@x.co' }
     });
+    expect(answer).not.toHaveProperty('hubLogin');
 
     const bare = routedHarness([meRoute()], await tempConfigEnv());
     expect(
@@ -163,7 +161,7 @@ describe('whoami', () => {
       workspaceSource: 'default',
       credentialSource: 'flag',
       profile: 'inst',
-      hubLogin: null
+      login: null
     });
   });
 });

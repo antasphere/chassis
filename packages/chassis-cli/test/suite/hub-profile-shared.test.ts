@@ -3,19 +3,19 @@ import {
   HUB_TOOL,
   loadConfig as loadCoreConfig,
   resolveBaseUrl,
-  saveConfig as saveCoreConfig,
   selectProfile,
+  updateConfig as updateCoreConfig,
   type CliEnv
 } from '@antasphere/cli-core';
 import { routedHarness, tempConfigEnv } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
 import {
-  cloudInstanceRoute,
   exchangeRoutes,
   HUB,
   HUB_KEY,
   key,
   meRoute,
+  namingInstanceRoute,
   ORG,
   otpRoutes
 } from './signin-fixtures.js';
@@ -23,14 +23,16 @@ import {
 /**
  * Two writers, one config home (verifier round 1, F4): the hub CLI
  * (`antasphere login`) and the tool's inline hub sign-in must write and read
- * the SAME hub profile, so either login signs the other in.
+ * the SAME login, so either login signs the other in. The tool finds a
+ * login by the hub its site names (R2), whatever its entry is called.
  *
  * `hubCliProfile` and `hubCliLogin` below mirror the hub CLI of lane B:
  * `labs/products/antasphere/wt-onelogin-b-hub/packages/cli/src/context.ts`
  * lines 171-188 (the profile selection and the URL resolution of
  * `resolveContext`, with no --profile and no --api-url given) and
  * `packages/cli/src/index.ts` lines 1171-1180 (the write of `login`: the
- * spread row, then the profile made active). Keep them in step with it.
+ * spread row, then the profile made active), now one locked updater
+ * (cli-core 0.7.0, R0). Keep them in step with it.
  */
 
 const { loadConfig } = cli;
@@ -58,16 +60,16 @@ function hubCliProfile(env: CliEnv): { name: string; baseUrl: string; apiKey: st
 /** The hub CLI's `login` write (index.ts 1171-1180), after its email code minted `apiKey`. */
 function hubCliLogin(env: CliEnv, apiKey: string): void {
   const ctx = hubCliProfile(env);
-  const config = loadCoreConfig(env, HUB_TOOL);
-  config.profiles[ctx.name] = {
-    ...config.profiles[ctx.name],
-    apiKey,
-    baseUrl: ctx.baseUrl,
-    email: 'ada@x.co',
-    workspaceId: ORG
-  };
-  config.activeProfile = ctx.name;
-  saveCoreConfig(env, HUB_TOOL, config);
+  updateCoreConfig(env, HUB_TOOL, (config) => {
+    config.profiles[ctx.name] = {
+      ...config.profiles[ctx.name],
+      apiKey,
+      baseUrl: ctx.baseUrl,
+      email: 'ada@x.co',
+      workspaceId: ORG
+    };
+    config.activeProfile = ctx.name;
+  });
 }
 
 const CASES = [
@@ -75,16 +77,16 @@ const CASES = [
   ['ANTASPHERE_URL set', { ANTASPHERE_URL: HUB }, 'hub', HUB]
 ] as const;
 
-describe('the hub profile is one profile for the hub CLI and the tool CLI', () => {
+describe('the login is one login for the hub CLI and the tool CLI', () => {
   it.each(CASES)(
-    '%s: `antasphere login` first, then the tool login asks nothing and exchanges that key',
+    '%s: `antasphere login` first, then the tool login at a site naming that hub asks nothing and exchanges that key',
     async (_label, extra, hubProfile, hubUrl) => {
       const env: Record<string, string> = { ...(await tempConfigEnv()), ...extra };
       hubCliLogin(env, HUB_KEY);
       expect(loadCoreConfig(env, HUB_TOOL).activeProfile).toBe(hubProfile);
 
       const minted = key('tool');
-      const h = routedHarness([cloudInstanceRoute, ...exchangeRoutes([minted]), meRoute()], env);
+      const h = routedHarness([namingInstanceRoute(hubUrl), ...exchangeRoutes([minted]), meRoute()], env);
       const asked: string[] = [];
       h.io.prompt = async (q) => {
         asked.push(q);
@@ -97,18 +99,23 @@ describe('the hub profile is one profile for the hub CLI and the tool CLI', () =
         origin: hubUrl,
         auth: `Bearer ${HUB_KEY}`
       });
-      const connectKeys = loadConfig(env).profiles.tool?.connectKeys ?? {};
-      expect(Object.keys(connectKeys)).toEqual([hubProfile]);
-      expect(connectKeys[hubProfile]?.apiKey).toBe(minted);
+      expect(loadConfig(env).profiles.tool?.hubKeys).toEqual([
+        { hub: hubUrl, email: 'ada@x.co', apiKey: minted, mintedAt: expect.any(String) }
+      ]);
     }
   );
 
   it.each(CASES)(
-    '%s: the tool login signs in inline, and the hub CLI then finds that profile, its key and URL',
+    '%s: the tool login signs in inline at the hub its site names, and the hub CLI then finds that login, its key and URL',
     async (_label, extra, hubProfile, hubUrl) => {
       const env: Record<string, string> = { ...(await tempConfigEnv()), ...extra };
       const h = routedHarness(
-        [cloudInstanceRoute, ...otpRoutes(HUB_KEY, ORG), ...exchangeRoutes([key('tool')]), meRoute()],
+        [
+          namingInstanceRoute(hubUrl),
+          ...otpRoutes(HUB_KEY, ORG),
+          ...exchangeRoutes([key('tool')]),
+          meRoute()
+        ],
         env
       );
       h.io.prompt = async () => '123456';
@@ -116,8 +123,9 @@ describe('the hub profile is one profile for the hub CLI and the tool CLI', () =
       expect(h.wire.find((c) => c.path === '/api/v1/cli/auth/request')?.origin).toBe(hubUrl);
 
       expect(hubCliProfile(env)).toEqual({ name: hubProfile, baseUrl: hubUrl, apiKey: HUB_KEY });
+      // The first login of a machine is its active one; no later login moves it.
       expect(loadCoreConfig(env, HUB_TOOL).activeProfile).toBe(hubProfile);
-      expect(Object.keys(loadConfig(env).profiles.tool?.connectKeys ?? {})).toEqual([hubProfile]);
+      expect(loadConfig(env).profiles.tool?.hubKeys?.map((k) => k.hub)).toEqual([hubUrl]);
     }
   );
 });

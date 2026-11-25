@@ -15,8 +15,8 @@ import { createWorkspace } from './workspace.js';
  */
 
 export { cliIdentity, type CliIdentity } from './identity.js';
-export { redactKey, type CliConfigStore } from './config.js';
-export type { CliConfig, CliConnectKey, CliEnv, CliProfile } from './config.js';
+export { redactKey, type CliConfigStore, type CliConfigUpdate } from './config.js';
+export type { CliConfig, CliConnectKey, CliEnv, CliHubKey, CliProfile, CliSiteFacts } from './config.js';
 export {
   CliUsageError,
   fmtBytes,
@@ -29,6 +29,8 @@ export {
   type CliContext,
   type CliContextKit,
   type CliIo,
+  type CliSignedInLogin,
+  type CliSignInChoice,
   type CredentialSource
 } from './context.js';
 export {

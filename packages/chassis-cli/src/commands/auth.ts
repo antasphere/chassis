@@ -1,34 +1,35 @@
 import type { Command } from 'commander';
 import {
   ask,
+  chooseHub,
+  chooseLogin,
   CliAuthClient,
   CliAuthError,
   CliUsageError as CoreUsageError,
   CLOUD_PROFILE,
   firstSet,
+  forgetKeys,
+  freshProfileName,
   HUB_TOOL,
-  loadConfig as loadCoreConfig,
+  HUB_URL_ENV,
+  keysOfProfile,
+  listLogins,
   normalizeUrl,
+  planSignIn,
   probeToolInstance,
-  resolveBaseUrl,
+  rememberSite,
   sameInstance,
   selectProfile,
-  saveConfig as saveCoreConfig,
-  selectHubProfile,
-  type CliProfile
+  updateConfig as updateCoreConfig,
+  type CliAuthCompleted,
+  type CliConfig,
+  type CliLogin,
+  type CliProfile,
+  type ProfileKey
 } from '@antasphere/cli-core';
 import type { ChassisClient } from '@antasphere/chassis-sdk';
-import { redactKey } from '../config.js';
 import { DEFAULT_HUB_URL } from '../identity.js';
-import {
-  CliUsageError,
-  printJson,
-  stdinApiKey,
-  table,
-  type CliContext,
-  type CliIo,
-  type CredentialSource
-} from '../context.js';
+import { CliUsageError, printJson, stdinApiKey, table, type CliContext, type CliIo } from '../context.js';
 import type { CliKit } from '../kit.js';
 import type { MeResponse } from '../workspace.js';
 
@@ -37,18 +38,16 @@ import type { MeResponse } from '../workspace.js';
  * ends in the tool, `logout` that revokes what it forgets, whoami/verify,
  * and profile management (use / profiles / config show / config clear).
  *
- * A profile is an instance (cli-core 0.5.0): `login` with no URL signs in
- * on the profile the run selects (the active one, else the implicit `cloud`
- * profile at the tool's cloud URL); `--api-url <url>` selects or creates the
- * profile of that instance, named for its host. On an Antasphere-cloud
- * instance the login is the hub's email code (once, stored on the hub
- * profile exactly as `antasphere login` stores it), then the exchange that
- * mints the tool's own key; on a self-hosted instance it is the instance's
- * email code, or a pasted key.
+ * A profile is a site (cli-core 0.5.0), and it signs in the way its site
+ * asks (R2, R3): on a site that signs in through an Antasphere hub, with the
+ * login AT THE HUB THE SITE NAMES (cli-core `chooseHub`, `chooseLogin`: never
+ * the machine's active login), signed in once with the hub's email code when
+ * there is none, then the exchange that mints the key the profile keeps; on a
+ * site that signs in by itself, with its own email code; or with a pasted
+ * key. A login never moves the default profile, nor the hub file's active
+ * login, except for the first of a machine; every write is one locked
+ * `updateConfig` (R0).
  */
-
-/** The hub a tool CLI signs in against inline: the same variable the hub CLI reads. */
-const HUB_URL_ENV = 'ANTASPHERE_URL';
 
 interface AuthGlobals {
   apiUrl?: string;
@@ -59,23 +58,36 @@ interface AuthGlobals {
 
 interface LoginOpts {
   email?: string;
+  hub?: string;
   keyName?: string;
   expiresInDays?: number;
 }
 
+/** Two addresses are one: both present, equal once trimmed and case-folded. */
+function sameAddress(a: string | undefined, b: string | undefined): boolean {
+  const x = firstSet(a)?.toLowerCase();
+  return x !== undefined && x === firstSet(b)?.toLowerCase();
+}
+
+/** How a login reads in a sentence: `<email> at <hub>`. */
+function loginLabel(login: { email?: string | undefined; hub: string }): string {
+  return `${firstSet(login.email) ?? '(no address)'} at ${login.hub}`;
+}
+
 /** How a signed-in credential reads in a sentence. */
-function describeCredential(source: CredentialSource, profileName: string | undefined): string {
-  switch (source) {
+function describeCredential(ctx: CliContext): string {
+  const login = ctx.login ? `the Antasphere login ${loginLabel(ctx.login)}` : 'the Antasphere login';
+  switch (ctx.credentialSource) {
     case 'flag':
       return 'the --api-key flag';
     case 'env':
       return 'the API key variable';
     case 'profile':
-      return profileName ? `the key of profile "${profileName}"` : 'the profile key';
+      return ctx.profileName ? `the key of profile "${ctx.profileName}"` : 'the profile key';
     case 'hub-cache':
-      return 'the Antasphere login (cached key)';
+      return `${login} (kept key)`;
     case 'hub-exchange':
-      return 'the Antasphere login (fresh exchange)';
+      return `${login} (fresh sign-in)`;
     case 'none':
       return 'nothing';
   }
@@ -99,6 +111,9 @@ function organizationsLine(me: MeResponse): string {
   return `Your workspaces: ${names}. Pass --org <name> (or --workspace <name>) to work in another.\n`;
 }
 
+/** What a site answered to the self-revoke of one key. */
+type RevokeAnswer = 'revoked' | 'dead' | 'refused';
+
 export function registerAuthCommands<TClient extends ChassisClient<string>>(
   kit: CliKit<TClient>,
   program: Command,
@@ -112,93 +127,273 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
     connect,
     loadConfig,
     profileUrl,
-    removeConnectKey,
     requireApiKey,
     resolveContext,
-    saveConfig,
+    updateConfig,
     workspaceSource
   } = kit;
   const { describeSource } = kit.workspace;
+  const { bin } = identity;
 
-  /** Save the tool's own key on a profile and make that profile the active one. */
-  function saveProfileKey(
+  const fetchOf = (): typeof globalThis.fetch => io.fetch ?? globalThis.fetch.bind(globalThis);
+  const authAt = (baseUrl: string): CliAuthClient => new CliAuthClient({ baseUrl, fetch: fetchOf() });
+  const loginsNow = (): CliLogin[] => listLogins(io.env, { hubCloudUrl: DEFAULT_HUB_URL });
+
+  /** The default profile: what a command typed by hand runs on (the active one, else the cloud's). */
+  function defaultOf(config: CliConfig): string | undefined {
+    return selectProfile({ config, cloudUrl: identity.cloudUrl }).name;
+  }
+
+  /**
+   * Save the tool's own key on a profile, in one `updateConfig`; the profile
+   * becomes the default only on a machine whose tool file held no profile.
+   */
+  function saveOwnKey(
     profileName: string,
     baseUrl: string,
     apiKey: string,
     email: string | undefined
-  ): string {
-    const config = loadConfig(io.env);
-    const previous = config.profiles[profileName];
-    config.profiles[profileName] = {
-      ...previous,
-      apiKey,
-      baseUrl: normalizeUrl(baseUrl),
-      ...(email ? { email } : {})
-    };
-    config.activeProfile = profileName;
-    return saveConfig(io.env, config);
+  ): { path: string; madeDefault: boolean } {
+    let madeDefault = false;
+    const { path } = updateConfig(io.env, (config) => {
+      const first = Object.keys(config.profiles).length === 0;
+      config.profiles[profileName] = {
+        ...config.profiles[profileName],
+        apiKey,
+        baseUrl: normalizeUrl(baseUrl),
+        ...(email ? { email } : {})
+      };
+      if (first) {
+        config.activeProfile = profileName;
+        madeDefault = true;
+      }
+    });
+    return { path, madeDefault };
   }
 
-  /** `login` makes its profile the active one: a login is the choice of where the next command runs. */
-  function activate(profileName: string, baseUrl: string): string {
-    const config = loadConfig(io.env);
-    config.profiles[profileName] = { ...config.profiles[profileName], baseUrl: normalizeUrl(baseUrl) };
-    config.activeProfile = profileName;
-    return saveConfig(io.env, config);
+  /** The one line a login says when its profile is not the default (R3: nothing moves the default). */
+  function sayDefault(profileName: string, madeDefault: boolean): void {
+    if (madeDefault) return;
+    const current = defaultOf(loadConfig(io.env));
+    if (current === undefined || current === profileName) return;
+    io.err.write(
+      `Signed in on profile "${profileName}". The default profile stays "${current}" ` +
+        `(${bin} use ${profileName} makes "${profileName}" the default).\n`
+    );
   }
 
-  /**
-   * The hub's email-code sign-in, inline: the wire `antasphere login` speaks
-   * (cli-core's instance auth client against the hub), the key written on the
-   * hub profile exactly as that CLI writes it, so the two logins are one.
-   */
-  async function hubLogin(opts: LoginOpts): Promise<{ email: string; profile: string }> {
-    // The hub profile the hub CLI would use, resolved its way (verifier
-    // round 1, F4): ANTASPHERE_URL selects the profile of that hub, else the
-    // active one, else the implicit `cloud` at account.antasphere.com; the
-    // URL is the variable, else that profile's own, else the default. A
-    // stored hub URL is never repointed at the production hub.
-    // `selectHubProfile`, the exchange's pick, goes through the same
-    // `selectProfile` with the same cloud URL, so the two agree (with no
-    // variable and no active profile it names none; the write below makes
-    // this pick the active one).
-    const hubConfig = loadCoreConfig(io.env, HUB_TOOL);
-    const selected = selectProfile({
-      config: hubConfig,
-      apiUrl: io.env[HUB_URL_ENV],
-      cloudUrl: DEFAULT_HUB_URL
-    });
-    const profile = selected.name ?? CLOUD_PROFILE;
-    const hubUrl = resolveBaseUrl({
-      env: io.env,
-      envVar: HUB_URL_ENV,
-      profile: selected.profile,
-      cloudUrl: DEFAULT_HUB_URL
-    });
-    const auth = new CliAuthClient({ baseUrl: hubUrl, ...(io.fetch ? { fetch: io.fetch } : {}) });
-    const email = opts.email ?? (await ask(io, 'Antasphere email: '));
-    await auth.request({ email });
-    io.err.write(`A sign-in code was sent to ${email} (if that Antasphere account can receive mail).\n`);
+  /** The hub's email-code sign-in at one hub: the wire `antasphere login` speaks. */
+  async function hubEmailCode(
+    hub: string,
+    email: string | undefined,
+    opts: LoginOpts
+  ): Promise<CliAuthCompleted> {
+    const auth = authAt(hub);
+    const address = email ?? (await ask(io, 'Antasphere email: '));
+    await auth.request({ email: address });
+    io.err.write(`A sign-in code was sent to ${address} (if that Antasphere account can receive mail).\n`);
     const otp = await ask(io, 'Code: ');
-    const completed = await auth.complete({
-      email,
+    return auth.complete({
+      email: address,
       otp,
       ...(opts.keyName ? { keyName: opts.keyName } : {}),
       ...(opts.expiresInDays ? { expiresInDays: opts.expiresInDays } : {})
     });
-    // Only the key's own fields move, exactly as `antasphere login` writes
-    // them; whatever else the profile holds stays.
-    const fresh = loadCoreConfig(io.env, HUB_TOOL);
-    fresh.profiles[profile] = {
-      ...fresh.profiles[profile],
-      apiKey: completed.key,
-      baseUrl: hubUrl,
-      email: completed.user.email,
-      workspaceId: completed.workspaceId
-    };
-    fresh.activeProfile = profile;
-    saveCoreConfig(io.env, HUB_TOOL, fresh);
-    return { email: completed.user.email, profile };
+  }
+
+  /**
+   * The entry of the hub file a new login at `hub` is written on: one that
+   * is at that hub and holds no key (the account CLI's own profile there,
+   * signed out), the active one first; else a new one named the way the hub
+   * CLI names it (`freshProfileName`: `cloud` for the default hub, else the
+   * host).
+   */
+  function entryFor(hubConfig: CliConfig, hub: string): string {
+    const keyless = Object.entries(hubConfig.profiles).filter(
+      ([, p]) => !firstSet(p.apiKey) && sameInstance(firstSet(p.baseUrl) ?? DEFAULT_HUB_URL, hub)
+    );
+    const pick =
+      keyless.find(([name]) => name === hubConfig.activeProfile) ??
+      keyless.find(([name]) => name === CLOUD_PROFILE) ??
+      keyless[0];
+    return pick ? pick[0] : freshProfileName(hubConfig, hub, DEFAULT_HUB_URL);
+  }
+
+  /**
+   * Write a login on the hub file, in one `updateConfig`: the key's own
+   * fields on the named entry (a replacement, a re-sign-in), or on the entry
+   * `entryFor` picks (a new login); whatever else the entry holds stays. The
+   * hub file's active login is set only when it held no profile at all.
+   * Answers the entry's name.
+   */
+  function writeLogin(target: { name: string } | { hub: string }, completed: CliAuthCompleted): string {
+    let written = '';
+    updateCoreConfig(io.env, HUB_TOOL, (hubConfig) => {
+      const first = Object.keys(hubConfig.profiles).length === 0;
+      const name = 'name' in target ? target.name : entryFor(hubConfig, target.hub);
+      const entry = hubConfig.profiles[name];
+      const hub = 'hub' in target ? target.hub : (firstSet(entry?.baseUrl) ?? DEFAULT_HUB_URL);
+      hubConfig.profiles[name] = {
+        ...entry,
+        apiKey: completed.key,
+        baseUrl: hub,
+        email: completed.user.email,
+        workspaceId: completed.workspaceId
+      };
+      if (first) hubConfig.activeProfile = name;
+      written = name;
+    });
+    return written;
+  }
+
+  /** The login of one entry, as the hub file holds it now. */
+  function loginNamed(name: string): CliLogin {
+    const login = loginsNow().find((l) => l.name === name);
+    if (!login) {
+      throw new CliUsageError(
+        `The Antasphere login "${name}" left the hub file while this command ran; try again.`
+      );
+    }
+    return login;
+  }
+
+  /**
+   * The login at `hub` that signs this profile in (R2's rule 3, ruling 3):
+   * `--email` naming a login there, that one; naming another account than
+   * the login there, that login REPLACED by the email code of the named
+   * account (the line, the replaced hub key revoked at its own hub); no login
+   * there, the email code and a new login. Two logins there that this
+   * profile never used: cli-core's « pick one ». Never a guess.
+   */
+  async function loginAt(
+    hub: string,
+    site: string,
+    here: CliProfile | undefined,
+    profileName: string,
+    opts: LoginOpts
+  ): Promise<{ login: CliLogin; replaced: CliLogin | undefined }> {
+    const logins = loginsNow();
+    const wanted = firstSet(opts.email);
+    const base = { hub, siteUrl: site, profile: here, logins, profileName, bin };
+    const pick = chooseLogin({ ...base, ...(wanted ? { email: wanted } : {}) });
+    if (pick.kind === 'login') return { login: pick.login, replaced: undefined };
+    if (pick.kind === 'pick_login') throw new CliUsageError(pick.sentence);
+    if (wanted) {
+      const current = chooseLogin(base);
+      if (current.kind === 'pick_login') throw new CliUsageError(current.sentence);
+      if (current.kind === 'login') {
+        const old = current.login;
+        const had = firstSet(old.email);
+        io.err.write(
+          had
+            ? `Replacing the Antasphere login ${had} with ${wanted}.\n`
+            : `Signing in as ${wanted}: the stored Antasphere login carries no address.\n`
+        );
+        const completed = await hubEmailCode(hub, wanted, opts);
+        writeLogin({ name: old.name }, completed);
+        // The replaced account's hub key dies at its own hub (best effort:
+        // a dead one answers 401), so nothing is left live for it.
+        const oldKey = firstSet(old.profile.apiKey);
+        if (oldKey && oldKey !== completed.key)
+          await authAt(old.hub)
+            .revoke(oldKey)
+            .catch(() => undefined);
+        return { login: loginNamed(old.name), replaced: old };
+      }
+    }
+    const completed = await hubEmailCode(hub, wanted, opts);
+    return { login: loginNamed(writeLogin({ hub }, completed)), replaced: undefined };
+  }
+
+  /**
+   * Revoke one key on a site (the profile's own, never another origin): what
+   * the site answered; a 403 (the site refused the self-revoke: the key stays
+   * valid) is said on stderr, and so is a 401 unless `quiet`. Anything else
+   * throws.
+   */
+  async function revokeOnSite(site: string, key: string, what: string, quiet = false): Promise<RevokeAnswer> {
+    try {
+      await authAt(site).revoke(key);
+      return 'revoked';
+    } catch (e) {
+      if (e instanceof CliAuthError && e.status === 401) {
+        if (!quiet) io.err.write(`${what} was already unusable; forgetting it.\n`);
+        return 'dead';
+      }
+      if (e instanceof CliAuthError && e.status === 403) {
+        // The key WORKS but the site refused the self-revoke (an older site
+        // whose machine allowlist predates DELETE /cli/auth/key). Never
+        // report that as gone.
+        io.err.write(
+          `The instance refused to revoke ${what} (${e.code}): it STAYS VALID server-side; revoke it from ` +
+            'the dashboard. Forgetting the local copy.\n'
+        );
+        return 'refused';
+      }
+      throw e;
+    }
+  }
+
+  /** How a key of a profile reads in a sentence (never any part of the key). */
+  function describeKey(key: ProfileKey): string {
+    if (key.kind === 'own') return 'the profile key';
+    if (key.kind === 'kept')
+      return `the key kept for ${loginLabel({ email: key.email, hub: key.hub ?? '' })}`;
+    return `the key kept for ${firstSet(key.email) ?? 'an unknown account'}`;
+  }
+
+  /** A profile's informational `email` goes with its own key. */
+  function dropOwnEmail(profileName: string): void {
+    updateConfig(io.env, (config) => {
+      const profile = config.profiles[profileName];
+      if (profile && !firstSet(profile.apiKey) && profile.email !== undefined) delete profile.email;
+    });
+  }
+
+  /**
+   * Before the exchange of a hub login: the profile's own key (a sign-in
+   * through the hub replaces it, PRDCT-3522), its kept key for the login's
+   * slot (a login is an explicit re-sign-in), and the replaced account's,
+   * are revoked on the profile's own site with no lock held, then forgotten
+   * (compare-and-remove). A key the site did not answer for stays.
+   */
+  async function retireBeforeExchange(
+    profileName: string,
+    site: string,
+    hub: string,
+    login: CliLogin,
+    replaced: CliLogin | undefined
+  ): Promise<void> {
+    const profile = loadConfig(io.env).profiles[profileName];
+    if (!profile || !sameInstance(profileUrl(profile), site)) return;
+    const accounts = [login.email, replaced?.email];
+    const slots = new Set([login.name, replaced?.name].filter((n): n is string => n !== undefined));
+    const oldOfLogin = new Set(
+      Object.entries(profile.connectKeys ?? {})
+        .filter(([slot]) => slots.has(slot))
+        .map(([, entry]) => firstSet(entry?.apiKey))
+        .filter((k): k is string => k !== undefined)
+    );
+    const doomed = keysOfProfile(profile).filter(
+      (k) =>
+        k.kind === 'own' ||
+        (k.kind === 'kept' &&
+          sameInstance(k.hub ?? '', hub) &&
+          accounts.some((email) => sameAddress(k.email, email))) ||
+        (k.kind === 'old' && oldOfLogin.has(k.apiKey))
+    );
+    if (doomed.length === 0) return;
+    const forget: string[] = [];
+    for (const key of doomed) {
+      try {
+        await revokeOnSite(profileUrl(profile), key.apiKey, describeKey(key), true);
+        forget.push(key.apiKey);
+      } catch {
+        // The site did not answer: the key stays for the next command.
+      }
+    }
+    forgetKeys(io.env, identity.tool, profileName, forget);
+    dropOwnEmail(profileName);
   }
 
   /** The instance's own email-code sign-in (self-hosted): both legs in one command. */
@@ -206,7 +401,7 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
     baseUrl: string,
     opts: LoginOpts
   ): Promise<{ key: string; keyName: string; email: string }> {
-    const auth = new CliAuthClient({ baseUrl, ...(io.fetch ? { fetch: io.fetch } : {}) });
+    const auth = authAt(baseUrl);
     const email = opts.email ?? (await ask(io, 'Email: '));
     await auth.request({ email });
     io.err.write(`A sign-in code was sent to ${email} (if that account exists on ${baseUrl}).\n`);
@@ -223,37 +418,32 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
   program
     .command('login')
     .description(
-      `Sign in: on the cloud through your Antasphere account, on a self-hosted instance with an email code ` +
-        `or a pasted ${identity.keyPrefix}_ key; saves the profile and makes it the active one`
+      'Sign in on a profile the way its site asks: through the Antasphere login at the hub the site names, ' +
+        `with the site's own email code, or with a pasted ${identity.keyPrefix}_ key; the default profile ` +
+        'moves only on a machine that has none'
     )
     .option('--email <email>', 'the account email (prompted when omitted)')
+    .option('--hub <url>', 'the Antasphere hub to sign in at, for a site that names none')
     .option('--key-name <name>', 'display name for the key the sign-in mints')
     .option('--expires-in-days <n>', 'TTL in days of that key (default: never expires)', (v: string) =>
       parseInt(v, 10)
     )
     .action(async (opts: LoginOpts, cmd: Command) => {
       const globals = cmd.optsWithGlobals() as AuthGlobals & { apiKey?: string };
+      // A profile and a URL that name two sites, and an exported key of
+      // another site, are refused here, before any request (resolveContext).
       const ctx = resolveContext(cmd, io);
       const profileName = ctx.profileName ?? CLOUD_PROFILE;
       const { baseUrl } = ctx;
-      // A profile is an instance, and a login never repoints one (verifier
-      // round 2, F9): a saved profile named with --profile while --api-url
-      // (or the URL variable) names another instance is refused before any
-      // request, so no key of that profile ever travels to the other origin.
-      const saved = ctx.config.profiles[profileName];
-      if (saved && !sameInstance(profileUrl(saved), baseUrl)) {
-        throw new CliUsageError(
-          `Profile "${profileName}" is the instance ${profileUrl(saved)}, and this login targets ${baseUrl}. ` +
-            `Drop --profile to sign in on the profile of ${baseUrl}, or drop --api-url to sign in on "${profileName}".`
-        );
-      }
+      const site = normalizeUrl(baseUrl);
+      const firstProfile = Object.keys(ctx.config.profiles).length === 0;
 
       // A pasted key: `--api-key`, `--api-key-stdin` (already spent in
-      // index.ts; reuse that read), or the key variable. Verified before it
-      // is stored. A profile key is NOT a paste: `login` on a profile that
-      // already holds one re-runs the sign-in the person asked for.
-      // A paste is an act: `--api-key` or `--api-key-stdin`, never the key
-      // variable a shell or a CI job happens to carry (verifier round 1, F8).
+      // index.ts; reuse that read). Verified before it is stored. A profile
+      // key is NOT a paste: `login` on a profile that already holds one
+      // re-runs the sign-in the person asked for. A paste is an act, never
+      // the key variable a shell or a CI job happens to carry (verifier
+      // round 1, F8).
       const pasted = globals.apiKey ?? stdinApiKey(io);
       if (pasted !== undefined) {
         if (!pasted.startsWith(`${identity.keyPrefix}_`)) {
@@ -261,248 +451,262 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
             `That is not a ${identity.displayName} key: it should start with ${identity.keyPrefix}_.`
           );
         }
-        const fetchImpl = io.fetch ?? globalThis.fetch.bind(globalThis);
-        const me = await createClient({ baseUrl, apiKey: pasted, fetch: fetchImpl }).me();
-        const path = saveProfileKey(profileName, baseUrl, pasted, me.user.email);
+        const me = await createClient({ baseUrl, apiKey: pasted, fetch: fetchOf() }).me();
+        const { path, madeDefault } = saveOwnKey(profileName, baseUrl, pasted, me.user.email);
         if (globals.json) {
-          return printJson(io, {
+          printJson(io, {
             profile: profileName,
-            baseUrl,
+            site,
             via: 'key',
+            login: null,
             user: me.user,
             workspace: me.workspace,
+            madeDefault,
             configPath: path
           });
+        } else {
+          io.out.write(
+            `${signedInLine(me, baseUrl)}\nKey saved to profile "${profileName}" (${path}).\n${organizationsLine(me)}`
+          );
         }
-        io.out.write(
-          `${signedInLine(me, baseUrl)}\nKey saved to profile "${profileName}" (${path}).\n${organizationsLine(me)}`
-        );
+        sayDefault(profileName, madeDefault);
         return;
       }
 
-      // Cloud or self-hosted? Discovery says (the same probe as connect-on-demand).
-      const probe = await probeToolInstance(baseUrl, io.fetch);
+      // How does the site sign in? Its discovery says, and the profile
+      // remembers it (when it is on disk).
+      const probe = await probeToolInstance(baseUrl, fetchOf());
+      if (probe) rememberSite(io.env, identity.tool, profileName, probe, { cloudUrl: identity.cloudUrl });
       if (probe?.cloud) {
-        // The hub login, once: stored on the hub profile as `antasphere login`
-        // stores it, so every other tool CLI is signed in too. `--email`
-        // naming ANOTHER account than the stored login signs that account in
-        // afresh, replacing the stored login (PRDCT-3032): the person who
-        // signed in with the wrong address switches from here. A stored key
-        // with no usable address (absent or blank) is someone unknown, so
-        // `--email` on it signs in afresh too (verifier round 1, F2).
-        let hub = selectHubProfile(io.env, { cloudUrl: DEFAULT_HUB_URL });
-        const hasKey = Boolean(hub.profile?.apiKey);
-        const stored = hasKey ? firstSet(hub.profile?.email) : undefined;
-        const switching =
-          hasKey &&
-          opts.email !== undefined &&
-          (stored === undefined || opts.email.toLowerCase() !== stored.toLowerCase());
-        if (switching) {
-          io.err.write(
-            stored
-              ? `Replacing the Antasphere login ${stored} with ${opts.email}.\n`
-              : `Signing in as ${opts.email}: the stored Antasphere login carries no address.\n`
-          );
-        }
-        if (!hub.profile?.apiKey || switching) await hubLogin(opts);
-        // A login is an explicit re-sign-in (verifier round 1, F3): the key
-        // cached on this profile is revoked on its instance (best effort: a
-        // dead one answers 401) and forgotten, and the exchange runs afresh,
-        // so a stale cached key never survives a login.
-        hub = selectHubProfile(io.env, { cloudUrl: DEFAULT_HUB_URL });
-        const stale = hub.name
-          ? loadConfig(io.env).profiles[profileName]?.connectKeys?.[hub.name]
-          : undefined;
-        if (stale && hub.name) {
-          // Revoked on the instance the key was minted for, the profile's own
-          // (the same rule as logout), never on a flag URL.
-          const auth = new CliAuthClient({
-            baseUrl: profileUrl(loadConfig(io.env).profiles[profileName]),
-            ...(io.fetch ? { fetch: io.fetch } : {})
-          });
-          await auth.revoke(stale.apiKey).catch(() => undefined);
-          removeConnectKey(io.env, profileName, hub.name);
-        }
-        // The exchange, then the tool's own answer. A stored hub key the hub
-        // no longer accepts is replaced by a fresh sign-in, once.
+        // The hub: the one the site names, else --hub, ANTASPHERE_URL, the
+        // hub of the profile's newest kept key; never a guess (cli-core).
+        const onDisk = loadConfig(io.env).profiles[profileName];
+        const here = onDisk && sameInstance(profileUrl(onDisk), site) ? onDisk : undefined;
+        const chosen = chooseHub({
+          siteUrl: site,
+          siteHub: probe.hub,
+          profile: here,
+          logins: loginsNow(),
+          hubUrl: firstSet(opts.hub),
+          envHub: firstSet(io.env[HUB_URL_ENV]),
+          profileName,
+          bin
+        });
+        if (chosen.kind !== 'hub') throw new CliUsageError(chosen.sentence);
+        const { hub } = chosen;
+        const signedIn = await loginAt(hub, site, here, profileName, opts);
+        let { login } = signedIn;
+        await retireBeforeExchange(profileName, site, hub, login, signedIn.replaced);
+
+        // The exchange, at that login's own hub, then the tool's own answer.
+        // A stored hub key the hub no longer accepts is replaced by a fresh
+        // sign-in at that hub, once.
+        const exchange = () =>
+          connect(ctx, { profileName, cached: false, hubUrl: hub, email: firstSet(login.email) });
         let outcome;
         try {
-          outcome = await connect(ctx, { profileName, cached: false });
+          outcome = await exchange();
         } catch (e) {
           if (!(e instanceof CoreUsageError) || !/rejected/.test(e.message)) throw e;
           io.err.write('The stored Antasphere login was rejected: signing in again.\n');
-          await hubLogin(opts);
-          hub = selectHubProfile(io.env, { cloudUrl: DEFAULT_HUB_URL });
-          outcome = await connect(ctx, { profileName, cached: false });
+          const completed = await hubEmailCode(hub, firstSet(opts.email), opts);
+          login = loginNamed(writeLogin({ name: login.name }, completed));
+          outcome = await exchange();
         }
         if (outcome.outcome === 'not_cloud') {
           throw new CliUsageError(`${baseUrl} stopped answering as an Antasphere-cloud instance; try again.`);
         }
-        const fetchImpl = io.fetch ?? globalThis.fetch.bind(globalThis);
-        const me = await createClient({ baseUrl, apiKey: outcome.key, fetch: fetchImpl }).me();
-        const path = activate(profileName, baseUrl);
+        const me = await createClient({ baseUrl, apiKey: outcome.key, fetch: fetchOf() }).me();
+        const madeDefault = firstProfile && loadConfig(io.env).activeProfile === profileName;
         if (globals.json) {
-          return printJson(io, {
+          printJson(io, {
             profile: profileName,
-            baseUrl,
-            via: 'antasphere',
-            hubProfile: hub.name ?? CLOUD_PROFILE,
+            site,
+            via: 'login',
+            login: { hub: outcome.login.hub, email: outcome.login.email },
             user: me.user,
             workspace: me.workspace,
             workspaces: me.workspaces,
-            configPath: path
+            madeDefault,
+            configPath: configPath(io.env)
           });
+        } else {
+          io.out.write(`${signedInLine(me, baseUrl)}\n${organizationsLine(me)}`);
         }
-        io.out.write(`${signedInLine(me, baseUrl)}\n${organizationsLine(me)}`);
+        sayDefault(profileName, madeDefault);
         return;
       }
 
-      // Self-hosted: the instance's own email code, then its key on the profile.
+      // A site that signs in by itself: its own email code, then its key on
+      // the profile, named by the name the site gave it (never any part of it).
       const minted = await instanceLogin(baseUrl, opts);
-      const fetchImpl = io.fetch ?? globalThis.fetch.bind(globalThis);
-      const me = await createClient({ baseUrl, apiKey: minted.key, fetch: fetchImpl }).me();
-      const path = saveProfileKey(profileName, baseUrl, minted.key, minted.email);
+      const me = await createClient({ baseUrl, apiKey: minted.key, fetch: fetchOf() }).me();
+      const { path, madeDefault } = saveOwnKey(profileName, baseUrl, minted.key, minted.email);
       if (globals.json) {
-        // The full key is deliberately NOT echoed — it is already stored.
-        return printJson(io, {
+        printJson(io, {
           profile: profileName,
-          baseUrl,
+          site,
           via: 'otp',
+          login: null,
           user: me.user,
           workspace: me.workspace,
           keyName: minted.keyName,
+          madeDefault,
           configPath: path
         });
+      } else {
+        io.out.write(
+          `${signedInLine(me, baseUrl)}\nAPI key "${minted.keyName}" saved to profile "${profileName}" ` +
+            `(${path}).\n${organizationsLine(me)}`
+        );
       }
-      io.out.write(
-        `${signedInLine(me, baseUrl)}\nAPI key "${minted.keyName}" (${redactKey(minted.key)}) saved to profile ` +
-          `"${profileName}" (${path}).\n${organizationsLine(me)}`
-      );
+      sayDefault(profileName, madeDefault);
     });
 
-  /** The hub login `--all` ends: `antasphere logout` from here (the key revoked on the hub, the profile cleared). */
-  async function hubLogout(): Promise<{ email: string | undefined; revoked: boolean } | null> {
-    const hub = selectHubProfile(io.env, { cloudUrl: DEFAULT_HUB_URL });
-    if (!hub.name || !hub.profile?.apiKey) return null;
-    // Revoked at the HUB's own URL: the profile's, else the default hub. Never
-    // the tool kit's `profileUrl`, whose fallback is the tool's cloud host: a
-    // hub profile with no baseUrl would send the hub key there.
-    const auth = new CliAuthClient({
-      baseUrl: hub.profile.baseUrl?.trim() || DEFAULT_HUB_URL,
-      ...(io.fetch ? { fetch: io.fetch } : {})
-    });
-    let revoked = false;
-    try {
-      await auth.revoke(hub.profile.apiKey);
-      revoked = true;
-    } catch (e) {
-      if (!(e instanceof CliAuthError && (e.status === 401 || e.status === 403))) throw e;
-      io.err.write('The stored Antasphere login was already unusable; forgetting it.\n');
+  /**
+   * The logins a profile's kept keys came from: each login in place at a
+   * kept key's hub with its address, and the login an old slot is filed
+   * under when it carries the slot's address. Each once.
+   */
+  function loginsBehind(profile: CliProfile, logins: CliLogin[]): CliLogin[] {
+    const found: CliLogin[] = [];
+    const add = (login: CliLogin): void => {
+      if (!found.some((l) => l.name === login.name)) found.push(login);
+    };
+    for (const key of keysOfProfile(profile)) {
+      if (key.kind !== 'kept') continue;
+      for (const l of logins)
+        if (sameInstance(l.hub, key.hub ?? '') && sameAddress(l.email, key.email)) add(l);
     }
-    const fresh = loadCoreConfig(io.env, HUB_TOOL);
-    delete fresh.profiles[hub.name];
-    if (fresh.activeProfile === hub.name) delete fresh.activeProfile;
-    saveCoreConfig(io.env, HUB_TOOL, fresh);
-    return { email: hub.profile.email, revoked };
+    for (const [slot, entry] of Object.entries(profile.connectKeys ?? {})) {
+      const l = logins.find((x) => x.name === slot);
+      if (l && sameAddress(l.email, entry?.email)) add(l);
+    }
+    return found;
+  }
+
+  /**
+   * `logout --all`: each login ended, its hub key revoked at its OWN hub,
+   * then its entry deleted from the hub file (only while it still holds that
+   * key), and the hub file's active login removed when it was that entry.
+   */
+  async function endLogins(
+    logins: CliLogin[]
+  ): Promise<Array<{ hub: string; email: string | null; revoked: boolean }>> {
+    const ended: Array<{ hub: string; email: string | null; revoked: boolean }> = [];
+    const gone: CliLogin[] = [];
+    try {
+      for (const login of logins) {
+        const hubKey = firstSet(login.profile.apiKey) ?? '';
+        let revoked = false;
+        try {
+          await authAt(login.hub).revoke(hubKey);
+          revoked = true;
+        } catch (e) {
+          if (!(e instanceof CliAuthError && (e.status === 401 || e.status === 403))) throw e;
+          io.err.write(`The Antasphere login ${loginLabel(login)} was already unusable; forgetting it.\n`);
+        }
+        gone.push(login);
+        ended.push({ hub: login.hub, email: firstSet(login.email) ?? null, revoked });
+      }
+    } finally {
+      if (gone.length > 0) {
+        updateCoreConfig(io.env, HUB_TOOL, (hubConfig) => {
+          for (const login of gone) {
+            const entry = hubConfig.profiles[login.name];
+            if (!entry || entry.apiKey !== login.profile.apiKey) continue;
+            delete hubConfig.profiles[login.name];
+            if (hubConfig.activeProfile === login.name) delete hubConfig.activeProfile;
+          }
+        });
+      }
+    }
+    return ended;
   }
 
   program
     .command('logout')
     .description(
-      'Sign out of the active (or named) profile: revokes every key it holds on the instance, then forgets them; ' +
-        'with --all, also ends the Antasphere login of this machine (what `antasphere logout` does)'
+      'Sign out of the active (or named) profile: revokes every key it holds on its own site, then forgets ' +
+        'them; with --all, also ends the Antasphere logins its kept keys came from'
     )
-    .option('--all', 'also revoke the Antasphere login and clear its profile', false)
+    .option(
+      '--all',
+      'also end the Antasphere logins this profile signed in with (revoked at their hubs)',
+      false
+    )
     .action(async (opts: { all: boolean }, cmd: Command) => {
       const globals = cmd.optsWithGlobals() as AuthGlobals;
       const ctx = resolveContext(cmd, io);
       const profileName = ctx.profileName;
       const profile = profileName ? ctx.config.profiles[profileName] : undefined;
-      const hubLogin = selectHubProfile(io.env, { cloudUrl: DEFAULT_HUB_URL }).profile;
       if (!profileName || !profile) {
-        // Nothing of this tool's on the machine. The Antasphere login, when
-        // there is one, is the family's: it is ended here on --all, else
-        // named with the two commands that end it (PRDCT-3032).
-        if (hubLogin?.apiKey) {
-          if (opts.all) {
-            const ended = await hubLogout();
-            if (globals.json) return printJson(io, { profile: null, revoked: 0, refused: 0, hub: ended });
-            io.out.write(
-              `Nothing of ${identity.displayName}'s to sign out of on this machine. ` +
-                `The Antasphere login ${ended?.email ?? ''} is ${ended?.revoked ? 'revoked and ' : ''}forgotten.\n`
-            );
-            return;
-          }
+        // Nothing of this tool's on the machine. The Antasphere logins, when
+        // there are some, are the family's, and none came from a profile of
+        // this tool: they are named with the command that ends them.
+        const logins = loginsNow();
+        if (logins.length > 0) {
+          const stay =
+            logins.length === 1
+              ? `The Antasphere login ${loginLabel(logins[0]!)} stays for the whole tool family: ` +
+                '`antasphere logout` ends it.'
+              : `The Antasphere logins ${logins.map(loginLabel).join(', ')} stay for the whole tool family: ` +
+                '`antasphere logout` ends them.';
           throw new CliUsageError(
-            `Nothing of ${identity.displayName}'s to sign out of on this machine. The Antasphere login ` +
-              `${hubLogin.email ?? ''} stays for the whole tool family: \`${identity.bin} logout --all\` or ` +
-              '`antasphere logout` ends it.'
+            `Nothing of ${identity.displayName}'s to sign out of on this machine. ${stay}`
           );
         }
         throw new CliUsageError('No profile to log out of.');
       }
-      // Every key is revoked on the instance the PROFILE names, never on a
-      // flag/env URL: a key must not travel to a different instance, not
-      // even to die (a foreign host would see the key AND the real one would
-      // survive while we report it gone).
+      // Every key is revoked on the site the PROFILE is, never on a flag/env
+      // URL: a key must not travel to a different site, not even to die (a
+      // foreign host would see the key AND the real one would survive while
+      // we report it gone). The lock is never held across the network: the
+      // keys are read, revoked, then forgotten compare-and-remove.
       const baseUrl = profileUrl(profile);
-      const auth = new CliAuthClient({ baseUrl, ...(io.fetch ? { fetch: io.fetch } : {}) });
+      const keys = keysOfProfile(profile);
+      const behind = loginsBehind(profile, loginsNow());
       let revoked = 0;
       let refused = 0;
-      const revoke = async (key: string, what: string): Promise<void> => {
-        try {
-          await auth.revoke(key);
-          revoked += 1;
-        } catch (e) {
-          if (e instanceof CliAuthError && e.status === 401) {
-            io.err.write(`${what} was already unusable; forgetting it.\n`);
-          } else if (e instanceof CliAuthError && e.status === 403) {
-            // The key WORKS but the instance refused the self-revoke (an
-            // older instance whose machine allowlist predates DELETE
-            // /cli/auth/key). Never report that as gone.
-            refused += 1;
-            io.err.write(
-              `The instance refused to revoke ${what} (${e.code}): it STAYS VALID server-side; revoke it from ` +
-                'the dashboard. Forgetting the local copy.\n'
-            );
-          } else {
-            throw e;
-          }
+      const done: string[] = [];
+      try {
+        for (const key of keys) {
+          const answer = await revokeOnSite(baseUrl, key.apiKey, describeKey(key));
+          if (answer === 'revoked') revoked += 1;
+          if (answer === 'refused') refused += 1;
+          done.push(key.apiKey);
         }
-      };
-      const slots = Object.entries(profile.connectKeys ?? {});
-      for (const [slot, entry] of slots) {
-        await revoke(entry.apiKey, `the key of the Antasphere login "${slot}"`);
-        removeConnectKey(io.env, profileName, slot);
+      } finally {
+        forgetKeys(io.env, identity.tool, profileName, done);
+        dropOwnEmail(profileName);
       }
-      if (profile.apiKey) await revoke(profile.apiKey, 'the profile key');
-      const config = loadConfig(io.env);
-      const current = config.profiles[profileName];
-      if (current) {
-        delete current.apiKey;
-        delete current.email;
-        saveConfig(io.env, config);
-      }
-      const ended = opts.all ? await hubLogout() : null;
+      const ended = opts.all ? await endLogins(behind) : null;
       if (globals.json) {
         return printJson(io, {
           profile: profileName,
           baseUrl,
           revoked,
           refused,
-          hubProfiles: slots.map(([slot]) => slot),
           forgotten: true,
-          ...(opts.all ? { hub: ended } : {})
+          ...(ended ? { logins: ended } : {})
         });
       }
-      const hubLine = opts.all
-        ? ended
-          ? ` The Antasphere login ${ended.email ?? ''} is ${ended.revoked ? 'revoked and ' : ''}forgotten.`
+      const hubLine = ended
+        ? ended.length > 0
+          ? ended
+              .map(
+                (l) =>
+                  ` The Antasphere login ${loginLabel({ email: l.email ?? undefined, hub: l.hub })} is ` +
+                  `${l.revoked ? 'revoked and ' : ''}forgotten.`
+              )
+              .join('')
           : ' No Antasphere login to end.'
-        : hubLogin?.apiKey
-          ? ` The Antasphere login ${hubLogin.email ?? ''} stays for the whole tool family (\`${identity.bin} logout --all\` ends it too).`
-          : '';
-      if (revoked === 0 && slots.length === 0 && !profile.apiKey) {
+        : behind.length === 1
+          ? ` The Antasphere login ${loginLabel(behind[0]!)} stays for the whole tool family.`
+          : behind.length > 1
+            ? ` The Antasphere logins ${behind.map(loginLabel).join(', ')} stay for the whole tool family.`
+            : '';
+      if (keys.length === 0) {
         io.out.write(`Profile "${profileName}" held no key.${hubLine}\n`);
         return;
       }
@@ -518,7 +722,7 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
 
   program
     .command('whoami')
-    .description('Show the identity behind the resolved API key, and where it came from')
+    .description('Show the identity behind the resolved credential, and where it came from')
     .action(async (_opts, cmd: Command) => {
       const ctx = resolveContext(cmd, io);
       await requireApiKey(ctx);
@@ -526,15 +730,13 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
       // `me` is the answer WITH the selection applied, so its workspace is
       // the one this command (and any other, same flags) really ran in.
       const source = workspaceSource(ctx);
-      const hub = selectHubProfile(io.env, { cloudUrl: DEFAULT_HUB_URL });
-      const hubLine = hubLoginLine(ctx, hub.profile);
       if (ctx.json) {
         return printJson(io, {
           ...me,
           workspaceSource: source,
           credentialSource: ctx.credentialSource,
           profile: ctx.profileName ?? null,
-          hubLogin: hub.profile?.apiKey ? { profile: hub.name, email: hub.profile.email ?? null } : null
+          login: ctx.login
         });
       }
       const active = me.workspace ? me.workspaces.find((w) => w.id === me.workspace!.id) : undefined;
@@ -548,36 +750,12 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
           `  workspace: ${me.workspace ? `${me.workspace.name} (${me.workspace.id})` : '(none)'}\n` +
           (org ? `  organization: ${org}\n` : '') +
           `  chosen by: ${describeSource(source, ctx.workspaceSelection?.kind)}\n` +
-          `  signed in with: ${describeCredential(ctx.credentialSource, ctx.profileName)}\n` +
-          (hubLine ? `  Antasphere login: ${hubLine}\n` : '') +
+          `  signed in with: ${describeCredential(ctx)}\n` +
           `  role:      ${me.role ?? '(none)'} (via ${me.via})\n` +
           `  scopes:    ${me.scopes ? me.scopes.join(', ') : 'full (session)'}\n` +
           (me.via === 'api_key' ? `  key expires: ${me.apiKeyExpiresAt ?? 'never'}\n` : '')
       );
     });
-
-  /**
-   * `whoami`'s line about the hub login: which one served, or why the stored
-   * one was NOT used (a direct key won, the profile names another instance),
-   * or that none exists where one would serve (the cloud profile).
-   */
-  function hubLoginLine(ctx: CliContext<TClient>, hub: CliProfile | undefined): string | null {
-    const stored = hub?.apiKey ? (hub.email ?? 'stored') : null;
-    if (ctx.credentialSource === 'hub-cache' || ctx.credentialSource === 'hub-exchange') {
-      return stored ?? 'used';
-    }
-    if (stored) {
-      const reason =
-        ctx.credentialSource === 'flag' ||
-        ctx.credentialSource === 'env' ||
-        ctx.credentialSource === 'profile'
-          ? `not used: ${describeCredential(ctx.credentialSource, ctx.profileName)} wins`
-          : 'not used';
-      return `${stored} (${reason})`;
-    }
-    const onCloud = ctx.profileName === CLOUD_PROFILE || ctx.baseUrl === normalizeUrl(identity.cloudUrl);
-    return onCloud ? `not connected (run \`${identity.bin} login\`)` : null;
-  }
 
   program
     .command('verify')
@@ -595,17 +773,17 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
     .description('Switch the active profile (the instance the commands run against)')
     .action(async (name: string, _opts, cmd: Command) => {
       const globals = cmd.optsWithGlobals() as AuthGlobals;
-      const config = loadConfig(io.env);
-      if (!config.profiles[name]) {
-        if (name !== CLOUD_PROFILE) {
-          throw new CliUsageError(`Unknown profile "${name}" — run \`${identity.bin} profiles\`.`);
+      const { config } = updateConfig(io.env, (draft) => {
+        if (!draft.profiles[name]) {
+          if (name !== CLOUD_PROFILE) {
+            throw new CliUsageError(`Unknown profile "${name}" — run \`${bin} profiles\`.`);
+          }
+          // The implicit cloud profile exists before anything is written: `use
+          // cloud` makes it a row so it can be the active one.
+          draft.profiles[name] = { baseUrl: normalizeUrl(identity.cloudUrl) };
         }
-        // The implicit cloud profile exists before anything is written: `use
-        // cloud` makes it a row so it can be the active one.
-        config.profiles[name] = { baseUrl: normalizeUrl(identity.cloudUrl) };
-      }
-      config.activeProfile = name;
-      saveConfig(io.env, config);
+        draft.activeProfile = name;
+      });
       if (globals.json) return printJson(io, { activeProfile: name });
       io.out.write(`Active profile: ${name} (${profileUrl(config.profiles[name])})\n`);
     });
@@ -616,41 +794,55 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
     .action(async (_opts, cmd: Command) => {
       const globals = cmd.optsWithGlobals() as AuthGlobals;
       const config = loadConfig(io.env);
-      const hub = selectHubProfile(io.env, { cloudUrl: DEFAULT_HUB_URL });
       // The implicit cloud profile is listed even before it is on disk: it is
       // where a clean machine runs, and where `login` with no URL signs in.
       const rows: Array<[string, CliProfile]> = Object.entries(config.profiles);
       if (!config.profiles[CLOUD_PROFILE])
         rows.unshift([CLOUD_PROFILE, { baseUrl: normalizeUrl(identity.cloudUrl) }]);
       const activeName = config.activeProfile ?? CLOUD_PROFILE;
-      const credentialOf = (p: CliProfile): { kind: 'key' | 'hub' | 'none'; text: string } => {
-        if (p.apiKey) return { kind: 'key', text: redactKey(p.apiKey) };
-        const entry = hub.name ? p.connectKeys?.[hub.name] : undefined;
-        if (entry) return { kind: 'hub', text: `via Antasphere${entry.email ? ` (${entry.email})` : ''}` };
-        const others = Object.keys(p.connectKeys ?? {});
-        // The hub profile is the one ANTASPHERE_URL names when it is set, else the active one.
-        const chosen = firstSet(io.env[HUB_URL_ENV])
-          ? 'not the one ANTASPHERE_URL names'
-          : 'not the active one';
-        if (others.length > 0)
-          return { kind: 'hub', text: `via Antasphere (login "${others.join('", "')}", ${chosen})` };
-        return { kind: 'none', text: '(not signed in)' };
+      // Who signs each profile in, from the two files alone (cli-core
+      // `planSignIn`, the environment set aside); never any part of a key.
+      const credentialOf = (
+        name: string,
+        p: CliProfile
+      ): { kind: 'key' | 'hub' | 'none'; text: string; email: string | null } => {
+        const plan = planSignIn({
+          env: io.env,
+          tool: identity.tool,
+          profileName: name,
+          profile: config.profiles[name] ? p : undefined,
+          siteUrl: profileUrl(p),
+          cloudUrl: identity.cloudUrl,
+          hubCloudUrl: DEFAULT_HUB_URL
+        });
+        if (plan.state === 'signed_in' && plan.via === 'key')
+          return { kind: 'key', text: 'its own key', email: null };
+        if ((plan.state === 'signed_in' || plan.state === 'will_sign_in') && plan.login && plan.hub) {
+          const who = loginLabel({ email: plan.login.email, hub: plan.hub });
+          return {
+            kind: 'hub',
+            text:
+              plan.state === 'signed_in'
+                ? `via Antasphere (${who})`
+                : `via Antasphere at the next command (${who})`,
+            email: firstSet(plan.login.email) ?? null
+          };
+        }
+        return { kind: 'none', text: '(not signed in)', email: null };
       };
       if (globals.json) {
         return printJson(io, {
           activeProfile: activeName,
-          hubProfile: hub.name ?? null,
           profiles: Object.fromEntries(
             rows.map(([n, p]) => {
-              const cred = credentialOf(p);
+              const cred = credentialOf(n, p);
               return [
                 n,
                 {
                   baseUrl: profileUrl(p),
                   saved: Boolean(config.profiles[n]),
                   credential: cred.kind,
-                  apiKey: p.apiKey ? redactKey(p.apiKey) : null,
-                  email: p.email ?? (hub.name ? (p.connectKeys?.[hub.name]?.email ?? null) : null),
+                  email: p.email ?? cred.email,
                   hubProfiles: Object.keys(p.connectKeys ?? {})
                 }
               ];
@@ -659,7 +851,7 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
         });
       }
       io.out.write(
-        table(rows.map(([n, p]) => [activeName === n ? '*' : ' ', n, profileUrl(p), credentialOf(p).text]))
+        table(rows.map(([n, p]) => [activeName === n ? '*' : ' ', n, profileUrl(p), credentialOf(n, p).text]))
       );
     });
 
@@ -667,32 +859,36 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
 
   config
     .command('show')
-    .description('Show the config path, active profile, and redacted keys')
+    .description('Show the config path, the default profile, and what each profile holds (never a key)')
     .action(async (_opts, cmd: Command) => {
       const globals = cmd.optsWithGlobals() as AuthGlobals;
       const cfg = loadConfig(io.env);
       const path = configPath(io.env);
-      const redacted = {
+      // No key material, redacted or not (decision 4): what each profile is
+      // (its site) and what it holds, by kind.
+      const shown = {
         path,
-        activeProfile: cfg.activeProfile ?? null,
+        defaultProfile: cfg.activeProfile ?? null,
         profiles: Object.fromEntries(
-          Object.entries(cfg.profiles).map(([n, p]) => [
-            n,
-            {
-              baseUrl: profileUrl(p),
-              apiKey: p.apiKey ? redactKey(p.apiKey) : null,
-              email: p.email ?? null,
-              // Hub-connected keys (one per hub profile), redacted like the rest.
-              connectKeys: Object.fromEntries(
-                Object.entries(p.connectKeys ?? {}).map(([slot, entry]) => [slot, redactKey(entry.apiKey)])
-              )
-            }
-          ])
+          Object.entries(cfg.profiles).map(([n, p]) => {
+            const keys = keysOfProfile(p);
+            return [
+              n,
+              {
+                site: normalizeUrl(profileUrl(p)),
+                ownKey: keys.some((k) => k.kind === 'own'),
+                keptKeys: keys
+                  .filter((k) => k.kind === 'kept')
+                  .map((k) => ({ hub: k.hub ?? null, email: k.email ?? null })),
+                oldSlots: keys.filter((k) => k.kind === 'old').length
+              }
+            ];
+          })
         )
       };
-      if (globals.json) return printJson(io, redacted);
+      if (globals.json) return printJson(io, shown);
       io.out.write(`config: ${path ?? '(no HOME/XDG_CONFIG_HOME — config disabled)'}\n`);
-      io.out.write(`${JSON.stringify(redacted, null, 2)}\n`);
+      io.out.write(`${JSON.stringify(shown, null, 2)}\n`);
     });
 
   config

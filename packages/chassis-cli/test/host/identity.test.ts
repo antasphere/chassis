@@ -119,7 +119,7 @@ describe('the `things` identity, by its observable bytes', () => {
     ]);
   });
 
-  it('displayName, keyPrefix, envPrefix: the missing-hub-login sentence, whole', async () => {
+  it('bin: the sentence of a site that names no hub, whole (cli-core says it, with the binary the kit hands it)', async () => {
     const env = await tempConfigEnv();
     const h = routedHarness(
       [{ method: 'GET', path: /\/api\/v1\/instance$/, reply: () => ({ body: CLOUD_INSTANCE }) }],
@@ -127,9 +127,30 @@ describe('the `things` identity, by its observable bytes', () => {
     );
     expect(await run(['files', 'list', '--api-url', 'http://tool'], h.io)).toBe(1);
     expect(h.err()).toBe(
-      'Error: This Things instance signs in through Antasphere. Run `things login` once (or `antasphere login`), ' +
-        'then retry — or pass --api-key <thk_…> / set THINGS_API_KEY.\n'
+      'Error: http://tool names no Antasphere hub (it runs a version from before sites named theirs), and ' +
+        'profile "tool" has never signed in there. This machine holds no Antasphere login. Pick the hub this ' +
+        'site trusts: things --profile tool login --hub <hub>.\n'
     );
+  });
+
+  it('displayName, keyPrefix: the not-a-key sentence, whole', async () => {
+    const env = await tempConfigEnv();
+    const h = routedHarness([meRoute], env);
+    expect(await run(['login', '--api-key', 'zzz_not_ours', '--api-url', 'http://tool'], h.io)).toBe(1);
+    expect(h.err()).toBe('Error: That is not a Things key: it should start with thk_.\n');
+    expect(h.wire).toEqual([]);
+  });
+
+  it('envPrefix: the sentence of an exported key of another site, whole', async () => {
+    const env = await tempConfigEnv();
+    const h = routedHarness([meRoute], { ...env, THINGS_API_KEY: 'thk_envkey12_0123456789abcdef' });
+    expect(await run(['whoami', '--api-url', 'http://tool'], h.io)).toBe(1);
+    expect(h.err()).toBe(
+      'Error: THINGS_API_KEY is a key of https://things.antasphere.test (THINGS_URL is not set, so it belongs ' +
+        "to the cloud), and this command targets http://tool. Unset THINGS_API_KEY to run on the profile's own " +
+        'sign-in, or set THINGS_URL to the site the key was issued for.\n'
+    );
+    expect(h.wire).toEqual([]);
   });
 
   it('bin, envPrefix: the no-key sentence, whole', async () => {

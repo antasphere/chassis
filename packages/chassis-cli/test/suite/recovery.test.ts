@@ -1,28 +1,34 @@
 import { describe, expect, it } from 'vitest';
-import { HUB_TOOL, loadConfig as loadCoreConfig, saveConfig as saveCoreConfig } from '@antasphere/cli-core';
+import { HUB_TOOL, loadConfig as loadCoreConfig } from '@antasphere/cli-core';
 import { routedHarness, tempConfigEnv, type Route } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
 import {
   cloudInstanceRoute,
   exchangeRoutes,
+  fresh,
   HUB,
   HUB_KEY,
+  kept,
   key,
   meBody,
+  namingInstanceRoute,
   ORG,
+  seedHub,
   seedHubLogin,
+  seedTool,
   TOOL_ACCESS_DENIED,
   wsRow
 } from './signin-fixtures.js';
 
 /**
- * A stranded cached key recovers ONCE (PRDCT-2947): a 401 answered to a key
- * the connect cache served evicts it, runs the exchange again, and replays
- * the same request with the new key. A second 401 stands; a direct key
- * never recovers; a hub refusal on the way is its own sentence, exit 3.
+ * A stranded kept key recovers ONCE (PRDCT-2947): a 401 answered to a key
+ * the sign-in served runs cli-core's `refreshConnectKey` (compare-and-evict,
+ * then the exchange again) and replays the same request with the new key. A
+ * second 401 stands; a direct key never recovers; a hub refusal on the way is
+ * its own sentence, exit 3.
  */
 
-const { loadConfig, saveConfig } = cli;
+const { loadConfig } = cli;
 const { bin, envPrefix: P, displayName } = cli.identity;
 
 const OLD = key('old');
@@ -40,14 +46,18 @@ function filesFor(good: string[]): Route {
   };
 }
 
+/**
+ * A profile with a kept key of the login at `HUB`, on a site that names no
+ * hub (it runs a version from before sites named theirs), and no
+ * ANTASPHERE_URL: the kept key's own hub is the only hint of where it signs
+ * in, which the recovery must keep after it evicts the key.
+ */
 async function cachedEnv(): Promise<Record<string, string>> {
   const env = await tempConfigEnv();
   seedHubLogin(env);
-  saveConfig(env, {
+  seedTool(env, {
     activeProfile: 'work',
-    profiles: {
-      work: { baseUrl: 'http://tool', connectKeys: { default: { apiKey: OLD, email: 'ada@x.co' } } }
-    }
+    profiles: { work: { baseUrl: 'http://tool', site: fresh(null), hubKeys: [kept(HUB, 'ada@x.co', OLD)] } }
   });
   return env;
 }
@@ -55,8 +65,8 @@ async function cachedEnv(): Promise<Record<string, string>> {
 const trace = (h: ReturnType<typeof routedHarness>) =>
   h.wire.map((c) => `${c.method} ${c.origin}${c.path} ${c.auth ?? '-'}`);
 
-describe('the stranded cached key', () => {
-  it('a 401 on a cached key: evict, exchange again, replay the same request once with the new key', async () => {
+describe('the stranded kept key', () => {
+  it('a 401 on a kept key: evict, exchange again at its hub, replay the same request once with the new key', async () => {
     const env = await cachedEnv();
     const h = routedHarness([filesFor([NEW]), cloudInstanceRoute, ...exchangeRoutes([NEW])], env);
     expect(await run(['files', 'list'], h.io)).toBe(0);
@@ -69,8 +79,9 @@ describe('the stranded cached key', () => {
     ]);
     expect(h.err()).toContain('The cached key was refused; signed in again through Antasphere.\n');
     expect(h.out()).toContain('No files.');
-    const work = loadConfig(env).profiles.work;
-    expect(work?.connectKeys?.default?.apiKey).toBe(NEW);
+    expect(loadConfig(env).profiles.work?.hubKeys).toEqual([
+      { hub: HUB, email: 'ada@x.co', apiKey: NEW, mintedAt: expect.any(String) }
+    ]);
     expect(JSON.stringify(loadConfig(env))).not.toContain(OLD);
   });
 
@@ -89,11 +100,16 @@ describe('the stranded cached key', () => {
   it.each([
     ['the profile key', { apiKey: OLD, baseUrl: 'http://tool' }, [], {}],
     ['the --api-key flag', { baseUrl: 'http://tool' }, ['--api-key', OLD], {}],
-    ['the key variable', { baseUrl: 'http://tool' }, [], { [`${P}_API_KEY`]: OLD }]
+    [
+      'the key variable',
+      { baseUrl: 'http://tool' },
+      [],
+      { [`${P}_URL`]: 'http://tool', [`${P}_API_KEY`]: OLD }
+    ]
   ] as const)('%s never recovers', async (_label, profile, args, extraEnv) => {
     const env = await tempConfigEnv();
     seedHubLogin(env);
-    saveConfig(env, { activeProfile: 'work', profiles: { work: profile } });
+    seedTool(env, { activeProfile: 'work', profiles: { work: profile } });
     const h = routedHarness([filesFor([NEW]), cloudInstanceRoute, ...exchangeRoutes([NEW])], {
       ...env,
       ...extraEnv
@@ -117,13 +133,13 @@ describe('the stranded cached key', () => {
     expect(h.err()).toBe(`Error: This account has no access to ${displayName} in any of its organizations\n`);
   });
 
-  it('a hub refusal on a first connect: its own sentence, no suffix, exit 3', async () => {
+  it('a hub refusal on a first sign-in: its own sentence, no suffix, exit 3', async () => {
     const env = await tempConfigEnv();
     seedHubLogin(env);
     const h = routedHarness(
       [
         filesFor([NEW]),
-        cloudInstanceRoute,
+        namingInstanceRoute(HUB),
         ...exchangeRoutes([NEW], { toolToken: () => TOOL_ACCESS_DENIED })
       ],
       env
@@ -144,9 +160,9 @@ describe('a refused selection is not a dead key (verifier round 1, F2)', () => {
   const traceWs = (h: ReturnType<typeof routedHarness>) =>
     h.wire.map((c) => `${c.method} ${c.origin}${c.path} ${c.auth ?? '-'} ${c.workspace ?? '-'}`);
 
-  it('--org <not mine> on a live cached key: bare /me answers, nothing evicted, exchanged or replayed', async () => {
+  it('--org <not mine> on a live kept key: bare /me answers, nothing evicted, exchanged or replayed', async () => {
     const env = await cachedEnv();
-    const before = loadConfig(env).profiles.work?.connectKeys;
+    const before = loadConfig(env).profiles.work?.hubKeys;
     const h = routedHarness(
       [
         {
@@ -175,8 +191,7 @@ describe('a refused selection is not a dead key (verifier round 1, F2)', () => {
     ]);
     expect(h.wire.some((c) => c.path.endsWith('/sso/tool-token'))).toBe(false);
     expect(h.wire.some((c) => c.path.endsWith('/sso/cli-connect'))).toBe(false);
-    expect(loadConfig(env).profiles.work?.connectKeys).toEqual(before);
-    expect(loadConfig(env).profiles.work?.connectKeys?.default?.apiKey).toBe(OLD);
+    expect(loadConfig(env).profiles.work?.hubKeys).toEqual(before);
     expect(h.err()).toContain(
       `The organization "${NOT_MINE}" (selected by the --org flag) is not one of yours on http://tool; ` +
         'the API key itself works.'
@@ -184,7 +199,7 @@ describe('a refused selection is not a dead key (verifier round 1, F2)', () => {
     expect(h.err()).not.toContain('The cached key was refused');
   });
 
-  it('--org with a dead cached key: bare /me refuses too, so the recovery runs and replays once', async () => {
+  it('--org with a dead kept key: bare /me refuses too, so the recovery runs and replays once', async () => {
     const env = await cachedEnv();
     const h = routedHarness(
       [
@@ -209,7 +224,7 @@ describe('a refused selection is not a dead key (verifier round 1, F2)', () => {
       `GET http://tool/api/v1/files Bearer ${NEW} ${NOT_MINE}`
     ]);
     expect(h.err()).toContain('The cached key was refused; signed in again through Antasphere.\n');
-    expect(loadConfig(env).profiles.work?.connectKeys?.default?.apiKey).toBe(NEW);
+    expect(loadConfig(env).profiles.work?.hubKeys?.map((k) => k.apiKey)).toEqual([NEW]);
   });
 
   it('F10: a bare /me probe with no answer keeps the key: no eviction, no exchange, the 401 stands', async () => {
@@ -233,7 +248,7 @@ describe('a refused selection is not a dead key (verifier round 1, F2)', () => {
     expect(h.wire.some((c) => c.path.endsWith('/sso/tool-token'))).toBe(false);
     expect(h.wire.some((c) => c.path.endsWith('/sso/cli-connect'))).toBe(false);
     expect(h.wire.filter((c) => c.path.endsWith('/api/v1/files'))).toHaveLength(1);
-    expect(loadConfig(env).profiles.work?.connectKeys?.default?.apiKey).toBe(OLD);
+    expect(loadConfig(env).profiles.work?.hubKeys?.map((k) => k.apiKey)).toEqual([OLD]);
     expect(h.err()).not.toContain('The cached key was refused');
   });
 
@@ -245,22 +260,22 @@ describe('a refused selection is not a dead key (verifier round 1, F2)', () => {
   });
 });
 
-describe('a cached key of another Antasphere account (PRDCT-3032)', () => {
+describe('a kept key of another Antasphere account (PRDCT-3032)', () => {
   const BOB_HUB_KEY = 'ant_bobkey12_secretsecretsecret1234';
   const bearer = (headers: Headers) => headers.get('authorization')?.replace(/^Bearer\s+/, '') ?? '';
 
-  /** The hub login switched to bob since the key was cached for ada. */
+  /** The login at the site's hub switched to bob since the key was kept for ada (in the old shape). */
   async function switchedEnv(cached: { apiKey: string; email?: string }, hubEmail: string | undefined) {
     const env = await tempConfigEnv();
-    saveCoreConfig(env, HUB_TOOL, {
+    seedHub(env, {
       activeProfile: 'default',
       profiles: {
         default: { apiKey: BOB_HUB_KEY, baseUrl: HUB, ...(hubEmail ? { email: hubEmail } : {}) }
       }
     });
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'work',
-      profiles: { work: { baseUrl: 'http://tool', connectKeys: { default: cached } } }
+      profiles: { work: { baseUrl: 'http://tool', site: fresh(HUB), connectKeys: { default: cached } } }
     });
     return env;
   }
@@ -285,7 +300,7 @@ describe('a cached key of another Antasphere account (PRDCT-3032)', () => {
         path: /\/api\/v1\/cli\/auth\/key$/,
         reply: () => ({ body: { revoked: true, id: 'k' } })
       },
-      cloudInstanceRoute,
+      namingInstanceRoute(HUB),
       ...exchangeRoutes([NEW]).map((r) => ({
         ...r,
         reply: (call: Parameters<Route['reply']>[0]) => {
@@ -299,16 +314,13 @@ describe('a cached key of another Antasphere account (PRDCT-3032)', () => {
     ];
   }
 
-  it('is never sent: retired on stderr, revoked on the instance, the exchange runs for the new login, the command answers with the new key', async () => {
+  it('is never sent: revoked on its own site, the exchange runs for the login now in place, the command answers with the new key', async () => {
     const env = await switchedEnv({ apiKey: OLD, email: 'ada@x.co' }, 'bob@x.co');
     const h = routedHarness(routesFor([OLD, NEW]), env);
     expect(await run(['whoami'], h.io)).toBe(0);
-    expect(h.err()).toContain(
-      `The ${displayName} key cached for ada@x.co is retired: the Antasphere login is now bob@x.co.\n`
-    );
     expect(trace(h)).toEqual([
-      `DELETE http://tool/api/v1/cli/auth/key Bearer ${OLD}`,
       'GET http://tool/api/v1/instance -',
+      `DELETE http://tool/api/v1/cli/auth/key Bearer ${OLD}`,
       `POST ${HUB}/api/v1/sso/tool-token Bearer ${BOB_HUB_KEY}`,
       'POST http://tool/api/v1/sso/cli-connect -',
       `GET http://tool/api/v1/me Bearer ${NEW}`
@@ -316,51 +328,43 @@ describe('a cached key of another Antasphere account (PRDCT-3032)', () => {
     expect(h.wire.filter((c) => c.auth === `Bearer ${OLD}`).map((c) => c.method)).toEqual(['DELETE']);
     expect(h.out()).toContain('Ada <ada@x.co>');
     const work = loadConfig(env).profiles.work;
-    expect(Object.keys(work?.connectKeys ?? {})).toEqual(['default']);
-    expect(work?.connectKeys?.default).toMatchObject({ apiKey: NEW, email: 'bob@x.co' });
+    expect(work?.connectKeys).toBeUndefined();
+    expect(work?.hubKeys).toEqual([
+      { hub: HUB, email: 'bob@x.co', apiKey: NEW, mintedAt: expect.any(String) }
+    ]);
     expect(JSON.stringify(loadConfig(env))).not.toContain(OLD);
   });
 
   it.each([
-    [
-      'a cache entry with no address',
-      { apiKey: OLD },
-      'bob@x.co',
-      'cached for an unknown login is retired: the Antasphere login is now bob@x.co.\n'
-    ],
-    [
-      'a hub login with no address',
-      { apiKey: OLD, email: 'ada@x.co' },
-      undefined,
-      'cached for ada@x.co is retired: the Antasphere login carries no address to match it with.\n'
-    ]
+    ['a kept key with no address', { apiKey: OLD }, 'bob@x.co'],
+    ['a login with no address', { apiKey: OLD, email: 'ada@x.co' }, undefined]
   ] as const)(
-    '%s is never served: the key is retired and revoked, the exchange mints anew, the hub profile carries the address after (verifier round 1, F1 and F5)',
-    async (_label, cached, hubEmail, retired) => {
+    '%s is never served: the key is revoked on its site, the exchange mints anew, the login carries the address after (verifier round 1, F1 and F5)',
+    async (_label, cached, hubEmail) => {
       const env = await switchedEnv(cached, hubEmail);
       const h = routedHarness(routesFor([OLD, NEW]), env);
       expect(await run(['whoami'], h.io)).toBe(0);
       expect(trace(h)).toEqual([
-        `DELETE http://tool/api/v1/cli/auth/key Bearer ${OLD}`,
         'GET http://tool/api/v1/instance -',
+        `DELETE http://tool/api/v1/cli/auth/key Bearer ${OLD}`,
         `POST ${HUB}/api/v1/sso/tool-token Bearer ${BOB_HUB_KEY}`,
         'POST http://tool/api/v1/sso/cli-connect -',
         `GET http://tool/api/v1/me Bearer ${NEW}`
       ]);
       expect(h.wire.filter((c) => c.auth === `Bearer ${OLD}`).map((c) => c.method)).toEqual(['DELETE']);
-      expect(h.err()).toContain(`The ${displayName} key ${retired}`);
       const work = loadConfig(env).profiles.work;
-      expect(Object.keys(work?.connectKeys ?? {})).toEqual(['default']);
-      expect(work?.connectKeys?.default).toMatchObject({ apiKey: NEW, email: 'bob@x.co' });
+      expect(work?.hubKeys).toEqual([
+        { hub: HUB, email: 'bob@x.co', apiKey: NEW, mintedAt: expect.any(String) }
+      ]);
       expect(JSON.stringify(loadConfig(env))).not.toContain(OLD);
-      // The hub profile is healed with the address the exchange answered
-      // (when it had none), and nothing else of it moves.
+      // The login is healed with the address the exchange answered (when it
+      // had none), and nothing else of it moves.
       expect(loadCoreConfig(env, HUB_TOOL)).toEqual({
         activeProfile: 'default',
         profiles: { default: { apiKey: BOB_HUB_KEY, baseUrl: HUB, email: 'bob@x.co' } }
       });
 
-      // The next command is served from the cache: zero hub calls.
+      // The next command is served from the kept key: zero hub calls.
       const next = routedHarness(routesFor([NEW]), env);
       expect(await run(['whoami'], next.io)).toBe(0);
       expect(trace(next)).toEqual([`GET http://tool/api/v1/me Bearer ${NEW}`]);
@@ -368,16 +372,15 @@ describe('a cached key of another Antasphere account (PRDCT-3032)', () => {
     }
   );
 
-  it('the same account in another case is the same account: the cached key is served (verifier M3)', async () => {
+  it('the same account in another case is the same account: the kept key is served (verifier M3)', async () => {
     const env = await switchedEnv({ apiKey: OLD, email: 'ada@x.co' }, 'ADA@X.CO');
     const h = routedHarness(routesFor([OLD, NEW]), env);
     expect(await run(['whoami'], h.io)).toBe(0);
-    // No DELETE, no exchange: the one call on the wire is the cached key's.
+    // No DELETE, no exchange: the one call on the wire is the kept key's.
     expect(trace(h)).toEqual([`GET http://tool/api/v1/me Bearer ${OLD}`]);
     expect(h.err()).toBe('');
-    expect(loadConfig(env).profiles.work?.connectKeys?.default).toMatchObject({
-      apiKey: OLD,
-      email: 'ada@x.co'
-    });
+    expect(loadConfig(env).profiles.work?.hubKeys).toEqual([
+      { hub: HUB, email: 'ada@x.co', apiKey: OLD, mintedAt: expect.any(String) }
+    ]);
   });
 });

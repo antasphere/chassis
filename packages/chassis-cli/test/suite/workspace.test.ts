@@ -373,10 +373,10 @@ describe('the selection on the wire: a name is looked up, an id is sent as it is
 
   async function signedIn(): Promise<Record<string, string>> {
     const env = await tempConfigEnv();
-    cli.saveConfig(env, {
+    cli.updateConfig(env, () => ({
       activeProfile: 'inst',
       profiles: { inst: { apiKey: key('work'), baseUrl: 'http://inst' } }
-    });
+    }));
     return env;
   }
 
