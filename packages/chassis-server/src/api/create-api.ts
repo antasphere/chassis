@@ -18,7 +18,7 @@ import {
   type Db
 } from '@antasphere/chassis-db';
 import type { z } from 'zod';
-import { hubConfig, type ToolEnv } from '../env.js';
+import { hubConfig, hubUrlOf, type ToolEnv } from '../env.js';
 import type { Logger } from '../logger.js';
 import type { Auth } from '../identity/index.js';
 import {
@@ -851,9 +851,13 @@ export function createApiApp<
           // Cloud only (SL-1): the hint-cookie contract the dashboard's
           // silent auto-connect reads — spread-gated on the same single
           // `hub` switch as every cloud seam, so the oss discovery bytes
-          // never carry the key.
+          // never carry either key.
           ...(hub
-            ? { sso: { hintCookieName: hub.hintCookieName, hintCookieDomain: hub.hintCookieDomain } }
+            ? {
+                // The hub this site trusts, in the form a CLI compares with the logins it holds.
+                hub: hubUrlOf(hub.issuerUrl),
+                sso: { hintCookieName: hub.hintCookieName, hintCookieDomain: hub.hintCookieDomain }
+              }
             : {})
         },
         features: { mcp: true, oauth: true, files: true },

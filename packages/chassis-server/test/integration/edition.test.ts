@@ -198,6 +198,11 @@ describe('cloud edition on a fresh database', () => {
     expect(info.auth.sso).toEqual({ hintCookieName: 'ant_sso_hint', hintCookieDomain: 'localhost' });
   });
 
+  it('names the hub it trusts in discovery: auth.hub, the issuer in the form a CLI compares', async () => {
+    const info = await readJson(await app.app.request('/api/v1/instance'));
+    expect(info.auth.hub).toBe('http://hub.localhost:3300');
+  });
+
   it('lands OAuth-callback AS errors on /login (cloud onAPIError.errorURL, SL-1)', async () => {
     // A prompt=none authorize against a hub with no session answers
     // ?error=login_required at the callback; the genericOAuth callback
@@ -806,6 +811,11 @@ describe('oss stays dark: zero hub-shaped calls across boot + a request matrix (
           headers: { cookie }
         });
         expect(dismiss.status).toBe(404);
+        // Discovery names no hub on oss though HUB_ISSUER_URL is set: the
+        // key hangs off hubConfig(), never off the raw variable.
+        const info = await readJson(await app.app.request('/api/v1/instance'));
+        expect('hub' in info.auth).toBe(false);
+        expect('sso' in info.auth).toBe(false);
       } finally {
         await app.stop();
       }
@@ -820,15 +830,16 @@ describe('oss stays dark: zero hub-shaped calls across boot + a request matrix (
 });
 
 describe('oss edition discovery (unchanged)', () => {
-  it('never advertises the hub SSO method, and never carries auth.sso (SL-1 pin)', async () => {
+  it('never advertises the hub SSO method, and never carries auth.sso or auth.hub (SL-1 pin)', async () => {
     const app = await createTestApp(await createDatabase(container, 'edition_oss_disc'));
     const info = await readJson(await app.app.request('/api/v1/instance'));
     expect(info.edition).toBe('oss');
     expect(info.auth.methods).not.toContain('antasphere');
     expect(info.auth.methods).toContain('password');
-    // The discovery wire shape stays byte-identical on oss: no sso block —
-    // key ABSENT, not null.
+    // The discovery wire shape stays byte-identical on oss: no sso block and
+    // no hub — keys ABSENT, not null.
     expect('sso' in info.auth).toBe(false);
+    expect('hub' in info.auth).toBe(false);
     // And the error surfaces keep their pre-change defaults: the antasphere
     // callback path does not exist (no genericOAuth plugin registered) and
     // the better-auth error route renders its own page — no /login redirect

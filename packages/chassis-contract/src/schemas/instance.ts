@@ -23,6 +23,16 @@ export const instanceInfoSchema = z.object({
     emailChange: z.boolean(),
     twoFactor: z.boolean(),
     /**
+     * The URL of the Antasphere hub this site federates to (cloud edition
+     * ONLY): its HUB_ISSUER_URL in `hubUrlOf`'s form, the scheme, the host
+     * (case-folded, port kept) and the path without its trailing slashes, no
+     * query, no fragment. ABSENT on oss, so the self-hosted discovery bytes
+     * stay unchanged. A CLI signs in with the login it holds at this hub, and
+     * sends a hub key to that login's own hub and nowhere else: the site's
+     * word only chooses among the person's own logins.
+     */
+    hub: z.string().optional(),
+    /**
      * Hub SSO client hints (cloud edition ONLY — absent on oss, where the
      * discovery wire shape stays byte-identical). The hint cookie is a
      * dashboard-side HINT for the silent auto-connect (attempt vs don't),
