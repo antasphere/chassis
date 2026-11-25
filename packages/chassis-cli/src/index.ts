@@ -60,6 +60,23 @@ export { explainProjectRefusal, roleNamedBy, memberRef, type ProjectLookup } fro
 export { explainWebhookRefusal, type WebhookLookup } from './commands/webhooks.js';
 export { explainConnectionRefusal, type ConnectionLookup } from './commands/connections.js';
 export { CliApiRefusal, drainPages } from './context.js';
+export {
+  describeProfiles,
+  renderProfiles,
+  type DescribeProfilesInput,
+  type ProfileCheck,
+  type ProfileCheckedPerson,
+  type ProfileCheckVerdict,
+  type ProfileEntry,
+  type ProfileEnvironmentEffect,
+  type ProfileFix,
+  type ProfileFixKind,
+  type ProfileSignIn,
+  type ProfileSignInState,
+  type ProfileSite,
+  type ProfilesListing,
+  type ProfilesLogin
+} from './listing.js';
 export type { Cli, CliDefinition, CliKit, RegisterTool } from './kit.js';
 
 export function defineCli<TClient extends ChassisClient<string>>(
