@@ -15,7 +15,6 @@ import {
   keysOfProfile,
   listLogins,
   normalizeUrl,
-  planSignIn,
   probeToolInstance,
   rememberSite,
   sameInstance,
@@ -29,14 +28,15 @@ import {
 } from '@antasphere/cli-core';
 import type { ChassisClient } from '@antasphere/chassis-sdk';
 import { DEFAULT_HUB_URL } from '../identity.js';
-import { CliUsageError, printJson, stdinApiKey, table, type CliContext, type CliIo } from '../context.js';
+import { CliUsageError, printJson, stdinApiKey, type CliContext, type CliIo } from '../context.js';
 import type { CliKit } from '../kit.js';
 import type { MeResponse } from '../workspace.js';
 
 /**
  * Identity + profile commands (PRDCT-2947, PRDCT-2446): ONE `login` that
  * ends in the tool, `logout` that revokes what it forgets, whoami/verify,
- * and profile management (use / profiles / config show / config clear).
+ * `use`, and `config show` / `config clear`; the listing and the management
+ * of the profiles (`profiles`, add, rename, remove) are `profiles.ts`'s.
  *
  * A profile is a site (cli-core 0.5.0), and it signs in the way its site
  * asks (R2, R3): on a site that signs in through an Antasphere hub, with the
@@ -122,7 +122,6 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
   const {
     identity,
     createClient,
-    clearConfig,
     configPath,
     connect,
     loadConfig,
@@ -787,73 +786,18 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
       if (globals.json) return printJson(io, { activeProfile: name });
       io.out.write(`Active profile: ${name} (${profileUrl(config.profiles[name])})\n`);
     });
+}
 
-  program
-    .command('profiles')
-    .description('List the profiles (one per instance) and how each signs in')
-    .action(async (_opts, cmd: Command) => {
-      const globals = cmd.optsWithGlobals() as AuthGlobals;
-      const config = loadConfig(io.env);
-      // The implicit cloud profile is listed even before it is on disk: it is
-      // where a clean machine runs, and where `login` with no URL signs in.
-      const rows: Array<[string, CliProfile]> = Object.entries(config.profiles);
-      if (!config.profiles[CLOUD_PROFILE])
-        rows.unshift([CLOUD_PROFILE, { baseUrl: normalizeUrl(identity.cloudUrl) }]);
-      const activeName = config.activeProfile ?? CLOUD_PROFILE;
-      // Who signs each profile in, from the two files alone (cli-core
-      // `planSignIn`, the environment set aside); never any part of a key.
-      const credentialOf = (
-        name: string,
-        p: CliProfile
-      ): { kind: 'key' | 'hub' | 'none'; text: string; email: string | null } => {
-        const plan = planSignIn({
-          env: io.env,
-          tool: identity.tool,
-          profileName: name,
-          profile: config.profiles[name] ? p : undefined,
-          siteUrl: profileUrl(p),
-          cloudUrl: identity.cloudUrl,
-          hubCloudUrl: DEFAULT_HUB_URL
-        });
-        if (plan.state === 'signed_in' && plan.via === 'key')
-          return { kind: 'key', text: 'its own key', email: null };
-        if ((plan.state === 'signed_in' || plan.state === 'will_sign_in') && plan.login && plan.hub) {
-          const who = loginLabel({ email: plan.login.email, hub: plan.hub });
-          return {
-            kind: 'hub',
-            text:
-              plan.state === 'signed_in'
-                ? `via Antasphere (${who})`
-                : `via Antasphere at the next command (${who})`,
-            email: firstSet(plan.login.email) ?? null
-          };
-        }
-        return { kind: 'none', text: '(not signed in)', email: null };
-      };
-      if (globals.json) {
-        return printJson(io, {
-          activeProfile: activeName,
-          profiles: Object.fromEntries(
-            rows.map(([n, p]) => {
-              const cred = credentialOf(n, p);
-              return [
-                n,
-                {
-                  baseUrl: profileUrl(p),
-                  saved: Boolean(config.profiles[n]),
-                  credential: cred.kind,
-                  email: p.email ?? cred.email,
-                  hubProfiles: Object.keys(p.connectKeys ?? {})
-                }
-              ];
-            })
-          )
-        });
-      }
-      io.out.write(
-        table(rows.map(([n, p]) => [activeName === n ? '*' : ' ', n, profileUrl(p), credentialOf(n, p).text]))
-      );
-    });
+/**
+ * `config show` and `config clear`, registered after `profiles`
+ * (`commands/profiles.ts`) so the top-level commands keep their order.
+ */
+export function registerConfigCommands<TClient extends ChassisClient<string>>(
+  kit: CliKit<TClient>,
+  program: Command,
+  io: CliIo
+): void {
+  const { clearConfig, configPath, loadConfig, profileUrl } = kit;
 
   const config = program.command('config').description('Inspect or reset the CLI config file');
 

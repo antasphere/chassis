@@ -614,7 +614,11 @@ describe('profiles names who signs each profile in, from its own keys, never the
     });
     const h = routedHarness([], env);
     expect(await run(['profiles'], h.io)).toBe(0);
-    expect(h.out()).toContain(`via Antasphere (ada@x.co at ${DEFAULT_HUB_URL})`);
+    expect(h.out()).toContain(`signed in: ada@x.co at ${DEFAULT_HUB_URL}`);
+    // The variable is said beside the state, never folded into it.
+    expect(h.out()).toContain(
+      `ANTASPHERE_URL is exported: profiles whose site names no hub sign in at ${HUB}.`
+    );
     expect(h.out()).not.toContain(key('cloud').slice(0, 13));
     expect(h.wire).toEqual([]);
   });

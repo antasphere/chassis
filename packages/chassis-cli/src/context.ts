@@ -71,6 +71,11 @@ export interface CliIo extends CoreCliIo {
    * without the wait.
    */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * The machine's name, as `profiles` says which machine answers. The bin
+   * leaves it unset and the default is `os.hostname()`; tests pin it.
+   */
+  hostname?: () => string;
 }
 
 // ── Terminal-control sanitation ──────────────────────────────────────────────

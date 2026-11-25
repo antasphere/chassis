@@ -4,7 +4,8 @@ import { PlatformApiError, type ChassisClient } from '@antasphere/chassis-sdk';
 import { beginRun, CliApiRefusal, CliUsageError, setStdinApiKey, type CliIo } from './context.js';
 import type { Cli, CliDefinition, CliKit, RegisterTool } from './kit.js';
 import { readSecretFromStdin } from './stdin.js';
-import { registerAuthCommands } from './commands/auth.js';
+import { registerAuthCommands, registerConfigCommands } from './commands/auth.js';
+import { registerProfileCommands } from './commands/profiles.js';
 import { registerWorkspaceCommands } from './commands/workspaces.js';
 import { registerProjectCommands } from './commands/projects.js';
 import { registerTeamCommands } from './commands/teams.js';
@@ -60,9 +61,12 @@ export function createProgram<TClient extends ChassisClient<string>>(
       )
       .option('--json', 'machine-readable JSON output', false);
 
-    // Identity + profiles: login, logout, whoami, verify, use, profiles,
-    // config show/clear.
+    // Identity + profiles: login, logout, whoami, verify, use; profiles
+    // (add, rename, remove, --check: it says this CLI's version); config
+    // show/clear.
     registerAuthCommands(kit, program, io);
+    registerProfileCommands(kit, program, io, version);
+    registerConfigCommands(kit, program, io);
     // Which workspace the commands run in: workspaces, workspace default.
     registerWorkspaceCommands(kit, program, io);
     // The subgroups of the workspace: projects *, projects members *.

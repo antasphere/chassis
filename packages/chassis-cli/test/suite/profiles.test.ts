@@ -247,7 +247,14 @@ describe('which profile a command runs on', () => {
 });
 
 describe('profiles, use, config show', () => {
-  it('lists the implicit cloud row first, the active mark, and how each signs in, never any part of a key', async () => {
+  /** The rows of the text listing, its header first, split on the column gaps. */
+  const rowsOf = (out: string) =>
+    out
+      .split('\n\n')[0]!
+      .split('\n')
+      .map((l) => l.split(/\s{2,}/));
+
+  it('lists the implicit cloud row first, the default mark, and how each signs in, never any part of a key', async () => {
     const env = await tempConfigEnv();
     seedHubLogin(env);
     seedTool(env, {
@@ -261,33 +268,35 @@ describe('profiles, use, config show', () => {
       }
     });
     const h = routedHarness([], env);
+    h.io.hostname = () => 'a-host-name';
     expect(await run(['profiles'], h.io)).toBe(0);
-    const rows = h
-      .out()
-      .trimEnd()
-      .split('\n')
-      .map((l) => l.split(/\s{2,}/));
-    expect(rows).toEqual([
-      ['', 'cloud', CLOUD, '(not signed in)'],
-      ['*', 'own', 'http://own', 'its own key'],
-      ['', 'hubbed', 'http://hubbed', `via Antasphere (ada@x.co at ${HUB})`],
-      ['', 'old', 'http://old', `via Antasphere (ada@x.co at ${HUB})`],
-      ['', 'stray', 'http://stray', '(not signed in)'],
-      ['', 'bare', 'http://bare', '(not signed in)']
+    expect(rowsOf(h.out())).toEqual([
+      ['', 'PROFILE', 'SITE', 'SIGN-IN', 'SITE CLI'],
+      ['', 'cloud', CLOUD, `not reached yet: ${bin} profiles --check`, '-'],
+      ['*', 'own', 'http://own', 'signed in with its own key', '-'],
+      ['', 'hubbed', 'http://hubbed', `signed in: ada@x.co at ${HUB}`, '-'],
+      ['', 'old', 'http://old', `signed in: ada@x.co at ${HUB}`, '-'],
+      ['', 'stray', 'http://stray', `needs a sign-in: ${bin} --profile stray login --hub <hub>`, '-'],
+      ['', 'bare', 'http://bare', `not reached yet: ${bin} profiles --check`, '-']
     ]);
+    expect(h.out().split('\n\n')[1]).toBe(
+      `This CLI 0.0.1 on a-host-name.\nAntasphere logins: ada@x.co at ${HUB} (default).\n`
+    );
     for (const tag of ['own', 'hub', 'old', 'stray']) expect(h.out()).not.toContain(key(tag).slice(0, 13));
     expect(h.wire).toEqual([]);
   });
 
-  it('with nothing saved, the cloud row is the active one', async () => {
+  it('with nothing saved, the cloud row is the default one', async () => {
     const h = routedHarness([], await tempConfigEnv());
+    h.io.hostname = () => 'a-host-name';
     expect(await run(['profiles'], h.io)).toBe(0);
-    expect(
-      h
-        .out()
-        .trimEnd()
-        .split(/\s{2,}/)
-    ).toEqual(['*', 'cloud', CLOUD, '(not signed in)']);
+    expect(rowsOf(h.out())).toEqual([
+      ['', 'PROFILE', 'SITE', 'SIGN-IN', 'SITE CLI'],
+      ['*', 'cloud', CLOUD, `not reached yet: ${bin} profiles --check`, '-']
+    ]);
+    expect(h.out().split('\n\n')[1]).toBe(
+      'This CLI 0.0.1 on a-host-name.\nNo Antasphere login on this machine.\n'
+    );
   });
 
   it('--json, with no key in it', async () => {
@@ -305,28 +314,77 @@ describe('profiles, use, config show', () => {
       }
     });
     const h = routedHarness([], env);
+    h.io.hostname = () => 'a-host-name';
     expect(await run(['profiles', '--json'], h.io)).toBe(0);
+    const never = { name: null, hub: null, federated: null, cliVersion: null, seenAt: null };
+    const signIn = (over: Record<string, unknown>) => ({
+      state: 'signed_in',
+      via: 'login',
+      hub: HUB,
+      email: 'ada@x.co',
+      staleKeys: 0,
+      fix: null,
+      ...over
+    });
     expect(JSON.parse(h.out())).toEqual({
-      activeProfile: 'own',
-      profiles: {
-        cloud: { baseUrl: CLOUD, saved: false, credential: 'none', email: null, hubProfiles: [] },
-        own: { baseUrl: 'http://own', saved: true, credential: 'key', email: 'ada@x.co', hubProfiles: [] },
-        hubbed: {
-          baseUrl: 'http://hubbed',
-          saved: true,
-          credential: 'hub',
-          email: 'ada@x.co',
-          hubProfiles: ['default']
+      machine: 'a-host-name',
+      cliVersion: '0.0.1',
+      defaultSite: 'http://own',
+      environment: { url: null, key: false, hubUrl: null },
+      logins: [{ hub: HUB, email: 'ada@x.co', name: 'default' }],
+      profiles: [
+        {
+          name: 'cloud',
+          default: false,
+          saved: false,
+          site: { origin: CLOUD, ...never },
+          cliBehind: null,
+          signIn: signIn({
+            state: 'unknown',
+            via: null,
+            hub: null,
+            email: null,
+            fix: { kind: 'check', argv: [bin, 'profiles', '--check'] }
+          }),
+          environment: []
         },
-        // Another account's key, now that the login at its hub is ada's: nothing serves it.
-        replaced: {
-          baseUrl: 'http://replaced',
+        {
+          name: 'own',
+          default: true,
           saved: true,
-          credential: 'none',
-          email: null,
-          hubProfiles: []
+          site: { origin: 'http://own', ...never },
+          cliBehind: null,
+          signIn: signIn({ via: 'key', hub: null }),
+          environment: []
+        },
+        {
+          name: 'hubbed',
+          default: false,
+          saved: true,
+          site: { origin: 'http://hubbed', ...never },
+          cliBehind: null,
+          signIn: signIn({}),
+          environment: []
+        },
+        // Another account's key, now that the login at its hub is ada's: nothing serves it, the next
+        // sign-in there revokes it, and a stale key never says which hub a site trusts.
+        {
+          name: 'replaced',
+          default: false,
+          saved: true,
+          site: { origin: 'http://replaced', ...never },
+          cliBehind: null,
+          signIn: signIn({
+            state: 'needs_login',
+            via: null,
+            hub: null,
+            email: null,
+            staleKeys: 1,
+            fix: { kind: 'pick_hub', argv: [bin, '--profile', 'replaced', 'login', '--hub'] }
+          }),
+          environment: []
         }
-      }
+      ]
     });
     for (const tag of ['own', 'hub', 'bo']) expect(h.out()).not.toContain(key(tag).slice(0, 13));
   });
