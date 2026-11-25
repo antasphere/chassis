@@ -772,19 +772,31 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
     .description('Switch the active profile (the instance the commands run against)')
     .action(async (name: string, _opts, cmd: Command) => {
       const globals = cmd.optsWithGlobals() as AuthGlobals;
+      let chosen = name;
       const { config } = updateConfig(io.env, (draft) => {
         if (!draft.profiles[name]) {
-          if (name !== CLOUD_PROFILE) {
+          // One profile per site (R3): `use cloud` selects the profile already
+          // at the cloud site, whatever its name. With none there, the
+          // implicit cloud profile exists before anything is written (`cloud`,
+          // or its host when that name is taken elsewhere): it is made a row
+          // so it can be the active one.
+          const atCloud = selectProfile({
+            config: draft,
+            apiUrl: identity.cloudUrl,
+            cloudUrl: identity.cloudUrl
+          });
+          if (name === CLOUD_PROFILE && !atCloud.created && atCloud.name) {
+            chosen = atCloud.name;
+          } else if (atCloud.created && atCloud.name === name) {
+            draft.profiles[name] = { baseUrl: normalizeUrl(identity.cloudUrl) };
+          } else {
             throw new CliUsageError(`Unknown profile "${name}" — run \`${bin} profiles\`.`);
           }
-          // The implicit cloud profile exists before anything is written: `use
-          // cloud` makes it a row so it can be the active one.
-          draft.profiles[name] = { baseUrl: normalizeUrl(identity.cloudUrl) };
         }
-        draft.activeProfile = name;
+        draft.activeProfile = chosen;
       });
-      if (globals.json) return printJson(io, { activeProfile: name });
-      io.out.write(`Active profile: ${name} (${profileUrl(config.profiles[name])})\n`);
+      if (globals.json) return printJson(io, { activeProfile: chosen });
+      io.out.write(`Active profile: ${chosen} (${profileUrl(config.profiles[chosen])})\n`);
     });
 }
 

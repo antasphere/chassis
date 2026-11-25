@@ -404,6 +404,30 @@ describe('profiles, use, config show', () => {
     expect(config.profiles.own?.apiKey).toBe(key('own'));
   });
 
+  it('`use cloud` selects the profile already at the cloud site, whatever its name, and writes no second one (R3)', async () => {
+    const env = await tempConfigEnv();
+    seedTool(env, {
+      activeProfile: 'own',
+      profiles: {
+        own: { apiKey: key('own'), baseUrl: 'http://own' },
+        mine: { apiKey: key('mine') },
+        later: { baseUrl: `${CLOUD}/` }
+      }
+    });
+    const h = routedHarness([], env);
+    expect(await run(['use', 'cloud'], h.io)).toBe(0);
+    // Two profiles at the cloud site (a file from before one per site): the selection's, the first declared.
+    expect(h.out()).toBe(`Active profile: mine (${CLOUD})\n`);
+    const config = loadConfig(env);
+    expect(config.activeProfile).toBe('mine');
+    expect(Object.keys(config.profiles)).toEqual(['own', 'mine', 'later']);
+
+    const json = routedHarness([], env);
+    expect(await run(['use', 'cloud', '--json'], json.io)).toBe(0);
+    expect(JSON.parse(json.out())).toEqual({ activeProfile: 'mine' });
+    expect(Object.keys(loadConfig(env).profiles)).toEqual(['own', 'mine', 'later']);
+  });
+
   it('`use <name>` switches; an unknown name errors and writes nothing', async () => {
     const env = await tempConfigEnv();
     seedTool(env, {
