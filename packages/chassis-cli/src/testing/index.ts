@@ -42,6 +42,12 @@ export interface WireCall {
 export interface Route {
   method: string;
   path: RegExp;
+  /**
+   * The origin the route serves (`https://hub-a.example.com`): a route with
+   * one matches only requests to that origin, so one harness can play two
+   * hubs and two sites. Without one, a route matches any origin.
+   */
+  origin?: string;
   reply: (call: { path: string; body?: unknown; form?: FormData; headers: Headers }) => {
     status?: number;
     body?: unknown;
@@ -82,7 +88,12 @@ export function routedHarness(routes: Route[], env: Record<string, string | unde
       ...(workspace !== undefined ? { workspace } : {}),
       ...(body !== undefined ? { body } : {})
     });
-    const route = routes.find((r) => r.method === method && r.path.test(url.pathname));
+    const route = routes.find(
+      (r) =>
+        r.method === method &&
+        r.path.test(url.pathname) &&
+        (r.origin === undefined || new URL(r.origin).origin === url.origin)
+    );
     if (!route) {
       return new Response(
         JSON.stringify({ error: { code: 'not_found', message: `no fake route ${method} ${path}` } }),
