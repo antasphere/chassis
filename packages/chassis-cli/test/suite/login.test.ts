@@ -991,12 +991,13 @@ describe('a login never moves a default (R3)', () => {
     ];
     const h = routedHarness(routes, env);
     expect(await run(['login'], h.io)).toBe(0);
+    // The own key goes once the exchange succeeded, never before it.
     expect(trace(h)).toEqual([
       'GET http://tool/api/v1/instance -',
-      `DELETE http://tool/api/v1/cli/auth/key Bearer ${stale}`,
       'GET http://tool/api/v1/instance -',
       `POST ${HUB}/api/v1/sso/tool-token Bearer ${HUB_KEY}`,
       'POST http://tool/api/v1/sso/cli-connect -',
+      `DELETE http://tool/api/v1/cli/auth/key Bearer ${stale}`,
       `GET http://tool/api/v1/me Bearer ${minted}`
     ]);
     const tool = loadConfig(env).profiles.tool;
@@ -1008,6 +1009,55 @@ describe('a login never moves a default (R3)', () => {
     expect(await run(['whoami'], next.io)).toBe(0);
     expect(trace(next)).toEqual([`GET http://tool/api/v1/me Bearer ${minted}`]);
     expect(next.out()).toContain(`  signed in with: the Antasphere login ada@x.co at ${HUB} (kept key)\n`);
+  });
+
+  it('an exchange the hub refuses leaves the own key on the profile, alive on its site; a successful one revokes it there, then forgets it (lane review of part 1)', async () => {
+    const env = { ...(await tempConfigEnv()), ANTASPHERE_URL: HUB };
+    seedHubLogin(env);
+    const own = key('own');
+    const minted = key('tool');
+    seedTool(env, {
+      activeProfile: 'tool',
+      profiles: { tool: { baseUrl: 'http://tool', apiKey: own, email: 'ada@x.co' } }
+    });
+    const dead = new Set<string>();
+    const bearer = (headers: Headers) => headers.get('authorization')?.replace(/^Bearer\s+/, '') ?? '';
+    const revokeOnTool: Route = {
+      method: 'DELETE',
+      path: /\/api\/v1\/cli\/auth\/key$/,
+      reply: ({ headers }) => {
+        dead.add(bearer(headers));
+        return { body: { revoked: true, id: 'k' } };
+      }
+    };
+
+    const refused = routedHarness(
+      [
+        cloudInstanceRoute,
+        revokeOnTool,
+        ...exchangeRoutes([minted], { toolToken: () => TOOL_ACCESS_DENIED }),
+        meRoute()
+      ],
+      env
+    );
+    expect(await run(['login'], refused.io)).toBe(3);
+    expect(refused.wire.some((c) => c.method === 'DELETE')).toBe(false);
+    expect(dead.has(own)).toBe(false);
+    expect(loadConfig(env).profiles.tool).toMatchObject({ apiKey: own, email: 'ada@x.co' });
+
+    const ok = routedHarness([cloudInstanceRoute, revokeOnTool, ...exchangeRoutes([minted]), meRoute()], env);
+    expect(await run(['login'], ok.io)).toBe(0);
+    expect(ok.wire.filter((c) => c.method === 'DELETE')).toEqual([
+      { method: 'DELETE', origin: 'http://tool', path: '/api/v1/cli/auth/key', auth: `Bearer ${own}` }
+    ]);
+    expect(trace(ok).indexOf(`DELETE http://tool/api/v1/cli/auth/key Bearer ${own}`)).toBeGreaterThan(
+      trace(ok).indexOf('POST http://tool/api/v1/sso/cli-connect -')
+    );
+    expect(dead.has(own)).toBe(true);
+    const tool = loadConfig(env).profiles.tool;
+    expect(tool?.apiKey).toBeUndefined();
+    expect(tool?.email).toBeUndefined();
+    expect(tool?.hubKeys?.map((k) => k.apiKey)).toEqual([minted]);
   });
 
   it('no output of a login carries any part of a key', async () => {

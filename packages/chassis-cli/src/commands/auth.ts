@@ -377,11 +377,12 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
   }
 
   /**
-   * Before the exchange of a hub login: the profile's own key (a sign-in
-   * through the hub replaces it, PRDCT-3522), its kept key for the login's
-   * slot (a login is an explicit re-sign-in), and the replaced account's,
-   * are revoked on the profile's own site with no lock held, then forgotten
-   * (compare-and-remove). A key the site did not answer for stays.
+   * Before the exchange of a hub login: the profile's kept key for the
+   * login's slot (a login is an explicit re-sign-in; cli-core would still
+   * serve it) and the replaced account's are revoked on the profile's own
+   * site with no lock held, then forgotten (compare-and-remove). A key the
+   * site did not answer for stays. The profile's own key is NOT among them:
+   * it goes only once the exchange succeeded (`retireOwnKey`).
    */
   async function retireBeforeExchange(
     profileName: string,
@@ -402,7 +403,6 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
     );
     const doomed = keysOfProfile(profile).filter(
       (k) =>
-        k.kind === 'own' ||
         (k.kind === 'kept' &&
           sameInstance(k.hub ?? '', hub) &&
           accounts.some((email) => sameAddress(k.email, email))) ||
@@ -419,6 +419,31 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
       }
     }
     forgetKeys(io.env, identity.tool, profileName, forget);
+    dropOwnEmail(profileName);
+  }
+
+  /** The profile's own key, when the profile is on disk at `site`. */
+  function ownKeyAt(profileName: string, site: string): string | undefined {
+    const profile = loadConfig(io.env).profiles[profileName];
+    return profile && sameInstance(profileUrl(profile), site) ? firstSet(profile.apiKey) : undefined;
+  }
+
+  /**
+   * Once the exchange of a hub login SUCCEEDED, and never before: the own key
+   * the profile held when the exchange began (a sign-in through the hub
+   * replaces it, PRDCT-3522) is revoked on the profile's own site with no
+   * lock held, then forgotten compare-and-remove, with the address stored
+   * beside it. An exchange that fails leaves it on the profile, alive; a key
+   * the site did not answer for stays.
+   */
+  async function retireOwnKey(profileName: string, site: string, own: string | undefined): Promise<void> {
+    if (!own) return;
+    try {
+      await revokeOnSite(site, own, 'the profile key', true);
+    } catch {
+      return;
+    }
+    forgetKeys(io.env, identity.tool, profileName, [own]);
     dropOwnEmail(profileName);
   }
 
@@ -524,6 +549,8 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
         const signedIn = await loginAt(hub, site, here, profileName, opts);
         let { login } = signedIn;
         await retireBeforeExchange(profileName, site, hub, login, signedIn.replaced);
+        // The profile's own key as the exchange begins: it stays until the exchange succeeded.
+        const ownKey = ownKeyAt(profileName, site);
 
         // The exchange, at that login's own hub, then the tool's own answer.
         // A stored hub key the hub no longer accepts is replaced by a fresh
@@ -543,6 +570,7 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
         if (outcome.outcome === 'not_cloud') {
           throw new CliUsageError(`${baseUrl} stopped answering as an Antasphere-cloud instance; try again.`);
         }
+        await retireOwnKey(profileName, site, ownKey);
         const me = await createClient({ baseUrl, apiKey: outcome.key, fetch: fetchOf() }).me();
         const madeDefault = firstProfile && loadConfig(io.env).activeProfile === profileName;
         if (globals.json) {
