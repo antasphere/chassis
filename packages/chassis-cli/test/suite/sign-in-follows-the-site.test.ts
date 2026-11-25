@@ -538,14 +538,16 @@ describe('a profile and a URL, a key and a site: refused before any request (PRD
     );
     expect(cloud.wire).toEqual([]);
 
-    const named = f.harness({ ...env, [`${P}_URL`]: SITE_A, [`${P}_API_KEY`]: envKey });
-    expect(await run([command, '--api-url', SITE_B], named.io)).toBe(1);
-    expect(named.err()).toBe(
-      `Error: ${P}_API_KEY is a key of ${SITE_A} (${P}_URL names it), and this command targets ${SITE_B}. ` +
-        `Unset ${P}_API_KEY to run on the profile's own sign-in, or set ${P}_URL to the site the key was ` +
-        'issued for.\n'
-    );
-    expect(named.wire).toEqual([]);
+    // With <PREFIX>_URL set, only the URL flag sends the command elsewhere: dropping it is the way back.
+    for (const flag of ['--api-url', '--url']) {
+      const named = f.harness({ ...env, [`${P}_URL`]: SITE_A, [`${P}_API_KEY`]: envKey });
+      expect(await run([command, flag, SITE_B], named.io)).toBe(1);
+      expect(named.err()).toBe(
+        `Error: ${P}_API_KEY is a key of ${SITE_A} (${P}_URL names it), and this command targets ${SITE_B}. ` +
+          `Drop ${flag} to run on ${SITE_A}, or unset ${P}_API_KEY.\n`
+      );
+      expect(named.wire).toEqual([]);
+    }
     expect(f.alive(envKey)).toBe(true);
   });
 

@@ -464,13 +464,16 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
       const envUrl = firstSet(io.env[URL_VAR]);
       const keySite = envUrl ?? identity.cloudUrl;
       if (!sameInstance(keySite, baseUrl)) {
-        const named = envUrl
-          ? `(${URL_VAR} names it)`
-          : `(${URL_VAR} is not set, so it belongs to the cloud)`;
+        const K = normalizeUrl(keySite);
+        // With <PREFIX>_URL set, only a URL flag can send the command elsewhere (a --profile at
+        // another site is refused above): dropping that flag is the way back to the key's site.
         throw new CliUsageError(
-          `${KEY_VAR} is a key of ${normalizeUrl(keySite)} ${named}, and this command targets ${site}. ` +
-            `Unset ${KEY_VAR} to run on the profile's own sign-in, or set ${URL_VAR} to the site the key was ` +
-            'issued for.'
+          envUrl
+            ? `${KEY_VAR} is a key of ${K} (${URL_VAR} names it), and this command targets ${site}. ` +
+                `Drop ${given?.by ?? '--api-url'} to run on ${K}, or unset ${KEY_VAR}.`
+            : `${KEY_VAR} is a key of ${K} (${URL_VAR} is not set, so it belongs to the cloud), and this ` +
+                `command targets ${site}. Unset ${KEY_VAR} to run on the profile's own sign-in, or set ` +
+                `${URL_VAR} to the site the key was issued for.`
         );
       }
     }
