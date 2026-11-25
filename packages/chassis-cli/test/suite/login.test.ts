@@ -217,6 +217,58 @@ describe('login with a pasted key', () => {
     // With no default chosen, a command typed by hand runs on the cloud's profile: that stays.
     expect(h.err()).toBe(stays('work', 'cloud'));
   });
+
+  it('a pasted key replacing the profile’s own key revokes the old one on the profile’s site, and there only', async () => {
+    const env = await tempConfigEnv();
+    const old = key('old');
+    const pasted = key('paste');
+    seedTool(env, {
+      activeProfile: 'inst',
+      profiles: {
+        inst: { apiKey: old, baseUrl: 'http://inst' },
+        other: { apiKey: key('other'), baseUrl: 'http://o' }
+      }
+    });
+    const h = routedHarness([meRoute(), revokeOk], env);
+    expect(await run(['login', '--api-key', pasted], h.io)).toBe(0);
+    expect(trace(h)).toEqual([
+      `GET http://inst/api/v1/me Bearer ${pasted}`,
+      `DELETE http://inst/api/v1/cli/auth/key Bearer ${old}`
+    ]);
+    expect(h.err()).toBe('');
+    expect(loadConfig(env).profiles.inst).toEqual({
+      apiKey: pasted,
+      baseUrl: 'http://inst',
+      email: 'ada@x.co'
+    });
+    expect(JSON.stringify(loadConfig(env))).not.toContain(old);
+
+    // The same key pasted again replaces nothing: nothing is revoked.
+    const again = routedHarness([meRoute(), revokeOk], env);
+    expect(await run(['login', '--api-key', pasted], again.io)).toBe(0);
+    expect(again.wire.map((c) => c.method)).toEqual(['GET']);
+  });
+
+  it('a site that does not revoke the replaced key says it stays valid there; the new key is saved all the same', async () => {
+    const env = await tempConfigEnv();
+    const old = key('old');
+    seedTool(env, { activeProfile: 'inst', profiles: { inst: { apiKey: old, baseUrl: 'http://inst' } } });
+    const nothing: Route = {
+      method: 'DELETE',
+      path: /\/api\/v1\/cli\/auth\/key$/,
+      reply: () => {
+        throw new TypeError('fetch failed');
+      }
+    };
+    const h = routedHarness([meRoute(), nothing], env);
+    expect(await run(['login', '--api-key', key('paste')], h.io)).toBe(0);
+    expect(h.err()).toBe(
+      'Could not reach http://inst to revoke the replaced key: it stays valid there until revoked from its ' +
+        'dashboard.\n'
+    );
+    expect(loadConfig(env).profiles.inst?.apiKey).toBe(key('paste'));
+    expect(h.err()).not.toContain(old.slice(0, 13));
+  });
 });
 
 describe('login on a self-hosted instance: the email code', () => {
@@ -256,6 +308,31 @@ describe('login on a self-hosted instance: the email code', () => {
     const config = loadConfig(env);
     expect(config.activeProfile).toBe('inst');
     expect(config.profiles.inst).toEqual({ apiKey: minted, baseUrl: 'http://inst', email: 'ada@x.co' });
+  });
+
+  it('a re-login revokes the key it replaces on the profile’s site, once the new one is saved', async () => {
+    const env = await tempConfigEnv();
+    const old = key('old');
+    const minted = key('minted');
+    seedTool(env, { activeProfile: 'inst', profiles: { inst: { apiKey: old, baseUrl: 'http://inst' } } });
+    const h = routedHarness([ossInstanceRoute, ...otpRoutes(minted), meRoute(), revokeOk], env);
+    scripted(h, ['123456']);
+    expect(await run(['login', '--email', 'ada@x.co'], h.io)).toBe(0);
+    expect(trace(h)).toEqual([
+      'GET http://inst/api/v1/instance -',
+      'POST http://inst/api/v1/cli/auth/request -',
+      'POST http://inst/api/v1/cli/auth/complete -',
+      `GET http://inst/api/v1/me Bearer ${minted}`,
+      `DELETE http://inst/api/v1/cli/auth/key Bearer ${old}`
+    ]);
+    expect(loadConfig(env).profiles.inst).toEqual({
+      apiKey: minted,
+      baseUrl: 'http://inst',
+      email: 'ada@x.co',
+      // What the site said of itself, remembered by the login on a profile already on disk.
+      site: expect.objectContaining({ federated: false })
+    });
+    expect(JSON.stringify(loadConfig(env))).not.toContain(old);
   });
 
   it('--email skips the first question; --key-name and --expires-in-days reach the mint', async () => {
@@ -838,10 +915,14 @@ describe('a login never moves a default (R3)', () => {
 
   it('on the default profile itself: no line', async () => {
     const env = await homeEnv();
-    const h = routedHarness([meRoute()], env);
+    const h = routedHarness([meRoute(), revokeOk], env);
     expect(await run(['login', '--api-key', key('paste')], h.io)).toBe(0);
     expect(h.err()).toBe('');
     expect(loadConfig(env).profiles.home?.apiKey).toBe(key('paste'));
+    // The key it replaced is revoked on the profile's site.
+    expect(h.wire.filter((c) => c.method === 'DELETE')).toEqual([
+      { method: 'DELETE', origin: 'http://home', path: '/api/v1/cli/auth/key', auth: `Bearer ${HOME_KEY}` }
+    ]);
   });
 
   it('the hub file’s active login never moves: a login at another hub than the active one is used, and a new one is written beside it', async () => {

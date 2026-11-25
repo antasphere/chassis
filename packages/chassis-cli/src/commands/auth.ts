@@ -146,16 +146,22 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
   /**
    * Save the tool's own key on a profile, in one `updateConfig`; the profile
    * becomes the default only on a machine whose tool file held no profile.
+   * Answers the own key the write replaced, as the file held it under the
+   * lock (a re-login, a pasted key): `retireReplaced` revokes it.
    */
   function saveOwnKey(
     profileName: string,
     baseUrl: string,
     apiKey: string,
     email: string | undefined
-  ): { path: string; madeDefault: boolean } {
+  ): { path: string; madeDefault: boolean; replaced: string | undefined } {
     let madeDefault = false;
+    let replaced: string | undefined;
     const { path } = updateConfig(io.env, (config) => {
       const first = Object.keys(config.profiles).length === 0;
+      const before = config.profiles[profileName];
+      const old = before && sameInstance(profileUrl(before), baseUrl) ? firstSet(before.apiKey) : undefined;
+      replaced = old !== undefined && old !== firstSet(apiKey) ? old : undefined;
       config.profiles[profileName] = {
         ...config.profiles[profileName],
         apiKey,
@@ -167,7 +173,28 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
         madeDefault = true;
       }
     });
-    return { path, madeDefault };
+    return { path, madeDefault, replaced };
+  }
+
+  /**
+   * The own key a new one replaced (a self-hosted re-login, a pasted key),
+   * revoked on the profile's own site once the new key is saved, with no lock
+   * held: nothing is left live behind it. A site that refuses the revoke, or
+   * does not answer, is said; the key stays valid there.
+   */
+  async function retireReplaced(site: string, replaced: string | undefined): Promise<void> {
+    if (!replaced) return;
+    try {
+      await revokeOnSite(site, replaced, 'the replaced key', true);
+    } catch (e) {
+      io.err.write(
+        e instanceof CliAuthError
+          ? `${site} did not revoke the replaced key (${e.code}): it stays valid there until revoked from ` +
+              'its dashboard.\n'
+          : `Could not reach ${site} to revoke the replaced key: it stays valid there until revoked from its ` +
+              'dashboard.\n'
+      );
+    }
   }
 
   /** The one line a login says when its profile is not the default (R3: nothing moves the default). */
@@ -451,7 +478,8 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
           );
         }
         const me = await createClient({ baseUrl, apiKey: pasted, fetch: fetchOf() }).me();
-        const { path, madeDefault } = saveOwnKey(profileName, baseUrl, pasted, me.user.email);
+        const { path, madeDefault, replaced } = saveOwnKey(profileName, baseUrl, pasted, me.user.email);
+        await retireReplaced(site, replaced);
         if (globals.json) {
           printJson(io, {
             profile: profileName,
@@ -540,7 +568,8 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
       // the profile, named by the name the site gave it (never any part of it).
       const minted = await instanceLogin(baseUrl, opts);
       const me = await createClient({ baseUrl, apiKey: minted.key, fetch: fetchOf() }).me();
-      const { path, madeDefault } = saveOwnKey(profileName, baseUrl, minted.key, minted.email);
+      const { path, madeDefault, replaced } = saveOwnKey(profileName, baseUrl, minted.key, minted.email);
+      await retireReplaced(site, replaced);
       if (globals.json) {
         printJson(io, {
           profile: profileName,
