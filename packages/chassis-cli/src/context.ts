@@ -87,8 +87,9 @@ export interface CliIo extends CoreCliIo {
    * that serves its own key sends, and of each revoke cli-core sends on a
    * command's way (`connectOnDemand`, `refreshConnectKey`), in milliseconds:
    * past it the request is aborted, and counts as no answer (`limitedFetchOf`,
-   * cli-core's `requestTimeoutMs`). The bin leaves it unset and the default is
-   * 10 000; tests shorten it. Nothing else in the kit reads it.
+   * cli-core's `requestTimeoutMs`). Only an integer from 1 to 2 147 483 647 is
+   * a limit; anything else reads as none given. The bin leaves it unset and the
+   * default is 10 000; tests shorten it. Nothing else in the kit reads it.
    */
   requestTimeoutMs?: number;
 }
@@ -269,17 +270,26 @@ export function isLocalSite(url: string): boolean {
 /** The limit of one request sent through `limitedFetchOf`, unless the io gives one (ms). */
 const REQUEST_TIMEOUT_MS = 10_000;
 
+/** The longest limit a timer keeps (2^31 - 1 ms): Node cuts a longer delay to 1 ms. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
 /**
  * A fetch over `base` whose every request is aborted past the limit
  * (`CliIo.requestTimeoutMs`, else 10 s), as well as by any signal it already
  * carries. A request the limit aborted is no answer: a site that holds the
  * connection open costs the limit, never the system's own timeout. What
  * `profiles --check` and `profiles add` send goes through it, and so does the
- * revoke of the own-key settle (`settleOwnKeyProfile`).
+ * revoke of the own-key settle (`settleOwnKeyProfile`). Only an integer from
+ * 1 to 2 147 483 647 is a limit, cli-core's rule for its own revokes
+ * (`AbortSignal.timeout` throws on any other number, and cuts a delay of 2^31
+ * or more to 1 ms): anything else reads as none given, and the 10 s hold.
  */
 export function limitedFetchOf(base: typeof globalThis.fetch, io: CliIo): typeof globalThis.fetch {
   const given = io.requestTimeoutMs;
-  const ms = typeof given === 'number' && Number.isFinite(given) && given > 0 ? given : REQUEST_TIMEOUT_MS;
+  const ms =
+    typeof given === 'number' && Number.isInteger(given) && given >= 1 && given <= MAX_TIMEOUT_MS
+      ? given
+      : REQUEST_TIMEOUT_MS;
   return (input, init) => {
     const limit = AbortSignal.timeout(ms);
     const carried = init?.signal ?? (input instanceof Request ? input.signal : undefined);
