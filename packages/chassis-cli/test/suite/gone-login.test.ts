@@ -1,3 +1,6 @@
+import { spawn } from 'node:child_process';
+import { rmSync, writeFileSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   HUB_TOOL,
@@ -33,7 +36,7 @@ import { fresh, kept, seedHub, seedTool } from './signin-fixtures.js';
  */
 
 const { loadConfig } = cli;
-const { bin } = cli.identity;
+const { bin, envPrefix: P } = cli.identity;
 
 let f: ReturnType<typeof fleet>;
 
@@ -289,6 +292,82 @@ describe('R2b · a profile that serves its own key revokes a gone login’s kept
     expect(trace(next)).toEqual([`DELETE ${SITE_A}/api/v1/cli/auth/key`, `GET ${SITE_A}/api/v1/me`]);
     expect(next.wire[0]?.auth).toBe(`Bearer ${keptA}`);
     expect(keysOfProfile(loadConfig(env).profiles.a!).map((k) => k.apiKey)).toEqual([own, keptA]);
+  });
+
+  it('a stale key the site answers 401 for (dead there already) is forgotten: the listing counts it before the command (1), and not after (0) (verifier round 4, finding 9: C2f)', async () => {
+    const { env, keptA } = await ownKeyAndGoneLogin();
+    f.kill(keptA);
+    expect((await entryOf(env, 'a')).signIn.staleKeys).toBe(1);
+    expect(await run(['--profile', 'a', 'verify'], f.harness(env).io)).toBe(0);
+    expect((await entryOf(env, 'a')).signIn.staleKeys).toBe(0);
+  });
+
+  it('a forget that cannot be made (the tool file’s lock held by a live process past the lock’s wait) never fails the command: it answers, exit 0 (verifier round 4, finding 9: C2i)', async () => {
+    const { env } = await ownKeyAndGoneLogin();
+    const lock = `${cli.configPath(env)}.lock`;
+    const holder = spawn('/bin/sleep', ['60'], { stdio: 'ignore' });
+    try {
+      await new Promise((resolve) => holder.once('spawn', resolve));
+      writeFileSync(
+        lock,
+        JSON.stringify({ pid: holder.pid, host: hostname(), token: 'another', at: new Date().toISOString() })
+      );
+      const h = f.harness(env);
+      expect(await run(['--profile', 'a', 'verify'], h.io)).toBe(0);
+      expect(h.out()).toBe(`ok — ${ADA} (owner) @ ${SITE_A}\n`);
+      expect(h.err()).toBe('');
+    } finally {
+      holder.kill('SIGKILL');
+      rmSync(lock, { force: true });
+    }
+  }, 30_000);
+
+  it('a command served by an exported key settles nothing: no revoke, and the profile’s keys stay (verifier round 4, finding 9: C2k)', async () => {
+    const { env, own, keptA } = await ownKeyAndGoneLogin();
+    const envKey = f.toolKey(SITE_A, ADA, 'envk');
+    const h = f.harness({ ...env, [`${P}_URL`]: SITE_A, [`${P}_API_KEY`]: envKey });
+    expect(await run(['verify'], h.io)).toBe(0);
+    expect(h.wire).toEqual([{ method: 'GET', origin: SITE_A, path: '/api/v1/me', auth: `Bearer ${envKey}` }]);
+    expect(f.alive(keptA)).toBe(true);
+    expect(keysOfProfile(loadConfig(env).profiles.a!).map((k) => k.apiKey)).toEqual([own, keptA]);
+  });
+
+  it('a command that makes two requests on the own key settles once: one revoke, before the first, even when the site does not answer it (verifier round 4, finding 9: C2d)', async () => {
+    f = fleet([{ origin: SITE_A, names: HUB_A, trusts: HUB_A, down: 'revoke' }, ...SITES.slice(1)]);
+    const { env } = await ownKeyAndGoneLogin();
+    const h = f.harness(env);
+    // A workspace named by its name costs one /me before the command's own.
+    expect(await run(['--profile', 'a', '--workspace', 'Acme', 'verify'], h.io)).toBe(0);
+    expect(h.out()).toBe(`ok — ${ADA} (owner) @ ${SITE_A}\n`);
+    expect(trace(h)).toEqual([
+      `DELETE ${SITE_A}/api/v1/cli/auth/key`,
+      `GET ${SITE_A}/api/v1/me`,
+      `GET ${SITE_A}/api/v1/me`
+    ]);
+  });
+
+  it('the command returns only once its revoke has ended, and the stale key is off the disk when it does (verifier round 4, finding 9: C2b)', async () => {
+    const { env, own } = await ownKeyAndGoneLogin();
+    const h = f.harness(env);
+    const events: string[] = [];
+    const inner = h.io.fetch!;
+    h.io.fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      const what = `${init?.method ?? 'GET'} ${new URL(url).pathname}`;
+      events.push(`${what} sent`);
+      // The revoke takes its time: a command that did not wait for it would return first.
+      if (init?.method === 'DELETE') await new Promise((resolve) => setTimeout(resolve, 200));
+      const res = await inner(input, init);
+      events.push(`${what} answered`);
+      return res;
+    };
+    const code = await run(['--profile', 'a', 'verify'], h.io);
+    // What had happened when the command returned, and what the file held then.
+    const happened = [...events];
+    const onDisk = keysOfProfile(loadConfig(env).profiles.a!);
+    expect(code).toBe(0);
+    expect(happened).toContain('DELETE /api/v1/cli/auth/key answered');
+    expect(onDisk).toEqual([{ apiKey: own, kind: 'own' }]);
   });
 });
 
