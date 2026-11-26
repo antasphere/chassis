@@ -2,7 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { ProfilesListing } from '@antasphere/chassis-cli';
 import { routedHarness, tempConfigEnv, type Route } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
-import { ADA, BEA, fleet, HUB_A, HUB_B, SITE_A, SITE_B, trace, type Harness } from './fleet.js';
+import { ADA, BEA, fleet, HUB_A, HUB_B, SITE_A, SITE_B, SITES, trace, type Harness } from './fleet.js';
 import { cliVersionOf, cloudInstanceBody, fresh, kept, key, seedHub, seedTool } from './signin-fixtures.js';
 
 /**
@@ -567,6 +567,100 @@ describe('a key another profile on disk still holds is never revoked on its site
       expect(Object.keys(loadConfig(env).profiles)).toEqual([holder]);
     }
   );
+
+  describe('at the cloud site, every other call site of the rule asks it with the cloud URL: the cloud profile and a twin that names the cloud URL hold a key, and the one that acts never revokes it (verifier round 5, note 3)', () => {
+    beforeEach(() => {
+      // The cloud site signs in through hub-a.
+      f = fleet([{ origin: CLOUD, names: HUB_A, trusts: HUB_A }, ...SITES]);
+    });
+
+    /** Profile cloud (no baseUrl: at the tool's cloud URL) holding `cloud`, the default; a twin at `${CLOUD}/` holding `twin`; ada's login at hub-a unless `logins` is given. */
+    async function cloudTwins(
+      cloud: Record<string, unknown>,
+      twin: Record<string, unknown>,
+      logins: Record<string, Record<string, string>> = {
+        a: { apiKey: f.hubKey(HUB_A, ADA), baseUrl: HUB_A, email: ADA }
+      }
+    ) {
+      const env: Record<string, string> = await tempConfigEnv();
+      seedHub(env, { profiles: logins });
+      seedTool(env, {
+        activeProfile: 'cloud',
+        profiles: {
+          cloud: { site: fresh(HUB_A), ...cloud },
+          twin: { baseUrl: `${CLOUD}/`, site: fresh(HUB_A), ...twin }
+        }
+      });
+      return env;
+    }
+
+    /** No DELETE carried the shared key, the « Kept on » line was said once, the key is alive, and the holder's next verify answers. */
+    async function keptFor(h: Harness, env: Record<string, string>, shared: string, holder: string) {
+      expect(carrying(h, shared).filter((c) => c.method === 'DELETE')).toEqual([]);
+      expect(
+        h
+          .err()
+          .split('\n')
+          .filter((l) => l.startsWith('Kept on '))
+      ).toEqual([`Kept on ${CLOUD}: profile "${holder}" still holds that key.`]);
+      expect(f.alive(shared)).toBe(true);
+      const v = f.harness(env);
+      expect(await run(['--profile', holder, 'verify'], v.io)).toBe(0);
+      expect(v.out()).toContain(`ok — ${ADA} (owner) @ `);
+    }
+
+    it('a key pasted on the twin: the own key it replaces, which cloud holds, is not revoked (CC1)', async () => {
+      const shared = f.toolKey(CLOUD, ADA, 'own');
+      const pasted = f.toolKey(CLOUD, ADA, 'paste');
+      const env = await cloudTwins({ apiKey: shared }, { apiKey: shared });
+      const h = f.harness(env);
+      expect(await run(['--profile', 'twin', 'login', '--api-key', pasted], h.io)).toBe(0);
+      expect(loadConfig(env).profiles.twin?.apiKey).toBe(pasted);
+      await keptFor(h, env, shared, 'cloud');
+    });
+
+    it('a hub login on cloud: the kept key of its slot, which the twin holds as its own, is forgotten on cloud, not revoked (CC2)', async () => {
+      const shared = f.toolKey(CLOUD, ADA);
+      const env = await cloudTwins({ hubKeys: [kept(HUB_A, ADA, shared)] }, { apiKey: shared });
+      const h = f.harness(env);
+      expect(await run(['--profile', 'cloud', 'login'], h.io)).toBe(0);
+      expect(loadConfig(env).profiles.cloud?.hubKeys?.map((k) => k.apiKey)).not.toContain(shared);
+      await keptFor(h, env, shared, 'twin');
+    });
+
+    it('a hub login on the twin: its own key, which cloud holds, is forgotten on the twin once the exchange succeeded, not revoked (CC3)', async () => {
+      const shared = f.toolKey(CLOUD, ADA, 'own');
+      const env = await cloudTwins({ apiKey: shared }, { apiKey: shared });
+      const h = f.harness(env);
+      expect(await run(['--profile', 'twin', 'login'], h.io)).toBe(0);
+      expect(loadConfig(env).profiles.twin?.apiKey).toBeUndefined();
+      await keptFor(h, env, shared, 'cloud');
+    });
+
+    it('logout on cloud: its own key, which the twin holds, is forgotten on cloud, not revoked (CC4)', async () => {
+      const shared = f.toolKey(CLOUD, ADA, 'own');
+      const env = await cloudTwins({ apiKey: shared, email: ADA }, { apiKey: shared });
+      const h = f.harness(env);
+      expect(await run(['--profile', 'cloud', 'logout'], h.io)).toBe(0);
+      expect(loadConfig(env).profiles.cloud?.apiKey).toBeUndefined();
+      await keptFor(h, env, shared, 'twin');
+    });
+
+    it('the settle of cloud, served by its own key: a stale kept key, which the twin holds as its own, is forgotten on cloud, not revoked (CC6)', async () => {
+      const own = f.toolKey(CLOUD, ADA, 'own');
+      const shared = f.toolKey(CLOUD, ADA);
+      // ada's login is gone: only bea's at hub-b is in place, so cloud's kept key is stale.
+      const env = await cloudTwins(
+        { apiKey: own, hubKeys: [kept(HUB_A, ADA, shared)] },
+        { apiKey: shared },
+        { b: { apiKey: f.hubKey(HUB_B, BEA), baseUrl: HUB_B, email: BEA } }
+      );
+      const h = f.harness(env);
+      expect(await run(['--profile', 'cloud', 'verify'], h.io)).toBe(0);
+      expect(loadConfig(env).profiles.cloud?.hubKeys).toBeUndefined();
+      await keptFor(h, env, shared, 'twin');
+    });
+  });
 
   it('a command on a twin with no key of its own, whose old slot (its login gone) holds the own key of a: cli-core’s settle sends no revoke of it, the line is said once, and a still answers (verifier round 4, finding 5)', async () => {
     const shared = f.toolKey(SITE_A, ADA, 'own');
