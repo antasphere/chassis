@@ -567,33 +567,16 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
   }
 
   /**
-   * What the recovery of a refused kept key hands the exchange again: the
-   * account that signed the command in, and its hub when the site names none.
-   * cli-core evicts the refused key before it plans, so a site from before
-   * sites named their hub would otherwise have no kept key left to say which
-   * hub signs it in, and the recovery would end on « pick the hub ».
-   */
-  function recoveryChoice(ctx: CliContext<TClient>): CliSignInChoice {
-    if (!ctx.login) return {};
-    const remembered: unknown = ctx.profileName
-      ? loadConfig(ctx.io.env).profiles[ctx.profileName]?.site
-      : undefined;
-    const namesHub =
-      typeof remembered === 'object' &&
-      remembered !== null &&
-      typeof (remembered as { hub?: unknown }).hub === 'string';
-    return { email: ctx.login.email, ...(namesHub ? {} : { hubUrl: ctx.login.hub }) };
-  }
-
-  /**
    * The stranded-key recovery (PRDCT-2947): a fetch that, on the FIRST 401
    * answered to a kept key the sign-in served, runs cli-core's
    * `refreshConnectKey` (compare-and-evict, then the kept key another command
    * stored meanwhile, else the exchange again) and replays the request once
-   * with the new key. A second 401 stands. A hub refusal on the way (a
-   * restricted tool, a swept account) is the hub's own sentence, exit 3,
-   * through the runner. A site that no longer signs in through a hub
-   * recovers nothing and the 401 stands as it is.
+   * with the new key. cli-core keeps what the refused key says of its account
+   * and its hub before it evicts the key (a site that names no hub signs in
+   * again at that hub), so the recovery hands it nothing of its own. A second
+   * 401 stands. A hub refusal on the way (a restricted tool, a swept account)
+   * is the hub's own sentence, exit 3, through the runner. A site that no
+   * longer signs in through a hub recovers nothing and the 401 stands as it is.
    */
   function recoveringFetch(ctx: CliContext<TClient>, base: typeof globalThis.fetch): typeof globalThis.fetch {
     let recovered = false;
@@ -617,10 +600,7 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
         // lets the 401 stand.
         if (!probe || probe.status !== 401) return res;
       }
-      const outcome = await refreshConnectKey({
-        ...connectOptions(ctx, recoveryChoice(ctx)),
-        refusedKey: refused
-      });
+      const outcome = await refreshConnectKey({ ...connectOptions(ctx), refusedKey: refused });
       if (outcome.outcome === 'not_cloud') return res;
       // The cause before its consequence (verifier round 3, F1): the sign-in
       // is said first, then what the fresh mint healed.
