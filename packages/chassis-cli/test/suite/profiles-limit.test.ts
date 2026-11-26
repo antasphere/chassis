@@ -168,11 +168,13 @@ describe('the limit of each request of profiles --check and profiles add', () =>
   });
 
   it.each([
+    [0, 10_000],
+    [-1, 10_000],
     [200.5, 10_000],
     [2 ** 31, 10_000],
     [2_147_483_647, 2_147_483_647]
   ])(
-    'an io limit of %s: a request of profiles add is held to %s ms, since only an integer from 1 to 2 147 483 647 is a limit and anything else reads as none given (verifier round 4, addition 1 to finding 4)',
+    'an io limit of %s: a request of profiles add is held to %s ms, since only an integer from 1 to 2 147 483 647 is a limit and anything else reads as none given (verifier round 4, addition 1 to finding 4; round 5, note 9)',
     async (given, held) => {
       const timeout = vi.spyOn(AbortSignal, 'timeout');
       const h = f.harness(await tempConfigEnv());
