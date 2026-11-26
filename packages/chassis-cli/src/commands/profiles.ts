@@ -72,11 +72,12 @@ export function registerProfileCommands<TClient extends ChassisClient<string>>(
   const fetchOf = (): typeof globalThis.fetch => io.fetch ?? globalThis.fetch.bind(globalThis);
 
   /**
-   * The fetch of `--check` and `add` (`limitedFetchOf` over this io's fetch):
-   * each request is aborted past the limit (`CliIo.requestTimeoutMs`, else
-   * 10 s), as well as by any signal it already carries. A request the limit
-   * aborted is no answer: a site that holds the connection open costs these
-   * commands the limit, never the system's own connect timeout.
+   * The fetch of `--check`, `add` and the revokes of `remove` (`limitedFetchOf`
+   * over this io's fetch): each request is aborted past the limit
+   * (`CliIo.requestTimeoutMs`, else 10 s), as well as by any signal it already
+   * carries. A request the limit aborted is no answer: a site that holds the
+   * connection open costs these commands the limit, never the system's own
+   * connect timeout.
    */
   function limitedFetch(): typeof globalThis.fetch {
     return limitedFetchOf(fetchOf(), io);
@@ -302,10 +303,13 @@ export function registerProfileCommands<TClient extends ChassisClient<string>>(
 
   // ── profiles remove ────────────────────────────────────────────────────────
 
-  /** Revoke one key on a site (the profile's own, never another origin). */
+  /**
+   * Revoke one key on a site (the profile's own, never another origin), held to the io's limit
+   * (`limitedFetch`): a revoke the limit aborted is no answer, like a site that does not answer.
+   */
   async function revokeAt(site: string, key: string): Promise<Revoked> {
     try {
-      await new CliAuthClient({ baseUrl: site, fetch: fetchOf() }).revoke(key);
+      await new CliAuthClient({ baseUrl: site, fetch: limitedFetch() }).revoke(key);
       return 'revoked';
     } catch (e) {
       // A 401: the key is already dead there. Any other answer: the site did not revoke it.

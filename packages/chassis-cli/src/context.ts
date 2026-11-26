@@ -83,13 +83,15 @@ export interface CliIo extends CoreCliIo {
   hostname?: () => string;
   /**
    * The limit of each request `profiles --check` and `profiles add` send (the
-   * discovery read, `--check`'s `/me`), of each revoke the settle of a profile
-   * that serves its own key sends, and of each revoke cli-core sends on a
-   * command's way (`connectOnDemand`, `refreshConnectKey`), in milliseconds:
-   * past it the request is aborted, and counts as no answer (`limitedFetchOf`,
-   * cli-core's `requestTimeoutMs`). Only an integer from 1 to 2 147 483 647 is
-   * a limit; anything else reads as none given. The bin leaves it unset and the
-   * default is 10 000; tests shorten it. Nothing else in the kit reads it.
+   * discovery read, `--check`'s `/me`), of each revoke the kit sends (the
+   * settle of a profile that serves its own key, `profiles remove`, `logout`,
+   * and a login's retirement of a key it replaced, at a site or at a hub), and
+   * of each revoke cli-core sends on a command's way (`connectOnDemand`,
+   * `refreshConnectKey`), in milliseconds: past it the request is aborted, and
+   * counts as no answer (`limitedFetchOf`, cli-core's `requestTimeoutMs`).
+   * Only an integer from 1 to 2 147 483 647 is a limit; anything else reads as
+   * none given. The bin leaves it unset and the default is 10 000; tests
+   * shorten it. Nothing else in the kit reads it.
    */
   requestTimeoutMs?: number;
 }
@@ -278,8 +280,9 @@ const MAX_TIMEOUT_MS = 2_147_483_647;
  * (`CliIo.requestTimeoutMs`, else 10 s), as well as by any signal it already
  * carries. A request the limit aborted is no answer: a site that holds the
  * connection open costs the limit, never the system's own timeout. What
- * `profiles --check` and `profiles add` send goes through it, and so does the
- * revoke of the own-key settle (`settleOwnKeyProfile`). Only an integer from
+ * `profiles --check` and `profiles add` send goes through it, and so does
+ * every revoke the kit sends: the own-key settle's (`settleOwnKeyProfile`),
+ * `profiles remove`'s, and those of `login` and `logout`. Only an integer from
  * 1 to 2 147 483 647 is a limit, cli-core's rule for its own revokes
  * (`AbortSignal.timeout` throws on any other number, and cuts a delay of 2^31
  * or more to 1 ms): anything else reads as none given, and the 10 s hold.

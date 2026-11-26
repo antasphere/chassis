@@ -31,6 +31,7 @@ import { DEFAULT_HUB_URL } from '../identity.js';
 import {
   CliUsageError,
   keysHeldElsewhere,
+  limitedFetchOf,
   printJson,
   sayKept,
   stdinApiKey,
@@ -144,6 +145,13 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
 
   const fetchOf = (): typeof globalThis.fetch => io.fetch ?? globalThis.fetch.bind(globalThis);
   const authAt = (baseUrl: string): CliAuthClient => new CliAuthClient({ baseUrl, fetch: fetchOf() });
+  /**
+   * The client of every revoke these commands send, at a site or at a hub: its request is aborted past
+   * the io's limit (`limitedFetchOf`, else 10 s), and then counts as no answer, so a site that holds the
+   * connection open costs the command that limit. The e-mail code's clients (`authAt`) have none.
+   */
+  const revokerAt = (baseUrl: string): CliAuthClient =>
+    new CliAuthClient({ baseUrl, fetch: limitedFetchOf(fetchOf(), io) });
   const loginsNow = (): CliLogin[] => listLogins(io.env, { hubCloudUrl: DEFAULT_HUB_URL });
 
   /** The default profile: what a command typed by hand runs on (the active one, else the cloud's). */
@@ -374,10 +382,11 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
         const completed = await hubEmailCode(hub, wanted, opts);
         writeLogin({ name: old.name, hub }, completed);
         // The replaced account's hub key dies at its own hub (best effort:
-        // a dead one answers 401), so nothing is left live for it.
+        // a dead one answers 401, and a hub that does not answer within the
+        // io's limit is no answer), so nothing is left live for it.
         const oldKey = firstSet(old.profile.apiKey);
         if (oldKey && oldKey !== completed.key)
-          await authAt(old.hub)
+          await revokerAt(old.hub)
             .revoke(oldKey)
             .catch(() => undefined);
         return { login: loginNamed(old.name), replaced: old };
@@ -388,14 +397,15 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
   }
 
   /**
-   * Revoke one key on a site (the profile's own, never another origin): what
-   * the site answered; a 403 (the site refused the self-revoke: the key stays
-   * valid) is said on stderr, and so is a 401 unless `quiet`. Anything else
-   * throws.
+   * Revoke one key on a site (the profile's own, never another origin), held
+   * to the io's limit (`revokerAt`): what the site answered; a 403 (the site
+   * refused the self-revoke: the key stays valid) is said on stderr, and so is
+   * a 401 unless `quiet`. Anything else throws, a revoke the limit aborted
+   * like a site that does not answer.
    */
   async function revokeOnSite(site: string, key: string, what: string, quiet = false): Promise<RevokeAnswer> {
     try {
-      await authAt(site).revoke(key);
+      await revokerAt(site).revoke(key);
       return 'revoked';
     } catch (e) {
       if (e instanceof CliAuthError && e.status === 401) {
@@ -713,9 +723,10 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
   }
 
   /**
-   * `logout --all`: each login ended, its hub key revoked at its OWN hub,
-   * then its entry deleted from the hub file (only while it still holds that
-   * key), and the hub file's active login removed when it was that entry.
+   * `logout --all`: each login ended, its hub key revoked at its OWN hub
+   * (held to the io's limit, `revokerAt`), then its entry deleted from the
+   * hub file (only while it still holds that key), and the hub file's active
+   * login removed when it was that entry.
    */
   async function endLogins(
     logins: CliLogin[]
@@ -727,7 +738,7 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
         const hubKey = firstSet(login.profile.apiKey) ?? '';
         let revoked = false;
         try {
-          await authAt(login.hub).revoke(hubKey);
+          await revokerAt(login.hub).revoke(hubKey);
           revoked = true;
         } catch (e) {
           if (!(e instanceof CliAuthError && (e.status === 401 || e.status === 403))) throw e;
