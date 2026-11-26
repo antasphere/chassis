@@ -27,6 +27,7 @@ const KEY_VAR = `${P}_API_KEY`;
 
 const HUB_C = 'https://hub-c.example.com';
 const SITE_C = 'https://site-c.example.com';
+const SITE_D = 'https://site-d.example.com';
 const SELF = 'https://self.example.com';
 const NEW = 'https://new.example.com';
 const NEVER = 'https://never.example.com';
@@ -47,7 +48,8 @@ const sites = (): FleetSite[] => [
   { origin: OLD, names: null, trusts: HUB_A },
   { origin: SELF, names: null, trusts: null, cli: `${VERSION}-beta.1` },
   { origin: NEW, names: HUB_C, trusts: HUB_C },
-  { origin: SITE_C, names: HUB_A, trusts: HUB_A }
+  { origin: SITE_C, names: HUB_A, trusts: HUB_A },
+  { origin: SITE_D, names: HUB_B, trusts: HUB_B }
 ];
 
 beforeAll(async () => {
@@ -93,6 +95,7 @@ async function contractMachine() {
   const keptA = f.toolKey(SITE_A, ADA);
   const stale = f.toolKey(SITE_A, ZED, 'gone');
   const twin = f.toolKey(SITE_A, ADA, 'own');
+  const keptD = f.toolKey(SITE_D, ADA);
   seedTool(env, {
     activeProfile: 'a',
     profiles: {
@@ -110,10 +113,12 @@ async function contractMachine() {
       self: { baseUrl: SELF, site: facts(null, false, `${VERSION}-beta.1`) },
       new: { baseUrl: NEW, site: facts(HUB_C) },
       c: { baseUrl: SITE_C, site: facts(HUB_A) },
-      never: { baseUrl: NEVER }
+      never: { baseUrl: NEVER },
+      // A profile an older CLI wrote: a key kept through hub-a, its site never read (site-d names hub-b).
+      older: { baseUrl: SITE_D, hubKeys: [kept(HUB_A, ADA, keptD)] }
     }
   });
-  return { env, keptA, stale, twin };
+  return { env, keptA, stale, twin, keptD };
 }
 
 /** `profiles --json` (and `--check`) on a machine. */
@@ -328,11 +333,22 @@ describe('the contract of profiles --json (PRDCT-5190)', () => {
           cliBehind: null,
           signIn: { state: 'unknown', via: null, hub: null, email: null, staleKeys: 0, fix: CHECK },
           environment: [keyVar('refuses'), hubVar('replaces')]
+        },
+        {
+          name: 'older',
+          default: false,
+          saved: true,
+          site: { origin: SITE_D, ...NEVER_SEEN },
+          cliBehind: null,
+          // Its site never read, a key kept: how many keys its next sign-in revokes cannot be told yet.
+          signIn: { state: 'signed_in', via: 'login', hub: HUB_A, email: ADA, staleKeys: null, fix: CHECK },
+          environment: [keyVar('refuses'), hubVar('replaces')]
         }
       ]
     });
 
     const values = <T>(pick: (p: ProfileEntry) => T | T[]) => new Set(l.profiles.flatMap((p) => pick(p)));
+    expect(values((p) => p.signIn.staleKeys)).toEqual(new Set([0, 1, null]));
     expect(values((p) => p.signIn.state)).toEqual(
       new Set(['signed_in', 'will_sign_in', 'needs_login', 'unknown'])
     );
@@ -361,7 +377,16 @@ describe('the contract of profiles --json (PRDCT-5190)', () => {
       self: 'no_key',
       new: 'no_key',
       c: 'no_key',
-      never: 'unreachable'
+      never: 'unreachable',
+      older: 'no_key'
+    });
+    // Its site asked, the count is exact: site-d names hub-b, so the key kept through hub-a is stale.
+    expect(p.older!.signIn).toMatchObject({
+      state: 'will_sign_in',
+      hub: HUB_B,
+      email: BEA,
+      staleKeys: 1,
+      fix: null
     });
     expect(p['a-twin']!.signIn.person).toEqual({ name: 'Ada', email: ADA, workspace: 'Acme' });
     expect(l.profiles.filter((e) => e.name !== 'a-twin').every((e) => e.signIn.person === null)).toBe(true);
@@ -513,6 +538,82 @@ describe('the truth, as it changes (PRDCT-5190, PRDCT-3522, PRDCT-3060)', () => 
     });
   });
 
+  it('a profile whose site was never read, holding a key kept through hub-a: staleKeys null with check; after --check the count the next command revokes (1), and that command revokes exactly that key (PRDCT-3522)', async () => {
+    const env = await twoSites();
+    const keptOld = f.toolKey(SITE_B, ADA);
+    // Site-b names hub-b; what the profile keeps came through hub-a, from a CLI that remembered nothing.
+    seedTool(env, {
+      activeProfile: 'b',
+      profiles: { b: { baseUrl: SITE_B, hubKeys: [kept(HUB_A, ADA, keptOld)] } }
+    });
+
+    // From the files alone: the state as planned, the count not told, the check its fix.
+    expect(byName(await listing(env)).b!.signIn).toEqual({
+      state: 'signed_in',
+      via: 'login',
+      hub: HUB_A,
+      email: ADA,
+      staleKeys: null,
+      fix: CHECK
+    });
+    const text = onMachine(env);
+    expect(await run(['profiles'], text.io)).toBe(0);
+    expect(text.out()).toContain(`signed in: ${ADA} at ${HUB_A}; try again: ${bin} profiles --check`);
+
+    // Its site asked: it names hub-b, so the key kept through hub-a is the one the next sign-in revokes.
+    expect(byName(await listing(env, '--check')).b!.signIn).toMatchObject({
+      state: 'will_sign_in',
+      hub: HUB_B,
+      email: BEA,
+      staleKeys: 1,
+      fix: null,
+      checked: 'no_key'
+    });
+    const after = byName(await listing(env)).b!.signIn;
+    expect(after).toEqual({
+      state: 'will_sign_in',
+      via: 'login',
+      hub: HUB_B,
+      email: BEA,
+      staleKeys: 1,
+      fix: null
+    });
+
+    const h = onMachine(env);
+    expect(await run(['--profile', 'b', 'verify'], h.io)).toBe(0);
+    expect(h.out()).toBe(`ok — ${BEA} (owner) @ ${SITE_B}\n`);
+    expect(h.wire.filter((c) => c.method === 'DELETE').map((c) => `${c.origin} ${c.auth}`)).toEqual([
+      `${SITE_B} Bearer ${keptOld}`
+    ]);
+    expect(f.alive(keptOld)).toBe(false);
+    expect(byName(await listing(env)).b!.signIn.staleKeys).toBe(0);
+  });
+
+  it('a profile whose site was never read and that holds no kept key keeps a number: 0, with its own key or with nothing', async () => {
+    const env: Record<string, string> = await tempConfigEnv();
+    seedTool(env, {
+      activeProfile: 'own',
+      profiles: { own: { baseUrl: SITE_A, apiKey: f.toolKey(SITE_A, ADA, 'own') }, bare: { baseUrl: SITE_B } }
+    });
+    const p = byName(await listing(env));
+    expect(p.own!.signIn).toEqual({
+      state: 'signed_in',
+      via: 'key',
+      hub: null,
+      email: null,
+      staleKeys: 0,
+      fix: null
+    });
+    expect(p.bare!.signIn).toEqual({
+      state: 'unknown',
+      via: null,
+      hub: null,
+      email: null,
+      staleKeys: 0,
+      fix: CHECK
+    });
+  });
+
   it('after --check, an unreachable profile at http://localhost:<port> gets remove_profile; an unreachable remote one gets check, and neither is sent a key (PRDCT-3060)', async () => {
     f = fleet([
       { origin: LOCAL, names: null, trusts: null, down: true },
@@ -584,7 +685,8 @@ describe('the text listing (one look)', () => {
       ['', 'self', SELF, `needs a sign-in: ${bin} --profile self login`, `${VERSION}-beta.1`],
       ['', 'new', NEW, `needs a sign-in: ${bin} --profile new login`, '-'],
       ['', 'c', SITE_C, `needs a sign-in: ${bin} --profile c login --email <address>`, '-'],
-      ['', 'never', NEVER, `not reached yet: ${bin} profiles --check`, '-']
+      ['', 'never', NEVER, `not reached yet: ${bin} profiles --check`, '-'],
+      ['', 'older', SITE_D, `signed in: ${ADA} at ${HUB_A}; try again: ${bin} profiles --check`, '-']
     ]);
     expect(footer).toBe(
       `This CLI ${VERSION} on ${MACHINE}.\n` +

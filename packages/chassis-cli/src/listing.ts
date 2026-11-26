@@ -3,6 +3,7 @@ import {
   firstSet,
   freshProfileName,
   HUB_URL_ENV,
+  keysOfProfile,
   listLogins,
   normalizeUrl,
   planSignIn,
@@ -103,8 +104,13 @@ export interface ProfileSignIn {
   hub: string | null;
   /** The login's address; for its own key, the address stored with it. */
   email: string | null;
-  /** How many keys the next sign-in on this site revokes there (a count, never a key). */
-  staleKeys: number;
+  /**
+   * How many keys the next sign-in on this site revokes there (a count, never a key). Null when that
+   * cannot be told before the site is asked: the profile holds a kept key or an old slot, and its site
+   * was never read (`site.seenAt` null, as for every profile an older CLI wrote); the fix is then
+   * `check`, after which the count is exact.
+   */
+  staleKeys: number | null;
   fix: ProfileFix | null;
   /** `--check` only. */
   checked?: ProfileCheckVerdict;
@@ -412,6 +418,10 @@ function entryOf(input: DescribeProfilesInput, row: ProfileRow, isDefault: boole
 
   let state: ProfileSignInState = plan.state;
   let fix = fixOfPlan(plan, row, bin);
+  // Its site never read, and a kept key or an old slot held: which of them the next sign-in revokes
+  // depends on the hub the site names, so the count cannot be told before the site is asked.
+  const untold = facts === undefined && keysOfProfile(row.profile).some((k) => k.kind !== 'own');
+  if (untold) fix = checkFix(bin);
   if (check?.checked === 'key_refused') {
     // The site refused the key a command would send: the login its site asks for. A refused own key
     // is planned without it (what `login` reads). A refused kept key still tells `login` which hub
@@ -440,7 +450,7 @@ function entryOf(input: DescribeProfilesInput, row: ProfileRow, isDefault: boole
     via: plan.via,
     hub: plan.via === 'key' ? null : plan.hub,
     email: plan.via === 'key' ? (text(row.profile?.email) ?? null) : (text(plan.login?.email) ?? null),
-    staleKeys: plan.stale.length,
+    staleKeys: untold ? null : plan.stale.length,
     fix,
     ...(check ? { checked: check.checked, person: check.checked === 'ok' ? check.person : null } : {})
   };

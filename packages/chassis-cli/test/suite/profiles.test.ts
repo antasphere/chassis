@@ -275,9 +275,16 @@ describe('profiles, use, config show', () => {
       ['', 'PROFILE', 'SITE', 'SIGN-IN', 'SITE CLI'],
       ['', 'cloud', CLOUD, `not reached yet: ${bin} profiles --check`, '-'],
       ['*', 'own', 'http://own', 'signed in with its own key', '-'],
-      ['', 'hubbed', 'http://hubbed', `signed in: ada@x.co at ${HUB}`, '-'],
-      ['', 'old', 'http://old', `signed in: ada@x.co at ${HUB}`, '-'],
-      ['', 'stray', 'http://stray', `needs a sign-in: ${bin} --profile stray login --hub <hub>`, '-'],
+      // Their sites never read, with keys kept: what the next sign-in revokes is told once each is asked.
+      [
+        '',
+        'hubbed',
+        'http://hubbed',
+        `signed in: ada@x.co at ${HUB}; try again: ${bin} profiles --check`,
+        '-'
+      ],
+      ['', 'old', 'http://old', `signed in: ada@x.co at ${HUB}; try again: ${bin} profiles --check`, '-'],
+      ['', 'stray', 'http://stray', `needs a sign-in; try again: ${bin} profiles --check`, '-'],
       ['', 'bare', 'http://bare', `not reached yet: ${bin} profiles --check`, '-']
     ]);
     expect(h.out().split('\n\n')[1]).toBe(
@@ -358,17 +365,19 @@ describe('profiles, use, config show', () => {
           signIn: signIn({ via: 'key', hub: null }),
           environment: []
         },
+        // Its site never read, with an old slot held: how many keys its next sign-in revokes cannot be
+        // told before the site is asked, and asking it is the fix.
         {
           name: 'hubbed',
           default: false,
           saved: true,
           site: { origin: 'http://hubbed', ...never },
           cliBehind: null,
-          signIn: signIn({}),
+          signIn: signIn({ staleKeys: null, fix: { kind: 'check', argv: [bin, 'profiles', '--check'] } }),
           environment: []
         },
-        // Another account's key, now that the login at its hub is ada's: nothing serves it, the next
-        // sign-in there revokes it, and a stale key never says which hub a site trusts.
+        // Another account's key, now that the login at its hub is ada's: nothing serves it, a stale key
+        // never says which hub a site trusts, and with its site never read the count waits for the check.
         {
           name: 'replaced',
           default: false,
@@ -380,8 +389,8 @@ describe('profiles, use, config show', () => {
             via: null,
             hub: null,
             email: null,
-            staleKeys: 1,
-            fix: { kind: 'pick_hub', argv: [bin, '--profile', 'replaced', 'login', '--hub'] }
+            staleKeys: null,
+            fix: { kind: 'check', argv: [bin, 'profiles', '--check'] }
           }),
           environment: []
         }
