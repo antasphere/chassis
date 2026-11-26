@@ -83,11 +83,12 @@ export interface CliIo extends CoreCliIo {
   hostname?: () => string;
   /**
    * The limit of each request `profiles --check` and `profiles add` send (the
-   * discovery read, `--check`'s `/me`), and of each revoke the settle of a
-   * profile that serves its own key sends, in milliseconds: past it the
-   * request is aborted, and counts as no answer (`limitedFetchOf`). The bin
-   * leaves it unset and the default is 10 000; tests shorten it. Nothing else
-   * in the kit reads it.
+   * discovery read, `--check`'s `/me`), of each revoke the settle of a profile
+   * that serves its own key sends, and of each revoke cli-core sends on a
+   * command's way (`connectOnDemand`, `refreshConnectKey`), in milliseconds:
+   * past it the request is aborted, and counts as no answer (`limitedFetchOf`,
+   * cli-core's `requestTimeoutMs`). The bin leaves it unset and the default is
+   * 10 000; tests shorten it. Nothing else in the kit reads it.
    */
   requestTimeoutMs?: number;
 }
@@ -708,6 +709,9 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
       // Thread the injected fetch so the probe + exchange stay on the test
       // harness wire (and any proxying the runner set up).
       ...(io.fetch ? { fetch: io.fetch } : {}),
+      // The io's limit, when it gives one, for each revoke cli-core sends on
+      // the command's way: one limit for every revoke, the kit's and cli-core's.
+      ...(io.requestTimeoutMs !== undefined ? { requestTimeoutMs: io.requestTimeoutMs } : {}),
       notify: (line) => io.err.write(line)
     };
   }

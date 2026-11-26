@@ -11,7 +11,20 @@ import {
 import type { ProfileEntry, ProfilesListing } from '@antasphere/chassis-cli';
 import { tempConfigEnv } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
-import { ADA, BEA, fleet, HUB_A, HUB_B, OLD, SITE_A, SITE_B, SITES, trace, type Harness } from './fleet.js';
+import {
+  ADA,
+  BEA,
+  CY,
+  fleet,
+  HUB_A,
+  HUB_B,
+  OLD,
+  SITE_A,
+  SITE_B,
+  SITES,
+  trace,
+  type Harness
+} from './fleet.js';
 import { fresh, kept, seedHub, seedTool } from './signin-fixtures.js';
 
 /**
@@ -173,6 +186,27 @@ describe('R2b · a kept key whose login is gone is revoked by the next command, 
     expect(await run(['--profile', 'b', 'verify'], f.harness(env).io)).toBe(1);
     expect((await entryOf(env, 'b')).signIn).toEqual(needsLogin(0));
   });
+
+  it('a site that holds the revoke open: cli-core’s revoke is given up at the io’s limit, the command goes on to its sign-in and answers, and the key stays on disk for the next command (verifier round 4, addition 1 to finding 4)', async () => {
+    f = fleet([{ origin: SITE_A, names: HUB_A, trusts: HUB_A, silent: 'revoke' }, ...SITES.slice(1)]);
+    const env: Record<string, string> = await tempConfigEnv();
+    // Profile a keeps a key for ada at hub-a, whose login is gone; cy's login at hub-a signs it in.
+    seedHub(env, { profiles: { c: { apiKey: f.hubKey(HUB_A, CY), baseUrl: HUB_A, email: CY } } });
+    const keptA = f.toolKey(SITE_A, ADA);
+    seedTool(env, {
+      activeProfile: 'a',
+      profiles: { a: { baseUrl: SITE_A, site: fresh(HUB_A), hubKeys: [kept(HUB_A, ADA, keptA)] } }
+    });
+    const h = f.harness(env);
+    h.io.requestTimeoutMs = LIMIT_MS;
+    // Well within cli-core's own limit of 10 s.
+    expect(await endsWithin(run(['--profile', 'a', 'verify'], h.io), 2_000)).toEqual({ code: 0 });
+    expect(h.out()).toBe(`ok — ${CY} (owner) @ ${SITE_A}\n`);
+    expect(revokes(h)).toEqual([`${SITE_A}/api/v1/cli/auth/key`]);
+    expect(h.wire.find((c) => c.method === 'DELETE')?.auth).toBe(`Bearer ${keptA}`);
+    expect(f.alive(keptA)).toBe(true);
+    expect(loadConfig(env).profiles.a?.hubKeys?.map((k) => k.apiKey)).toContain(keptA);
+  }, 20_000);
 });
 
 describe('R2b · a profile that serves its own key revokes a gone login’s kept key too, before its first request (F2)', () => {
