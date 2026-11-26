@@ -662,6 +662,87 @@ describe('the truth, as it changes (PRDCT-5190, PRDCT-3522, PRDCT-3060)', () => 
   });
 });
 
+describe('five truths the listing already told, now pinned (F7)', () => {
+  it('the implicit cloud row, its site answering and its hub holding no login: its fix names the site, since --profile cloud names nothing on disk; run, it signs in', async () => {
+    f = fleet([
+      { origin: CLOUD, names: HUB_B, trusts: HUB_B },
+      { origin: SITE_A, names: HUB_A, trusts: HUB_A }
+    ]);
+    const env: Record<string, string> = await tempConfigEnv();
+    seedHub(env, { profiles: { a: { apiKey: f.hubKey(HUB_A, ADA), baseUrl: HUB_A, email: ADA } } });
+    seedTool(env, { activeProfile: 'a', profiles: { a: { baseUrl: SITE_A, site: facts(HUB_A) } } });
+    const cloud = byName(await listing(env, '--check')).cloud!;
+    expect(cloud.saved).toBe(false);
+    expect(cloud.signIn.fix).toEqual({ kind: 'hub_login', argv: [bin, '--api-url', CLOUD, 'login'] });
+
+    const go = onMachine(env);
+    go.io.prompt = async (question) => (/mail/i.test(question) ? BEA : '123456');
+    expect(await run(cloud.signIn.fix!.argv.slice(1), go.io)).toBe(0);
+    expect(loadConfig(env).profiles.cloud?.hubKeys?.map((k) => [k.hub, k.email])).toEqual([[HUB_B, BEA]]);
+  });
+
+  it('a profile that holds its own key, ANTASPHERE_URL naming another hub than its site’s: the listing says no effect, and the command answers', async () => {
+    const env: Record<string, string> = await tempConfigEnv();
+    seedTool(env, {
+      activeProfile: 'a',
+      profiles: { a: { baseUrl: SITE_A, apiKey: f.toolKey(SITE_A, ADA, 'own'), site: facts(HUB_A) } }
+    });
+    const withHub = { ...env, ANTASPHERE_URL: HUB_B };
+    expect(byName(await listing(withHub)).a!.environment).toEqual([]);
+    const v = onMachine(withHub);
+    expect(await run(['--profile', 'a', 'verify'], v.io)).toBe(0);
+    expect(v.out()).toBe(`ok — ${ADA} (owner) @ ${SITE_A}\n`);
+  });
+
+  it('a saved profile at the cloud URL, whatever its name: no implicit cloud row beside it', async () => {
+    const env: Record<string, string> = await tempConfigEnv();
+    seedTool(env, { activeProfile: 'a', profiles: { home: { baseUrl: CLOUD }, a: { baseUrl: SITE_A } } });
+    const atCloud = (await listing(env)).profiles
+      .filter((p) => p.site.origin === CLOUD)
+      .map((p) => ({ name: p.name, saved: p.saved, default: p.default }));
+    expect(atCloud).toEqual([{ name: 'home', saved: true, default: false }]);
+  });
+
+  it('--check on a profile whose only key belongs to a login that is gone: no_key, and that key is sent nowhere', async () => {
+    const env: Record<string, string> = await tempConfigEnv();
+    seedHub(env, { profiles: { b: { apiKey: f.hubKey(HUB_B, BEA), baseUrl: HUB_B, email: BEA } } });
+    const gone = f.toolKey(SITE_A, ADA);
+    seedTool(env, {
+      activeProfile: 'a',
+      profiles: { a: { baseUrl: SITE_A, site: facts(HUB_A), hubKeys: [kept(HUB_A, ADA, gone)] } }
+    });
+    const h = onMachine(env);
+    expect(await run(['profiles', '--check', '--json'], h.io)).toBe(0);
+    expect(byName(JSON.parse(h.out()) as ProfilesListing).a!.signIn).toMatchObject({
+      state: 'needs_login',
+      staleKeys: 1,
+      checked: 'no_key',
+      person: null
+    });
+    expect(h.wire.filter((c) => c.auth === `Bearer ${gone}`)).toEqual([]);
+    expect(f.alive(gone)).toBe(true);
+  });
+
+  it('--check moves what a profile remembers of its site even when the site says the same as before: its seenAt is now', async () => {
+    const env: Record<string, string> = await tempConfigEnv();
+    const hourAgo = new Date(Date.now() - 3_600_000).toISOString();
+    seedTool(env, {
+      activeProfile: 'a',
+      profiles: {
+        a: {
+          baseUrl: SITE_A,
+          site: { hub: HUB_A, federated: true, name: 'Inst', cliVersion: VERSION, seenAt: hourAgo }
+        }
+      }
+    });
+    const before = Date.now();
+    expect(await run(['profiles', '--check', '--json'], onMachine(env).io)).toBe(0);
+    const site = loadConfig(env).profiles.a?.site;
+    expect(site).toMatchObject({ hub: HUB_A, federated: true, name: 'Inst', cliVersion: VERSION });
+    expect(Date.parse(site?.seenAt ?? '')).toBeGreaterThanOrEqual(before);
+  });
+});
+
 describe('the text listing (one look)', () => {
   it('the fixture machine, with a key and a hub exported', async () => {
     const { env } = await contractMachine();
