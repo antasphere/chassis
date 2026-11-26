@@ -297,6 +297,32 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
     return written;
   }
 
+  /**
+   * `login --email <address>` at a hub that holds two logins (or more), neither of them that address,
+   * and that the profile never used: the address cannot replace one of them unasked. The sentence names
+   * each account once (one address is one account) and the profile the way the kit's other sentences
+   * do: `--profile <name>` when it is on disk at the site, else `--api-url <site>`.
+   */
+  function notAmong(
+    wanted: string,
+    hub: string,
+    candidates: CliLogin[],
+    onDisk: string | undefined,
+    site: string
+  ): string {
+    const accounts: CliLogin[] = [];
+    for (const l of candidates) {
+      if (!accounts.some((a) => a === l || sameAddress(a.email, l.email))) accounts.push(l);
+    }
+    const n = accounts.length;
+    const flag = onDisk ? `--profile ${onDisk}` : `--api-url ${normalizeUrl(site)}`;
+    return (
+      `${wanted} is not signed in at ${hub}, which holds ${n === 2 ? 'two' : n} logins ` +
+      `(${accounts.map((l) => firstSet(l.email) ?? '(no address)').join(', ')}). Run ${bin} ${flag} login ` +
+      `--email with one of them, or sign one of them out first so that ${wanted} replaces it.`
+    );
+  }
+
   /** The login of one entry, as the hub file holds it now. */
   function loginNamed(name: string): CliLogin {
     const login = loginsNow().find((l) => l.name === name);
@@ -314,7 +340,8 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
    * the login there, that login REPLACED by the email code of the named
    * account (the line, the replaced hub key revoked at its own hub); no login
    * there, the email code and a new login. Two logins there that this
-   * profile never used: cli-core's « pick one ». Never a guess.
+   * profile never used: cli-core's « pick one », or, with `--email` naming
+   * neither of them, the kit's own sentence (`notAmong`). Never a guess.
    */
   async function loginAt(
     hub: string,
@@ -331,7 +358,11 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
     if (pick.kind === 'pick_login') throw new CliUsageError(pick.sentence);
     if (wanted) {
       const current = chooseLogin(base);
-      if (current.kind === 'pick_login') throw new CliUsageError(current.sentence);
+      if (current.kind === 'pick_login') {
+        throw new CliUsageError(
+          notAmong(wanted, hub, current.candidates, here ? profileName : undefined, site)
+        );
+      }
       if (current.kind === 'login') {
         const old = current.login;
         const had = firstSet(old.email);

@@ -351,6 +351,41 @@ describe('login --email replaces the login at its hub only (ruling 3)', () => {
     expect([f.alive(keyA), f.alive(keptA)]).toEqual([false, false]);
     expect(loadConfig(env).profiles.a?.hubKeys?.map((k) => [k.hub, k.email])).toEqual([[HUB_A, CY]]);
   });
+
+  it('--email naming an account not signed in at the site’s hub, which holds two logins the profile never used: the sentence names both and the two ways out, and nothing is asked nor sent but the discovery read', async () => {
+    const ZED = 'zed@example.com';
+    const env: Record<string, string> = await tempConfigEnv();
+    seedHub(env, {
+      profiles: {
+        a: { apiKey: f.hubKey(HUB_A, ADA), baseUrl: HUB_A, email: ADA },
+        c: { apiKey: f.hubKey(HUB_A, CY), baseUrl: HUB_A, email: CY }
+      }
+    });
+    const sentence = (flag: string) =>
+      `Error: ${ZED} is not signed in at ${HUB_A}, which holds two logins (${ADA}, ${CY}). Run ${bin} ${flag} ` +
+      `login --email with one of them, or sign one of them out first so that ${ZED} replaces it.\n`;
+
+    // On a profile of the site on disk, the sentence names it by --profile...
+    seedTool(env, { activeProfile: 'a', profiles: { a: { baseUrl: SITE_A, site: fresh(HUB_A) } } });
+    const h = f.harness(env);
+    const asked: string[] = [];
+    h.io.prompt = async (question) => {
+      asked.push(question);
+      return '123456';
+    };
+    expect(await run(['login', '--email', ZED], h.io)).toBe(1);
+    expect(h.err()).toBe(sentence('--profile a'));
+    expect(trace(h)).toEqual([`GET ${SITE_A}/api/v1/instance`]);
+    expect(asked).toEqual([]);
+
+    // ...and with none on disk there, by the site.
+    seedTool(env, { activeProfile: 'b', profiles: { b: { baseUrl: SITE_B } } });
+    const bySite = f.harness(env);
+    expect(await run(['login', '--api-url', SITE_A, '--email', ZED], bySite.io)).toBe(1);
+    expect(bySite.err()).toBe(sentence(`--api-url ${SITE_A}`));
+    expect(trace(bySite)).toEqual([`GET ${SITE_A}/api/v1/instance`]);
+    expect(Object.keys(loadCoreConfig(env, HUB_TOOL).profiles)).toEqual(['a', 'c']);
+  });
 });
 
 describe('a new hub key is filed under the hub its email code ran at, even when its entry left the hub file meanwhile (F1)', () => {
