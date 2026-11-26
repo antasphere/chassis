@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   HUB_TOOL,
+  keysOfProfile,
   loadConfig as loadCoreConfig,
   updateConfig as updateCoreConfig
 } from '@antasphere/cli-core';
@@ -277,6 +278,25 @@ describe('logout revokes on the profile’s own site, --all at the login’s own
       profiles: { b: { apiKey: keyB, baseUrl: HUB_B, email: BEA } }
     });
   });
+
+  it('logout on a site that does not answer: exit 1 naming it, and every key stays on disk, alive, for the next attempt', async () => {
+    const DOWN = 'https://down.example.com';
+    f = fleet([...SITES, { origin: DOWN, names: HUB_A, trusts: HUB_A, down: true }]);
+    const env: Record<string, string> = await tempConfigEnv();
+    const own = f.toolKey(DOWN, ADA, 'own');
+    const keptD = f.toolKey(DOWN, ADA);
+    seedTool(env, {
+      activeProfile: 'd',
+      profiles: { d: { baseUrl: DOWN, apiKey: own, hubKeys: [kept(HUB_A, ADA, keptD)] } }
+    });
+    const h = f.harness(env);
+    expect(await run(['logout'], h.io)).toBe(1);
+    expect(h.err()).toBe(
+      `Error: Nothing answers at ${DOWN} (profile "d"). Check the address, or try again.\n`
+    );
+    expect(keysOfProfile(loadConfig(env).profiles.d).map((k) => k.apiKey)).toEqual([own, keptD]);
+    expect([f.alive(own), f.alive(keptD)]).toEqual([true, true]);
+  });
 });
 
 describe('login --email replaces the login at its hub only (ruling 3)', () => {
@@ -298,6 +318,37 @@ describe('login --email replaces the login at its hub only (ruling 3)', () => {
     expect(Object.keys(hubConfig.profiles)).toEqual(['a', 'b']);
     expect(hubConfig.profiles.a).toMatchObject({ baseUrl: HUB_A, email: CY });
     expect(hubConfig.profiles.b).toEqual({ apiKey: keyB, baseUrl: HUB_B, email: BEA });
+    expect(loadConfig(env).profiles.a?.hubKeys?.map((k) => [k.hub, k.email])).toEqual([[HUB_A, CY]]);
+  });
+
+  it('cy replaces ada while the hub file holds an entry whose hub cannot be told: the replacement revokes ada’s kept key on site-a itself (unknown is not gone, so nothing else would)', async () => {
+    const env: Record<string, string> = await tempConfigEnv();
+    const keyA = f.hubKey(HUB_A, ADA);
+    seedHub(env, {
+      activeProfile: 'a',
+      profiles: {
+        a: { apiKey: keyA, baseUrl: HUB_A, email: ADA },
+        smudged: {
+          apiKey: f.hubKey(HUB_A, 'zed@example.com'),
+          baseUrl: 'not a url',
+          email: 'zed@example.com'
+        }
+      }
+    });
+    const keptA = f.toolKey(SITE_A, ADA);
+    seedTool(env, {
+      activeProfile: 'a',
+      profiles: { a: { baseUrl: SITE_A, site: fresh(HUB_A), hubKeys: [kept(HUB_A, ADA, keptA)] } }
+    });
+    const h = f.harness(env);
+    h.io.prompt = async () => '123456';
+    expect(await run(['login', '--email', CY], h.io)).toBe(0);
+    expect(h.err()).toContain(`Replacing the Antasphere login ${ADA} with ${CY}.\n`);
+    expect(h.wire.filter((c) => c.method === 'DELETE').map((c) => `${c.origin} ${c.auth}`)).toEqual([
+      `${HUB_A} Bearer ${keyA}`,
+      `${SITE_A} Bearer ${keptA}`
+    ]);
+    expect([f.alive(keyA), f.alive(keptA)]).toEqual([false, false]);
     expect(loadConfig(env).profiles.a?.hubKeys?.map((k) => [k.hub, k.email])).toEqual([[HUB_A, CY]]);
   });
 });
