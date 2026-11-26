@@ -1,4 +1,5 @@
 import {
+  CliConfigError,
   firstSet,
   freshProfileName,
   HUB_URL_ENV,
@@ -7,6 +8,7 @@ import {
   planSignIn,
   sameInstance,
   selectProfile,
+  undecidedLogins,
   type CliConfig,
   type CliEnv,
   type CliProfile,
@@ -28,7 +30,39 @@ import { DEFAULT_HUB_URL, type CliIdentity } from './identity.js';
  * the environment changes is said beside it, per profile. `--check` adds what
  * each site answered just now. No field carries key material, redacted or
  * not: a profile's keys are counted, never shown.
+ *
+ * Unknown is not gone: a hub file that cannot be read stops the listing with
+ * cli-core's sentence and what it means for the kept keys, and a hub entry
+ * whose hub cannot be told is no login, said beside the logins in the text.
  */
+
+/** What a hub file that cannot be read means for the kept keys, after cli-core's sentence. */
+const UNREAD_HUB_FILE = ' Until it reads again, no kept key is judged signed out and none is revoked.';
+
+/**
+ * Run what reads the hub file. One that cannot be read is cli-core's
+ * `CliConfigError`, thrown again with what it means: while it does not read,
+ * no command judges a kept key signed out, and none is revoked.
+ */
+function readingHubFile<T>(read: () => T): T {
+  try {
+    return read();
+  } catch (e) {
+    if (e instanceof CliConfigError && !e.message.endsWith(UNREAD_HUB_FILE)) {
+      throw new CliConfigError(`${e.message}${UNREAD_HUB_FILE}`);
+    }
+    throw e;
+  }
+}
+
+/**
+ * The hub file's entries that hold a key and whose hub cannot be told (cli-core
+ * `undecidedLogins`): no login, and while one is there no kept key is judged
+ * signed out. The text listing says each.
+ */
+export function undecidedLoginsOf(env: CliEnv): string[] {
+  return readingHubFile(() => undecidedLogins(env, { hubCloudUrl: DEFAULT_HUB_URL }));
+}
 
 /** Where a profile stands with its sign-in (cli-core `planSignIn`). */
 export type ProfileSignInState = 'signed_in' | 'will_sign_in' | 'needs_login' | 'unknown';
@@ -433,7 +467,8 @@ function entryOf(input: DescribeProfilesInput, row: ProfileRow, isDefault: boole
  * The listing: the machine, this CLI's version, the default profile's site,
  * what the environment exports, the machine's logins, and one entry per
  * profile (the implicit cloud row first when no saved profile is at the
- * cloud URL). Pure but for the hub file it reads.
+ * cloud URL). Pure but for the hub file it reads: one that cannot be read is
+ * cli-core's `CliConfigError`, with what it means for the kept keys.
  */
 export function describeProfiles(input: DescribeProfilesInput): ProfilesListing {
   const { identity, config, env } = input;
@@ -441,7 +476,7 @@ export function describeProfiles(input: DescribeProfilesInput): ProfilesListing 
   const defaultName = selectProfile({ config, cloudUrl: identity.cloudUrl }).name;
   const url = firstSet(env[`${identity.envPrefix}_URL`]);
   const hubUrl = firstSet(env[HUB_URL_ENV]);
-  return {
+  return readingHubFile(() => ({
     machine: input.machine,
     cliVersion: input.cliVersion,
     defaultSite: rows.find((row) => row.name === defaultName)?.site ?? normalizeUrl(identity.cloudUrl),
@@ -456,7 +491,7 @@ export function describeProfiles(input: DescribeProfilesInput): ProfilesListing 
       name: login.name
     })),
     profiles: rows.map((row) => entryOf(input, row, row.name === defaultName))
-  };
+  }));
 }
 
 // ── The text listing ─────────────────────────────────────────────────────────
@@ -563,13 +598,24 @@ function environmentLines(listing: ProfilesListing, identity: ListingIdentity): 
   return lines;
 }
 
+/** What the text listing says beside the contract (the JSON carries none of it). */
+export interface RenderProfilesExtra {
+  /** The hub entries whose hub cannot be told (`undecidedLoginsOf`): one line each. */
+  undecidedLogins?: readonly string[] | undefined;
+}
+
 /**
  * The text of `profiles`: one row per profile (`*` the default, the name, the
  * site, the sign-in in plain words with the account and the hub, the CLI
  * version the site speaks), then this CLI and the machine, a line per
- * exported variable that changes something, and the machine's logins.
+ * exported variable that changes something, the machine's logins, and a line
+ * per hub entry whose hub cannot be told.
  */
-export function renderProfiles(listing: ProfilesListing, identity: ListingIdentity): string {
+export function renderProfiles(
+  listing: ProfilesListing,
+  identity: ListingIdentity,
+  extra: RenderProfilesExtra = {}
+): string {
   const rows = [
     ['', 'PROFILE', 'SITE', 'SIGN-IN', 'SITE CLI'],
     ...listing.profiles.map((entry) => [
@@ -588,12 +634,20 @@ export function renderProfiles(listing: ProfilesListing, identity: ListingIdenti
           .map((l) => `${l.email ?? '(no address)'} at ${l.hub} (${l.name})`)
           .join(', ')}.`
       : 'No Antasphere login on this machine.';
+  // Unknown is not gone: an entry whose hub cannot be told is no login, and while it is there no kept key
+  // is judged gone for want of one.
+  const undecided = (extra.undecidedLogins ?? []).map(
+    (name) =>
+      `The Antasphere login "${name}" names no hub this CLI can read: no kept key is judged signed out ` +
+      'while it is there.'
+  );
   return [
     table(rows).trimEnd(),
     '',
     `This CLI ${listing.cliVersion} on ${listing.machine}.`,
     ...environmentLines(listing, identity),
     logins,
+    ...undecided,
     ''
   ].join('\n');
 }

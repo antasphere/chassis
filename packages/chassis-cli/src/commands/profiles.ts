@@ -24,6 +24,7 @@ import {
   profileRows,
   renderProfiles,
   servedKey,
+  undecidedLoginsOf,
   type ProfileCheck,
   type ProfileEntry,
   type ProfileRow,
@@ -215,6 +216,8 @@ export function registerProfileCommands<TClient extends ChassisClient<string>>(
       }
       const globals = cmd.optsWithGlobals() as { json?: boolean };
       let config = loadConfig(io.env);
+      // The hub file before any request: one that cannot be read stops the listing, and says what it means.
+      const undecided = undecidedLoginsOf(io.env);
       let checks: Map<string, ProfileCheck> | undefined;
       if (opts.check) {
         checks = await checkAll(config);
@@ -223,7 +226,7 @@ export function registerProfileCommands<TClient extends ChassisClient<string>>(
       }
       const listing = listingOf(config, checks);
       if (globals.json) return printJson(io, listing);
-      io.out.write(renderProfiles(listing, identity));
+      io.out.write(renderProfiles(listing, identity, { undecidedLogins: undecided }));
     });
 
   // ── profiles add ───────────────────────────────────────────────────────────

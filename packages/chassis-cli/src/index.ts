@@ -63,6 +63,7 @@ export { CliApiRefusal, drainPages } from './context.js';
 export {
   describeProfiles,
   renderProfiles,
+  undecidedLoginsOf,
   type DescribeProfilesInput,
   type ProfileCheck,
   type ProfileCheckedPerson,
@@ -75,7 +76,8 @@ export {
   type ProfileSignInState,
   type ProfileSite,
   type ProfilesListing,
-  type ProfilesLogin
+  type ProfilesLogin,
+  type RenderProfilesExtra
 } from './listing.js';
 export type { Cli, CliDefinition, CliKit, RegisterTool } from './kit.js';
 

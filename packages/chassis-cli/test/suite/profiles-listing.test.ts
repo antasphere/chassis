@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { HUB_TOOL, keysOfProfile, updateConfig as updateCoreConfig } from '@antasphere/cli-core';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { configPath, HUB_TOOL, keysOfProfile, updateConfig as updateCoreConfig } from '@antasphere/cli-core';
 import type { ProfileEntry, ProfilesListing } from '@antasphere/chassis-cli';
 import { tempConfigEnv } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
@@ -637,6 +638,118 @@ describe('no key, redacted or not', () => {
       expect(all).not.toContain(k.slice(0, 13));
       expect(all).not.toContain(k.slice(-8));
     }
+  });
+});
+
+describe('unknown is not gone, said in the listing (the coordinator’s principle of 26 November)', () => {
+  const MEANS = ' Until it reads again, no kept key is judged signed out and none is revoked.';
+
+  it.each([
+    [
+      'does not parse',
+      'is not valid: it is not JSON.',
+      (path: string) => writeFileSync(path, '{ "profiles": ')
+    ],
+    [
+      'cannot be read',
+      'cannot be read (EISDIR).',
+      (path: string) => {
+        rmSync(path, { force: true });
+        mkdirSync(path);
+      }
+    ]
+  ] as const)(
+    'a hub file that %s: profiles, profiles --json and profiles --check exit 1 with its sentence and what it means, before any request; a command on a profile revokes nothing',
+    async (_label, what, spoil) => {
+      const env: Record<string, string> = await tempConfigEnv();
+      seedHub(env, { profiles: { a: { apiKey: f.hubKey(HUB_A, ADA), baseUrl: HUB_A, email: ADA } } });
+      const keptA = f.toolKey(SITE_A, ADA);
+      seedTool(env, {
+        activeProfile: 'a',
+        profiles: { a: { baseUrl: SITE_A, site: facts(HUB_A), hubKeys: [kept(HUB_A, ADA, keptA)] } }
+      });
+      const hubFile = configPath(env, HUB_TOOL) ?? '';
+      spoil(hubFile);
+      const said = `The config file ${hubFile} ${what} Nothing was changed; fix it or move it aside, then retry.`;
+
+      for (const argv of [['profiles'], ['profiles', '--json'], ['profiles', '--check']]) {
+        const h = onMachine(env);
+        expect(await run(argv, h.io)).toBe(1);
+        expect(h.err()).toBe(`Error: ${said}${MEANS}\n`);
+        expect(h.out()).toBe('');
+        expect(h.wire).toEqual([]);
+      }
+
+      // A command on the profile stops on cli-core's own sentence, and revokes nothing.
+      const before = JSON.stringify(loadConfig(env));
+      const h = onMachine(env);
+      expect(await run(['--profile', 'a', 'verify'], h.io)).toBe(1);
+      expect(h.err()).toBe(`Error: ${said}\n`);
+      expect(h.wire.filter((c) => c.method === 'DELETE')).toEqual([]);
+      expect(f.alive(keptA)).toBe(true);
+      expect(JSON.stringify(loadConfig(env))).toBe(before);
+    }
+  );
+
+  it('a hub entry whose hub cannot be told: no login, one line in the text, the JSON in its shape and no kept key counted; a command revokes nothing; the entry gone, the key of the login it was is counted', async () => {
+    const env: Record<string, string> = await tempConfigEnv();
+    seedHub(env, {
+      activeProfile: 'a',
+      profiles: {
+        a: { apiKey: f.hubKey(HUB_A, ADA), baseUrl: HUB_A, email: ADA },
+        // bea's login, its hub's address unreadable: whether it is her login at hub-b cannot be told.
+        smudged: { apiKey: f.hubKey(HUB_B, BEA), baseUrl: 'not a url', email: BEA }
+      }
+    });
+    const keptB = f.toolKey(SITE_B, BEA);
+    seedTool(env, {
+      activeProfile: 'a',
+      profiles: {
+        a: { baseUrl: SITE_A, site: facts(HUB_A), hubKeys: [kept(HUB_A, ADA, f.toolKey(SITE_A, ADA))] },
+        b: { baseUrl: SITE_B, site: facts(HUB_B), hubKeys: [kept(HUB_B, BEA, keptB)] }
+      }
+    });
+    const needsLogin = (staleKeys: number) => ({
+      state: 'needs_login',
+      via: null,
+      hub: HUB_B,
+      email: null,
+      staleKeys,
+      fix: loginFix('hub_login', 'b')
+    });
+
+    const l = await listing(env);
+    expectContractKeys(l, false);
+    expect(l.logins).toEqual([{ hub: HUB_A, email: ADA, name: 'a' }]);
+    expect(byName(l).b!.signIn).toEqual(needsLogin(0));
+    const text = onMachine(env);
+    expect(await run(['profiles'], text.io)).toBe(0);
+    expect(text.out().split('\n\n')[1]).toBe(
+      `This CLI ${VERSION} on ${MACHINE}.\n` +
+        `Antasphere logins: ${ADA} at ${HUB_A} (a).\n` +
+        'The Antasphere login "smudged" names no hub this CLI can read: no kept key is judged signed out while ' +
+        'it is there.\n'
+    );
+
+    // A command on b: no login at hub-b it can tell, and nothing revoked.
+    const h = onMachine(env);
+    expect(await run(['--profile', 'b', 'verify'], h.io)).toBe(1);
+    expect(h.err()).toBe(
+      `Error: ${SITE_B} signs in through the Antasphere hub ${HUB_B}, and this machine holds no Antasphere ` +
+        `login there. Run ${bin} --profile b login to sign in.\n`
+    );
+    expect(h.wire.filter((c) => c.method === 'DELETE')).toEqual([]);
+    expect(f.alive(keptB)).toBe(true);
+    expect(loadConfig(env).profiles.b?.hubKeys?.map((k) => k.apiKey)).toEqual([keptB]);
+
+    // The entry gone, no login at hub-b carries bea's address for sure: the key is counted for its revoke.
+    updateCoreConfig(env, HUB_TOOL, (config) => {
+      delete config.profiles.smudged;
+    });
+    expect(byName(await listing(env)).b!.signIn).toEqual(needsLogin(1));
+    const after = onMachine(env);
+    expect(await run(['profiles'], after.io)).toBe(0);
+    expect(after.out()).not.toContain('names no hub this CLI can read');
   });
 });
 
