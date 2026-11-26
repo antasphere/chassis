@@ -15,7 +15,9 @@ import { cloudInstanceBody, INSTANCE_BASE, meBody, MINTED_META } from './signin-
  * - A site names the hub it trusts in its discovery (or names none: a site
  *   from before R1), or signs in by itself (self-hosted); it may announce a
  *   CLI version; each mints, serves and revokes its own keys. A site that is
- *   down fails every request the way `fetch` fails when nothing answers.
+ *   down fails every request the way `fetch` fails when nothing answers; a
+ *   silent one holds the connection open, and its request fails only when
+ *   the request's signal aborts.
  */
 
 const { keyPrefix: K } = cli.identity;
@@ -40,6 +42,12 @@ export interface FleetSite {
   cli?: string;
   /** Nothing answers there. */
   down?: boolean;
+  /**
+   * A site that holds the connection open and never answers: every request
+   * (`all`), or `/me` alone while its discovery answers (`me`). Such a request
+   * settles only when its signal aborts, the way fetch then fails.
+   */
+  silent?: 'all' | 'me';
 }
 
 /** The sites of the sign-in suite: site-a names hub-a, site-b names hub-b, old names none and trusts hub-a. */
@@ -58,6 +66,20 @@ const deny = (status: number, code: string, message: string) => ({
 const bearer = (headers: Headers) => headers.get('authorization')?.replace(/^Bearer /, '') ?? '';
 const hostOf = (origin: string) => new URL(origin).hostname.split('.')[0]!;
 export const nameOf = (email: string) => email.split('@')[0]!.replace(/^./, (c) => c.toUpperCase());
+
+/** An answer that never comes: it fails when the request's signal aborts, with its reason, as fetch does. */
+function never(signal: AbortSignal | undefined): { raw: Promise<Response> } {
+  return {
+    raw: new Promise<Response>((_, reject) => {
+      if (!signal) return;
+      if (signal.aborted) {
+        reject(signal.reason as Error);
+        return;
+      }
+      signal.addEventListener('abort', () => reject(signal.reason as Error), { once: true });
+    })
+  };
+}
 
 /** What a site says of itself on its discovery. */
 function discoveryOf(site: FleetSite): Record<string, unknown> {
@@ -170,6 +192,17 @@ export function fleet(sites: FleetSite[] = SITES, hubs: string[] = [HUB_A, HUB_B
         });
       }
       continue;
+    }
+    if (site.silent) {
+      // Matched before the site's own routes: what the site never answers.
+      for (const method of site.silent === 'all' ? ['GET', 'POST', 'DELETE'] : ['GET']) {
+        routes.push({
+          method,
+          origin: site.origin,
+          path: site.silent === 'all' ? /.*/ : /\/api\/v1\/me$/,
+          reply: ({ signal }) => never(signal)
+        });
+      }
     }
     routes.push(
       {

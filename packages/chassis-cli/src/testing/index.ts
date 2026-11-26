@@ -48,10 +48,22 @@ export interface Route {
    * hubs and two sites. Without one, a route matches any origin.
    */
   origin?: string;
-  reply: (call: { path: string; body?: unknown; form?: FormData; headers: Headers }) => {
+  /**
+   * The answer. `signal` is the one the request carries, when it carries
+   * one; `raw` may be a promise, awaited as the request's answer, so a route
+   * can play a site that never answers (it settles when that signal aborts,
+   * the way fetch then fails).
+   */
+  reply: (call: {
+    path: string;
+    body?: unknown;
+    form?: FormData;
+    headers: Headers;
+    signal?: AbortSignal;
+  }) => {
     status?: number;
     body?: unknown;
-    raw?: Response;
+    raw?: Response | Promise<Response>;
   };
 }
 
@@ -103,8 +115,15 @@ export function routedHarness(routes: Route[], env: Record<string, string | unde
         }
       );
     }
-    const result = route.reply({ path, body, headers, ...(form ? { form } : {}) });
-    if (result.raw) return result.raw;
+    const signal = init?.signal ?? undefined;
+    const result = route.reply({
+      path,
+      body,
+      headers,
+      ...(form ? { form } : {}),
+      ...(signal ? { signal } : {})
+    });
+    if (result.raw) return await result.raw;
     return new Response(JSON.stringify(result.body ?? {}), {
       status: result.status ?? 200,
       headers: { 'content-type': 'application/json' }
