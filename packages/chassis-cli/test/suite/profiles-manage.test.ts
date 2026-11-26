@@ -567,6 +567,25 @@ describe('a key another profile on disk still holds is never revoked on its site
       expect(Object.keys(loadConfig(env).profiles)).toEqual([holder]);
     }
   );
+
+  it('a command on a twin with no key of its own, whose old slot (its login gone) holds the own key of a: cli-core’s settle sends no revoke of it, the line is said once, and a still answers (verifier round 4, finding 5)', async () => {
+    const shared = f.toolKey(SITE_A, ADA, 'own');
+    // The twin's old slot is named for a login the hub file does not hold: cli-core judges it stale.
+    const env = await twins({ apiKey: shared }, { connectKeys: { gone: { apiKey: shared, email: ADA } } });
+    const h = f.harness(env);
+    expect(await run(['--profile', 'a-twin', 'verify'], h.io)).toBe(0);
+    expect(carrying(h, shared).filter((c) => c.method === 'DELETE')).toEqual([]);
+    const keptLines = h
+      .err()
+      .split('\n')
+      .filter((l) => l.startsWith('Kept on '));
+    expect(keptLines).toEqual([KEPT('a').trimEnd()]);
+    expect(f.alive(shared)).toBe(true);
+
+    const v = f.harness(env);
+    expect(await run(['--profile', 'a', 'verify'], v.io)).toBe(0);
+    expect(v.out()).toBe(`ok — ${ADA} (owner) @ ${SITE_A}\n`);
+  });
 });
 
 describe('profiles, its subcommands and its options', () => {
