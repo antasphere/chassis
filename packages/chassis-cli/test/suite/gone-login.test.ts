@@ -110,6 +110,9 @@ const keptOf = (env: Record<string, string>, name: string) =>
 /** The limit of each request the tests that shorten it give the io (`CliIo.requestTimeoutMs`). */
 const LIMIT_MS = 50;
 
+/** The limit the tests of a settle that waits one limit at most give the io: their bound is two of it. */
+const STOP_LIMIT_MS = 200;
+
 /** A run raced against a wait: its exit code, or `still running` when the wait ends first. */
 async function endsWithin(running: Promise<number>, ms: number): Promise<{ code: number } | 'still running'> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -225,6 +228,30 @@ describe('R2b · a profile that serves its own key revokes a gone login’s kept
     return { env, own, keptA };
   }
 
+  /**
+   * Profile a at site-a: its own key, and a key kept at hub-a for each of ada, bea and cy, none of whom
+   * holds a login there (bea's is at hub-b): three stale keys, revoked in that order.
+   */
+  async function ownKeyAndThreeStale() {
+    const env: Record<string, string> = await tempConfigEnv();
+    seedHub(env, { profiles: { b: { apiKey: f.hubKey(HUB_B, BEA), baseUrl: HUB_B, email: BEA } } });
+    const own = f.toolKey(SITE_A, ADA, 'own');
+    const emails = [ADA, BEA, CY];
+    const stale = emails.map((email) => f.toolKey(SITE_A, email));
+    seedTool(env, {
+      activeProfile: 'a',
+      profiles: {
+        a: {
+          baseUrl: SITE_A,
+          apiKey: own,
+          site: fresh(HUB_A),
+          hubKeys: emails.map((email, i) => kept(HUB_A, email, stale[i]!))
+        }
+      }
+    });
+    return { env, own, stale };
+  }
+
   it('verify sends one revoke, of the kept key, on site-a, before its /me, and nothing elsewhere; the key forgotten, the listing counts 0, and the next command revokes nothing', async () => {
     const { env, own, keptA } = await ownKeyAndGoneLogin();
     expect((await entryOf(env, 'a')).signIn.staleKeys).toBe(1);
@@ -275,6 +302,65 @@ describe('R2b · a profile that serves its own key revokes a gone login’s kept
     expect(h.wire.map((c) => c.auth)).toEqual([`Bearer ${keptA}`, `Bearer ${own}`]);
     expect(f.alive(keptA)).toBe(true);
     expect(loadConfig(env).profiles.a?.hubKeys?.map((k) => k.apiKey)).toEqual([keptA]);
+  }, 10_000);
+
+  it('three stale keys at a site that holds every revoke open: the first revoke, given up at the io’s limit, ends the settle; one DELETE, the command answers within two limits, and the three keys stay for the next command (verifier round 5, finding 1)', async () => {
+    f = fleet([{ origin: SITE_A, names: HUB_A, trusts: HUB_A, silent: 'revoke' }, ...SITES.slice(1)]);
+    const { env, own, stale } = await ownKeyAndThreeStale();
+    const h = f.harness(env);
+    h.io.requestTimeoutMs = STOP_LIMIT_MS;
+    expect(await endsWithin(run(['--profile', 'a', 'verify'], h.io), 2 * STOP_LIMIT_MS)).toEqual({ code: 0 });
+    expect(h.out()).toBe(`ok — ${ADA} (owner) @ ${SITE_A}\n`);
+    expect(h.err()).toBe('');
+    expect(trace(h)).toEqual([`DELETE ${SITE_A}/api/v1/cli/auth/key`, `GET ${SITE_A}/api/v1/me`]);
+    expect(h.wire.map((c) => c.auth)).toEqual([`Bearer ${stale[0]}`, `Bearer ${own}`]);
+    expect(stale.map((k) => f.alive(k))).toEqual([true, true, true]);
+    expect(keysOfProfile(loadConfig(env).profiles.a!).map((k) => k.apiKey)).toEqual([own, ...stale]);
+  }, 10_000);
+
+  it('the site answers the first stale key’s revoke and holds the second open: the second ends the settle; two DELETEs, the first key forgotten, the second and the third kept for the next command (verifier round 5, finding 1)', async () => {
+    const { env, own, stale } = await ownKeyAndThreeStale();
+    f.hold(stale[1]!);
+    const h = f.harness(env);
+    h.io.requestTimeoutMs = STOP_LIMIT_MS;
+    expect(await endsWithin(run(['--profile', 'a', 'verify'], h.io), 2 * STOP_LIMIT_MS)).toEqual({ code: 0 });
+    expect(h.out()).toBe(`ok — ${ADA} (owner) @ ${SITE_A}\n`);
+    expect(h.err()).toBe('');
+    expect(trace(h)).toEqual([
+      `DELETE ${SITE_A}/api/v1/cli/auth/key`,
+      `DELETE ${SITE_A}/api/v1/cli/auth/key`,
+      `GET ${SITE_A}/api/v1/me`
+    ]);
+    expect(h.wire.map((c) => c.auth)).toEqual([`Bearer ${stale[0]}`, `Bearer ${stale[1]}`, `Bearer ${own}`]);
+    expect(stale.map((k) => f.alive(k))).toEqual([false, true, true]);
+    expect(keysOfProfile(loadConfig(env).profiles.a!).map((k) => k.apiKey)).toEqual([
+      own,
+      stale[1],
+      stale[2]
+    ]);
+  }, 10_000);
+
+  it('a stale key another profile at the site holds, after the site gave no answer: still forgotten here with its line, since it sends nothing (verifier round 5, finding 1)', async () => {
+    f = fleet([{ origin: SITE_A, names: HUB_A, trusts: HUB_A, silent: 'revoke' }, ...SITES.slice(1)]);
+    const { env, own, stale } = await ownKeyAndThreeStale();
+    // A twin at site-a (a file from before one profile per site) holds the third.
+    cli.updateConfig(env, (config) => {
+      config.profiles['a-twin'] = { baseUrl: `${SITE_A}/`, hubKeys: [kept(HUB_A, CY, stale[2]!)] };
+    });
+    const h = f.harness(env);
+    h.io.requestTimeoutMs = STOP_LIMIT_MS;
+    expect(await endsWithin(run(['--profile', 'a', 'verify'], h.io), 2 * STOP_LIMIT_MS)).toEqual({ code: 0 });
+    expect(h.out()).toBe(`ok — ${ADA} (owner) @ ${SITE_A}\n`);
+    expect(h.err()).toBe(`Kept on ${SITE_A}: profile "a-twin" still holds that key.\n`);
+    expect(trace(h)).toEqual([`DELETE ${SITE_A}/api/v1/cli/auth/key`, `GET ${SITE_A}/api/v1/me`]);
+    expect(h.wire[0]?.auth).toBe(`Bearer ${stale[0]}`);
+    expect(keysOfProfile(loadConfig(env).profiles.a!).map((k) => k.apiKey)).toEqual([
+      own,
+      stale[0],
+      stale[1]
+    ]);
+    expect(loadConfig(env).profiles['a-twin']?.hubKeys?.map((k) => k.apiKey)).toEqual([stale[2]]);
+    expect(f.alive(stale[2]!)).toBe(true);
   }, 10_000);
 
   /** The two lines of a revoke the site answered without revoking, in the kit's own words (`revokeOnSite`). */

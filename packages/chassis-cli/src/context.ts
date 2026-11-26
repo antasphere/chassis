@@ -644,10 +644,13 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
    * the site answered for (revoked; a 401: already dead; a 403: the site
    * refused to revoke it, and it stays valid there) are then forgotten,
    * compare-and-remove, the 401 and the 403 each said in the kit's own words
-   * (`revokeOnSite`); a key it did not answer for (a 5xx, no answer, the
-   * limit) stays for the next command, with no line. A key another profile on
-   * disk still holds is not revoked: it is forgotten on this profile only, and
-   * said (`keysHeldElsewhere`). Nothing of it ever fails the command.
+   * (`revokeOnSite`). The first key it did not answer for (a 5xx, no answer,
+   * the limit) ends the revokes: that key and every key not tried yet stay
+   * for the next command, with no line, so a settle costs the command at most
+   * one limit. A key another profile on disk still holds is not revoked: it is
+   * forgotten on this profile only, and said (`keysHeldElsewhere`), after the
+   * site's no-answer too, since it sends nothing. Nothing of it ever fails the
+   * command.
    */
   async function settleOwnKeyProfile(
     io: CliIo,
@@ -664,6 +667,8 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
       const elsewhere = keysHeldElsewhere(config, profileName, identity.cloudUrl);
       const auth = new CliAuthClient({ baseUrl: site, fetch: limitedFetchOf(base, io) });
       const forget: string[] = [];
+      // Once the site gave no answer, no other revoke is sent: the rest wait for the next command.
+      let unanswered = false;
       for (const key of stale) {
         const other = elsewhere.get(key.apiKey.trim());
         if (other) {
@@ -671,6 +676,7 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
           forget.push(key.apiKey);
           continue;
         }
+        if (unanswered) continue;
         try {
           await auth.revoke(key.apiKey);
           forget.push(key.apiKey);
@@ -685,6 +691,8 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
                 'server-side; revoke it from the dashboard. Forgetting the local copy.\n'
             );
             forget.push(key.apiKey);
+          } else {
+            unanswered = true;
           }
         }
       }

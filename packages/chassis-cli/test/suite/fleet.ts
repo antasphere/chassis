@@ -19,6 +19,9 @@ import { cloudInstanceBody, INSTANCE_BASE, meBody, MINTED_META } from './signin-
  *   silent one holds the connection open, and its request fails only when
  *   the request's signal aborts; one may refuse its revoke (403) or fail it
  *   (500), revoking nothing.
+ * - A key the test holds (`hold`) is never answered when its revoke comes, at
+ *   its site or at its hub: that request, too, fails only when its signal
+ *   aborts, and the key stays alive.
  */
 
 const { keyPrefix: K } = cli.identity;
@@ -120,6 +123,8 @@ export function fleet(sites: FleetSite[] = SITES, hubs: string[] = [HUB_A, HUB_B
   const hubKeys = new Map<string, { hub: string; email: string; alive: boolean }>();
   const toolKeys = new Map<string, { site: string; email: string; alive: boolean }>();
   const tokens = new Map<string, { hub: string; email: string; resource: string }>();
+  /** The keys whose revoke is never answered (`hold`). */
+  const heldOpen = new Set<string>();
   const harnesses: Harness[] = [];
   let seq = 0;
   let exchanges = 0;
@@ -186,7 +191,8 @@ export function fleet(sites: FleetSite[] = SITES, hubs: string[] = [HUB_A, HUB_B
         method: 'DELETE',
         origin: hub,
         path: /\/api\/v1\/cli\/auth\/key$/,
-        reply: ({ headers }) => {
+        reply: ({ headers, signal }) => {
+          if (heldOpen.has(bearer(headers))) return never(signal);
           const held = hubKeys.get(bearer(headers));
           if (!held || held.hub !== hub || !held.alive) return deny(401, 'unauthenticated', 'unknown key');
           held.alive = false;
@@ -286,7 +292,8 @@ export function fleet(sites: FleetSite[] = SITES, hubs: string[] = [HUB_A, HUB_B
         method: 'DELETE',
         origin: site.origin,
         path: /\/api\/v1\/cli\/auth\/key$/,
-        reply: ({ headers }) => {
+        reply: ({ headers, signal }) => {
+          if (heldOpen.has(bearer(headers))) return never(signal);
           const held = toolKeys.get(bearer(headers));
           if (!held || held.site !== site.origin || !held.alive)
             return deny(401, 'unauthenticated', 'unknown key');
@@ -306,6 +313,10 @@ export function fleet(sites: FleetSite[] = SITES, hubs: string[] = [HUB_A, HUB_B
     kill(k: string): void {
       const held = toolKeys.get(k);
       if (held) held.alive = false;
+    },
+    /** A key whose revoke its site (or its hub) holds open and never answers: the key stays alive. */
+    hold(k: string): void {
+      heldOpen.add(k);
     },
     /** Every key the fleet minted or was seeded with: the text no output may carry. */
     keys: () => [...hubKeys.keys(), ...toolKeys.keys()],
