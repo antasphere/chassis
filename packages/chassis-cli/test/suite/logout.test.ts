@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { HUB_TOOL, loadConfig as loadCoreConfig } from '@antasphere/cli-core';
+import {
+  HUB_TOOL,
+  loadConfig as loadCoreConfig,
+  updateConfig as updateCoreConfig
+} from '@antasphere/cli-core';
 import { routedHarness, tempConfigEnv, type Route } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
 import { HUB, HUB_KEY, kept, key, seedHubLogin, seedTool } from './signin-fixtures.js';
@@ -221,6 +225,29 @@ describe('logout', () => {
     const hub = loadCoreConfig(env, HUB_TOOL);
     expect(hub.profiles).toEqual({});
     expect(hub.activeProfile).toBeUndefined();
+  });
+
+  it('--all while another command signs in again on the same login entry: the entry goes only while it still holds the key revoked, so the new login stays', async () => {
+    const env = await seeded({ baseUrl: 'http://inst', hubKeys: [kept(HUB, 'ada@x.co', CONN_A)] });
+    const NEW_HUB_KEY = 'ant_newkey12_secretsecretsecret1234';
+    const hubRevoke: Route = {
+      method: 'DELETE',
+      origin: HUB,
+      path: /\/api\/v1\/cli\/auth\/key$/,
+      reply: () => {
+        // Another command signs in again at the hub, on the same entry, while this one revokes the old key.
+        updateCoreConfig(env, HUB_TOOL, (config) => {
+          config.profiles.default = { apiKey: NEW_HUB_KEY, baseUrl: HUB, email: 'ada@x.co' };
+        });
+        return { body: { revoked: true, id: 'k2' } };
+      }
+    };
+    const h = routedHarness([hubRevoke, revokeRoute()], env);
+    expect(await run(['logout', '--all'], h.io)).toBe(0);
+    expect(h.wire).toEqual([DELETE('http://inst', CONN_A), DELETE(HUB, HUB_KEY)]);
+    const hub = loadCoreConfig(env, HUB_TOOL);
+    expect(hub.profiles.default).toEqual({ apiKey: NEW_HUB_KEY, baseUrl: HUB, email: 'ada@x.co' });
+    expect(hub.activeProfile).toBe('default');
   });
 
   it('--all on a profile whose keys came from no login in place: no login is ended, and that is said', async () => {

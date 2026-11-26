@@ -3,7 +3,7 @@ import type { ProfilesListing } from '@antasphere/chassis-cli';
 import { routedHarness, tempConfigEnv, type Route } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
 import { ADA, BEA, fleet, HUB_A, HUB_B, SITE_A, SITE_B, trace, type Harness } from './fleet.js';
-import { cliVersionOf, fresh, kept, key, seedHub, seedTool } from './signin-fixtures.js';
+import { cliVersionOf, cloudInstanceBody, fresh, kept, key, seedHub, seedTool } from './signin-fixtures.js';
 
 /**
  * A profile is a site, and it can be managed (R3, PRDCT-5190): `profiles add`
@@ -144,6 +144,32 @@ describe('profiles add (R3)', () => {
         `The default profile stays "a" (${bin} use localhost:4100 makes "localhost:4100" the default).\n`
     );
     expect(loadConfig(env).profiles['localhost:4100']).toEqual({ baseUrl: LOCAL });
+  });
+
+  it('another command adds the same site while this one reads its discovery: refused again under the lock, and one profile at the site', async () => {
+    const env = await tempConfigEnv();
+    seedTool(env, { activeProfile: 'b', profiles: { b: { baseUrl: SITE_B } } });
+    const racing: Route = {
+      method: 'GET',
+      origin: SITE_A,
+      path: /\/api\/v1\/instance$/,
+      reply: () => {
+        // Another tab adds the same site while this command reads its discovery, with no lock held.
+        cli.updateConfig(env, (config) => {
+          config.profiles.work = { baseUrl: SITE_A };
+        });
+        return { body: cloudInstanceBody(HUB_A) };
+      }
+    };
+    const h = routedHarness([racing], env);
+    expect(await run(['profiles', 'add', SITE_A], h.io)).toBe(1);
+    expect(h.err()).toBe(
+      `Error: Profile "work" is already ${SITE_A}. One profile per site: ${bin} profiles rename work <name> ` +
+        'names it differently.\n'
+    );
+    const atSiteA = Object.entries(loadConfig(env).profiles).filter(([, p]) => p.baseUrl === SITE_A);
+    expect(atSiteA.map(([name]) => name)).toEqual(['work']);
+    expect(loadConfig(env).activeProfile).toBe('b');
   });
 });
 
