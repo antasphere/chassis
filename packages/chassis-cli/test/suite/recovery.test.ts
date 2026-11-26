@@ -336,27 +336,34 @@ describe('a kept key of another Antasphere account (PRDCT-3032)', () => {
   });
 
   it.each([
-    ['a kept key with no address', { apiKey: OLD }, 'bob@x.co'],
-    ['a login with no address', { apiKey: OLD, email: 'ada@x.co' }, undefined]
+    // A key with no address is no login's: it is gone at once.
+    ['a kept key with no address', { apiKey: OLD }, 'bob@x.co', 'first'],
+    // A login with no address may be the key's own account: nothing is judged until the exchange tells
+    // the address (cli-core E3), and then the next command revokes the key of the account it is not.
+    ['a login with no address', { apiKey: OLD, email: 'ada@x.co' }, undefined, 'next']
   ] as const)(
-    '%s is never served: the key is revoked on its site, the exchange mints anew, the login carries the address after (verifier round 1, F1 and F5)',
-    async (_label, cached, hubEmail) => {
+    '%s is never served: the exchange mints anew, the login carries the address after, and the key is revoked on its site, at once or once that address says whose it is not (verifier round 1, F1 and F5)',
+    async (_label, cached, hubEmail, revokedBy) => {
       const env = await switchedEnv(cached, hubEmail);
+      const revoke = `DELETE http://tool/api/v1/cli/auth/key Bearer ${OLD}`;
       const h = routedHarness(routesFor([OLD, NEW]), env);
       expect(await run(['whoami'], h.io)).toBe(0);
       expect(trace(h)).toEqual([
         'GET http://tool/api/v1/instance -',
-        `DELETE http://tool/api/v1/cli/auth/key Bearer ${OLD}`,
+        ...(revokedBy === 'first' ? [revoke] : []),
         `POST ${HUB}/api/v1/sso/tool-token Bearer ${BOB_HUB_KEY}`,
         'POST http://tool/api/v1/sso/cli-connect -',
         `GET http://tool/api/v1/me Bearer ${NEW}`
       ]);
-      expect(h.wire.filter((c) => c.auth === `Bearer ${OLD}`).map((c) => c.method)).toEqual(['DELETE']);
+      // The old key leaves the machine only to be revoked.
+      expect(h.wire.filter((c) => c.auth === `Bearer ${OLD}`).map((c) => c.method)).toEqual(
+        revokedBy === 'first' ? ['DELETE'] : []
+      );
       const work = loadConfig(env).profiles.work;
       expect(work?.hubKeys).toEqual([
         { hub: HUB, email: 'bob@x.co', apiKey: NEW, mintedAt: expect.any(String) }
       ]);
-      expect(JSON.stringify(loadConfig(env))).not.toContain(OLD);
+      expect(JSON.stringify(loadConfig(env)).includes(OLD)).toBe(revokedBy === 'next');
       // The login is healed with the address the exchange answered (when it
       // had none), and nothing else of it moves.
       expect(loadCoreConfig(env, HUB_TOOL)).toEqual({
@@ -364,11 +371,16 @@ describe('a kept key of another Antasphere account (PRDCT-3032)', () => {
         profiles: { default: { apiKey: BOB_HUB_KEY, baseUrl: HUB, email: 'bob@x.co' } }
       });
 
-      // The next command is served from the kept key: zero hub calls.
+      // The next command is served from the kept key, with no hub call; an old key not yet judged is
+      // revoked on its site now, as another account's.
       const next = routedHarness(routesFor([NEW]), env);
       expect(await run(['whoami'], next.io)).toBe(0);
-      expect(trace(next)).toEqual([`GET http://tool/api/v1/me Bearer ${NEW}`]);
+      expect(trace(next)).toEqual([
+        ...(revokedBy === 'next' ? [revoke] : []),
+        `GET http://tool/api/v1/me Bearer ${NEW}`
+      ]);
       expect(next.err()).toBe('');
+      expect(JSON.stringify(loadConfig(env))).not.toContain(OLD);
     }
   );
 

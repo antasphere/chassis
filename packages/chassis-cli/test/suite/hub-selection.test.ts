@@ -414,7 +414,7 @@ describe('a login without its address is healed by the first fresh exchange', ()
     }
   });
 
-  it('a blank address is healed like an absent one, silently: the old key it cannot match is revoked on its site, and no sentence carries the blank', async () => {
+  it('a blank address is healed like an absent one, silently: the old key is never served, and once the healed address says it is the older key of its account the next command revokes it on its site; no sentence carries the blank', async () => {
     const env = await tempConfigEnv();
     seedHub(env, {
       activeProfile: 'default',
@@ -433,9 +433,10 @@ describe('a login without its address is healed by the first fresh exchange', ()
       env
     );
     expect(await run(['whoami'], h.io)).toBe(0);
+    // A login with no address cannot say whose the old key is: it is never served, and nothing is revoked
+    // until the exchange tells the address (cli-core E3).
     expect(trace(h)).toEqual([
       'GET http://tool/api/v1/instance -',
-      `DELETE http://tool/api/v1/cli/auth/key Bearer ${old}`,
       `POST ${HUB}/api/v1/sso/tool-token Bearer ${HUB_KEY}`,
       'POST http://tool/api/v1/sso/cli-connect -',
       `GET http://tool/api/v1/me Bearer ${minted}`
@@ -449,9 +450,18 @@ describe('a login without its address is healed by the first fresh exchange', ()
       email: 'ada@x.co'
     });
 
-    const next = routedHarness([namingInstanceRoute(HUB), ...exchangeRoutes([key('again')]), meRoute()], env);
+    // The address told, the old key is the older of ada's two: the next command revokes it on its site,
+    // never the one just minted, and serves that one.
+    const next = routedHarness(
+      [revokeRoute, namingInstanceRoute(HUB), ...exchangeRoutes([key('again')]), meRoute()],
+      env
+    );
     expect(await run(['whoami'], next.io)).toBe(0);
-    expect(trace(next)).toEqual([`GET http://tool/api/v1/me Bearer ${minted}`]);
+    expect(trace(next)).toEqual([
+      `DELETE http://tool/api/v1/cli/auth/key Bearer ${old}`,
+      `GET http://tool/api/v1/me Bearer ${minted}`
+    ]);
+    expect(JSON.stringify(loadConfig(env))).not.toContain(old);
   });
 
   it('the address changed at the hub under a live kept key: the recovery mints once and heals, the next run is served with no DELETE (verifier round 2, F1)', async () => {
