@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { HUB_TOOL, loadConfig as loadCoreConfig } from '@antasphere/cli-core';
-import { routedHarness, tempConfigEnv, type Route } from '@antasphere/chassis-cli/testing';
+import { DEFAULT_HUB_URL, routedHarness, tempConfigEnv, type Route } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
 import {
   cloudInstanceRoute,
@@ -490,7 +490,7 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
     const env = await tempConfigEnv();
     const h = routedHarness(
       [
-        namingInstanceRoute('https://account.antasphere.com'),
+        namingInstanceRoute(DEFAULT_HUB_URL),
         ...otpRoutes(HUB_KEY, ORG),
         ...exchangeRoutes([key('tool')]),
         meRoute()
@@ -932,7 +932,7 @@ describe('a login never moves a default (R3)', () => {
     seedHub(env, {
       activeProfile: 'cloud',
       profiles: {
-        cloud: { apiKey: CLOUD_HUB_KEY, baseUrl: 'https://account.antasphere.com', email: 'ada@x.co' }
+        cloud: { apiKey: CLOUD_HUB_KEY, baseUrl: DEFAULT_HUB_URL, email: 'ada@x.co' }
       }
     });
     const h = routedHarness(
