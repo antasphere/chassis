@@ -44,11 +44,20 @@ export interface FleetSite {
   down?: boolean | 'revoke';
   /**
    * A site that holds the connection open and never answers: every request
-   * (`all`), or `/me` alone while its discovery answers (`me`). Such a request
-   * settles only when its signal aborts, the way fetch then fails.
+   * (`all`), `/me` alone while its discovery answers (`me`), or its revoke
+   * (`DELETE /cli/auth/key`) alone while everything else answers (`revoke`).
+   * Such a request settles only when its signal aborts, the way fetch then
+   * fails.
    */
-  silent?: 'all' | 'me';
+  silent?: 'all' | 'me' | 'revoke';
 }
+
+/** What a silent site never answers, by kind: the methods, and the path they are sent to. */
+const SILENT: Record<NonNullable<FleetSite['silent']>, { methods: string[]; path: RegExp }> = {
+  all: { methods: ['GET', 'POST', 'DELETE'], path: /.*/ },
+  me: { methods: ['GET'], path: /\/api\/v1\/me$/ },
+  revoke: { methods: ['DELETE'], path: /\/api\/v1\/cli\/auth\/key$/ }
+};
 
 /** The sites of the sign-in suite: site-a names hub-a, site-b names hub-b, old names none and trusts hub-a. */
 export const SITES: FleetSite[] = [
@@ -205,13 +214,9 @@ export function fleet(sites: FleetSite[] = SITES, hubs: string[] = [HUB_A, HUB_B
     }
     if (site.silent) {
       // Matched before the site's own routes: what the site never answers.
-      for (const method of site.silent === 'all' ? ['GET', 'POST', 'DELETE'] : ['GET']) {
-        routes.push({
-          method,
-          origin: site.origin,
-          path: site.silent === 'all' ? /.*/ : /\/api\/v1\/me$/,
-          reply: ({ signal }) => never(signal)
-        });
+      const { methods, path } = SILENT[site.silent];
+      for (const method of methods) {
+        routes.push({ method, origin: site.origin, path, reply: ({ signal }) => never(signal) });
       }
     }
     routes.push(

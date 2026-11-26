@@ -15,7 +15,15 @@ import {
   type CliProfile
 } from '@antasphere/cli-core';
 import { PlatformApiError, type ChassisClient } from '@antasphere/chassis-sdk';
-import { CliUsageError, isLocalSite, keysHeldElsewhere, printJson, sayKept, type CliIo } from '../context.js';
+import {
+  CliUsageError,
+  isLocalSite,
+  keysHeldElsewhere,
+  limitedFetchOf,
+  printJson,
+  sayKept,
+  type CliIo
+} from '../context.js';
 import type { CliKit } from '../kit.js';
 import {
   describeProfiles,
@@ -49,9 +57,6 @@ const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}$/;
 /** What a site answered to the self-revoke of one key: dead now (or already), refused, or no answer. */
 type Revoked = 'revoked' | 'refused' | 'silent';
 
-/** The limit of one request of `profiles --check` and `profiles add`, unless the io gives one (ms). */
-const REQUEST_TIMEOUT_MS = 10_000;
-
 /** `n key` / `n keys`. */
 const keys = (n: number): string => `${n} key${n === 1 ? '' : 's'}`;
 
@@ -67,21 +72,14 @@ export function registerProfileCommands<TClient extends ChassisClient<string>>(
   const fetchOf = (): typeof globalThis.fetch => io.fetch ?? globalThis.fetch.bind(globalThis);
 
   /**
-   * The fetch of `--check` and `add`: each request is aborted past the limit
-   * (`CliIo.requestTimeoutMs`, else 10 s), as well as by any signal it already
-   * carries. A request the limit aborted is no answer: a site that holds the
-   * connection open costs these commands the limit, never the system's own
-   * connect timeout.
+   * The fetch of `--check` and `add` (`limitedFetchOf` over this io's fetch):
+   * each request is aborted past the limit (`CliIo.requestTimeoutMs`, else
+   * 10 s), as well as by any signal it already carries. A request the limit
+   * aborted is no answer: a site that holds the connection open costs these
+   * commands the limit, never the system's own connect timeout.
    */
   function limitedFetch(): typeof globalThis.fetch {
-    const base = fetchOf();
-    const given = io.requestTimeoutMs;
-    const ms = typeof given === 'number' && Number.isFinite(given) && given > 0 ? given : REQUEST_TIMEOUT_MS;
-    return (input, init) => {
-      const limit = AbortSignal.timeout(ms);
-      const carried = init?.signal ?? (input instanceof Request ? input.signal : undefined);
-      return base(input, { ...init, signal: carried ? AbortSignal.any([carried, limit]) : limit });
-    };
+    return limitedFetchOf(fetchOf(), io);
   }
 
   /** The listing of a file as it is, with what `--check` found. */

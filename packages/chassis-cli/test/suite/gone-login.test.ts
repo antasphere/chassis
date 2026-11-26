@@ -91,6 +91,22 @@ const toolTokens = (h: Harness) =>
 const keptOf = (env: Record<string, string>, name: string) =>
   (loadConfig(env).profiles[name]?.hubKeys ?? []).map((k) => [k.hub, k.email]);
 
+/** The limit of each request the tests that shorten it give the io (`CliIo.requestTimeoutMs`). */
+const LIMIT_MS = 50;
+
+/** A run raced against a wait: its exit code, or `still running` when the wait ends first. */
+async function endsWithin(running: Promise<number>, ms: number): Promise<{ code: number } | 'still running'> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const wait = new Promise<'still running'>((resolve) => {
+    timer = setTimeout(() => resolve('still running'), ms);
+  });
+  try {
+    return await Promise.race([running.then((code) => ({ code })), wait]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 describe('R2b · a kept key whose login is gone is revoked by the next command, on its own site', () => {
   /** Profile b at site-b (it names hub-b), signed in once through bea's login there: the key it keeps. */
   async function signedInOnB() {
@@ -209,6 +225,20 @@ describe('R2b · a profile that serves its own key revokes a gone login’s kept
     expect(loadConfig(env).profiles.a?.hubKeys?.map((k) => k.apiKey)).toEqual([keptA]);
     expect((await entryOf(env, 'a')).signIn.staleKeys).toBe(1);
   });
+
+  it('a site that holds the revoke open: the revoke is given up at the io’s limit, the command goes on to its own request and answers, and the key stays on disk for the next command (verifier round 4, finding 4)', async () => {
+    f = fleet([{ origin: SITE_A, names: HUB_A, trusts: HUB_A, silent: 'revoke' }, ...SITES.slice(1)]);
+    const { env, own, keptA } = await ownKeyAndGoneLogin();
+    const h = f.harness(env);
+    h.io.requestTimeoutMs = LIMIT_MS;
+    expect(await endsWithin(run(['--profile', 'a', 'verify'], h.io), 2_000)).toEqual({ code: 0 });
+    expect(h.out()).toBe(`ok — ${ADA} (owner) @ ${SITE_A}\n`);
+    expect(h.err()).toBe('');
+    expect(trace(h)).toEqual([`DELETE ${SITE_A}/api/v1/cli/auth/key`, `GET ${SITE_A}/api/v1/me`]);
+    expect(h.wire.map((c) => c.auth)).toEqual([`Bearer ${keptA}`, `Bearer ${own}`]);
+    expect(f.alive(keptA)).toBe(true);
+    expect(loadConfig(env).profiles.a?.hubKeys?.map((k) => k.apiKey)).toEqual([keptA]);
+  }, 10_000);
 });
 
 describe('R2c · a site that names no hub signs in again at the hub its profile last signed in through', () => {

@@ -82,9 +82,11 @@ export interface CliIo extends CoreCliIo {
   hostname?: () => string;
   /**
    * The limit of each request `profiles --check` and `profiles add` send (the
-   * discovery read, `--check`'s `/me`), in milliseconds: past it the request
-   * is aborted, and counts as no answer. The bin leaves it unset and the
-   * default is 10 000; tests shorten it. Nothing else in the kit reads it.
+   * discovery read, `--check`'s `/me`), and of each revoke the settle of a
+   * profile that serves its own key sends, in milliseconds: past it the
+   * request is aborted, and counts as no answer (`limitedFetchOf`). The bin
+   * leaves it unset and the default is 10 000; tests shorten it. Nothing else
+   * in the kit reads it.
    */
   requestTimeoutMs?: number;
 }
@@ -258,6 +260,29 @@ export function isLocalSite(url: string): boolean {
   const [a, b, c, d] = ip.slice(1).map(Number) as [number, number, number, number];
   if ([a, b, c, d].some((n) => n > 255)) return false;
   return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+// ── The limit of a request ───────────────────────────────────────────────────
+
+/** The limit of one request sent through `limitedFetchOf`, unless the io gives one (ms). */
+const REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * A fetch over `base` whose every request is aborted past the limit
+ * (`CliIo.requestTimeoutMs`, else 10 s), as well as by any signal it already
+ * carries. A request the limit aborted is no answer: a site that holds the
+ * connection open costs the limit, never the system's own timeout. What
+ * `profiles --check` and `profiles add` send goes through it, and so does the
+ * revoke of the own-key settle (`settleOwnKeyProfile`).
+ */
+export function limitedFetchOf(base: typeof globalThis.fetch, io: CliIo): typeof globalThis.fetch {
+  const given = io.requestTimeoutMs;
+  const ms = typeof given === 'number' && Number.isFinite(given) && given > 0 ? given : REQUEST_TIMEOUT_MS;
+  return (input, init) => {
+    const limit = AbortSignal.timeout(ms);
+    const carried = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    return base(input, { ...init, signal: carried ? AbortSignal.any([carried, limit]) : limit });
+  };
 }
 
 // ── A key another profile holds ──────────────────────────────────────────────
@@ -596,12 +621,13 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
    * profile's plan (cli-core `planSignIn`, through `planFor`, from the two
    * files: the judgment of what is stale is cli-core's, « unknown is not gone »
    * included) are revoked on the profile's own site with the base fetch (never
-   * the one that watches the own key's 401), no lock held; the keys the site
-   * answered for (revoked, or 401: already dead) are then forgotten,
-   * compare-and-remove, and a key it did not answer for stays for the next
-   * command. A key another profile on disk still holds is not revoked: it is
-   * forgotten on this profile only, and said (`keysHeldElsewhere`). Nothing
-   * of it ever fails the command.
+   * the one that watches the own key's 401), each revoke held to the io's
+   * limit (`limitedFetchOf`, the limit `--check` uses), no lock held; the keys
+   * the site answered for (revoked, or 401: already dead) are then forgotten,
+   * compare-and-remove, and a key it did not answer for (the limit included)
+   * stays for the next command. A key another profile on disk still holds is
+   * not revoked: it is forgotten on this profile only, and said
+   * (`keysHeldElsewhere`). Nothing of it ever fails the command.
    */
   async function settleOwnKeyProfile(
     io: CliIo,
@@ -616,7 +642,7 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
       const { stale } = planFor(identity, io.env, profileName, profile, site);
       if (stale.length === 0) return;
       const elsewhere = keysHeldElsewhere(config, profileName);
-      const auth = new CliAuthClient({ baseUrl: site, fetch: base });
+      const auth = new CliAuthClient({ baseUrl: site, fetch: limitedFetchOf(base, io) });
       const forget: string[] = [];
       for (const key of stale) {
         const other = elsewhere.get(key.apiKey.trim());
