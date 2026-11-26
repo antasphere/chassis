@@ -8,8 +8,8 @@ import {
 import type { ProfileEntry, ProfilesListing } from '@antasphere/chassis-cli';
 import { tempConfigEnv } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
-import { ADA, BEA, fleet, HUB_A, HUB_B, OLD, SITE_A, SITE_B, trace, type Harness } from './fleet.js';
-import { fresh, seedHub, seedTool } from './signin-fixtures.js';
+import { ADA, BEA, fleet, HUB_A, HUB_B, OLD, SITE_A, SITE_B, SITES, trace, type Harness } from './fleet.js';
+import { fresh, kept, seedHub, seedTool } from './signin-fixtures.js';
 
 /**
  * A login that leaves the machine and comes back (the coordinator's rulings
@@ -153,6 +153,61 @@ describe('R2b · a kept key whose login is gone is revoked by the next command, 
 
     expect(await run(['--profile', 'b', 'verify'], f.harness(env).io)).toBe(1);
     expect((await entryOf(env, 'b')).signIn).toEqual(needsLogin(0));
+  });
+});
+
+describe('R2b · a profile that serves its own key revokes a gone login’s kept key too, before its first request (F2)', () => {
+  /** Profile a at site-a: its own key, and a key kept for ada at hub-a, whose login is gone (bea's at hub-b stays). */
+  async function ownKeyAndGoneLogin() {
+    const env: Record<string, string> = await tempConfigEnv();
+    seedHub(env, { profiles: { b: { apiKey: f.hubKey(HUB_B, BEA), baseUrl: HUB_B, email: BEA } } });
+    const own = f.toolKey(SITE_A, ADA, 'own');
+    const keptA = f.toolKey(SITE_A, ADA);
+    seedTool(env, {
+      activeProfile: 'a',
+      profiles: {
+        a: { baseUrl: SITE_A, apiKey: own, site: fresh(HUB_A), hubKeys: [kept(HUB_A, ADA, keptA)] }
+      }
+    });
+    return { env, own, keptA };
+  }
+
+  it('verify sends one revoke, of the kept key, on site-a, before its /me, and nothing elsewhere; the key forgotten, the listing counts 0, and the next command revokes nothing', async () => {
+    const { env, own, keptA } = await ownKeyAndGoneLogin();
+    expect((await entryOf(env, 'a')).signIn.staleKeys).toBe(1);
+
+    const h = f.harness(env);
+    expect(await run(['--profile', 'a', 'verify'], h.io)).toBe(0);
+    expect(h.out()).toBe(`ok — ${ADA} (owner) @ ${SITE_A}\n`);
+    expect(h.err()).toBe('');
+    expect(trace(h)).toEqual([`DELETE ${SITE_A}/api/v1/cli/auth/key`, `GET ${SITE_A}/api/v1/me`]);
+    expect(h.wire.map((c) => c.auth)).toEqual([`Bearer ${keptA}`, `Bearer ${own}`]);
+    expect([f.alive(keptA), f.alive(own)]).toEqual([false, true]);
+    expect(keysOfProfile(loadConfig(env).profiles.a!)).toEqual([{ apiKey: own, kind: 'own' }]);
+    expect((await entryOf(env, 'a')).signIn).toEqual({
+      state: 'signed_in',
+      via: 'key',
+      hub: null,
+      email: null,
+      staleKeys: 0,
+      fix: null
+    });
+
+    const next = f.harness(env);
+    expect(await run(['--profile', 'a', 'whoami', '--json'], next.io)).toBe(0);
+    expect(trace(next)).toEqual([`GET ${SITE_A}/api/v1/me`]);
+  });
+
+  it('a site that does not answer the revoke: the command still answers, the key stays, and the listing still counts it', async () => {
+    f = fleet([{ origin: SITE_A, names: HUB_A, trusts: HUB_A, down: 'revoke' }, ...SITES.slice(1)]);
+    const { env, keptA } = await ownKeyAndGoneLogin();
+    const h = f.harness(env);
+    expect(await run(['--profile', 'a', 'verify'], h.io)).toBe(0);
+    expect(h.out()).toBe(`ok — ${ADA} (owner) @ ${SITE_A}\n`);
+    expect(trace(h)).toEqual([`DELETE ${SITE_A}/api/v1/cli/auth/key`, `GET ${SITE_A}/api/v1/me`]);
+    expect(f.alive(keptA)).toBe(true);
+    expect(loadConfig(env).profiles.a?.hubKeys?.map((k) => k.apiKey)).toEqual([keptA]);
+    expect((await entryOf(env, 'a')).signIn.staleKeys).toBe(1);
   });
 });
 

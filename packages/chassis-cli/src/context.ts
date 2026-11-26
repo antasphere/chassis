@@ -2,10 +2,12 @@ import { PlatformApiError, type ChassisClient, type ClientOptions } from '@antas
 import type { Command } from 'commander';
 import {
   CLOUD_PROFILE,
+  CliAuthClient,
   CliAuthError,
   CliUsageError,
   connectOnDemand,
   firstSet,
+  forgetKeys,
   normalizeUrl,
   printJson as corePrintJson,
   refreshConnectKey,
@@ -19,6 +21,7 @@ import {
 } from '@antasphere/cli-core';
 import type { CliConfig, CliConfigStore, CliProfile } from './config.js';
 import { DEFAULT_HUB_URL, type CliIdentity } from './identity.js';
+import { planFor } from './listing.js';
 import {
   isWorkspaceId,
   matchWorkspace,
@@ -181,6 +184,9 @@ interface RunState {
 }
 
 const runs = new WeakMap<CliIo, RunState>();
+
+/** The settle of a profile that serves its own key, made once per run before its first request (`ownKeyFetch`). */
+const ownKeySettles = new WeakMap<CliIo, Promise<void>>();
 
 /** The origin of a URL, or undefined when it does not parse. */
 function originOf(url: string): string | undefined {
@@ -501,7 +507,8 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
       client: createClient({
         baseUrl,
         ...(apiKey ? { apiKey } : {}),
-        fetch: credentialSource === 'profile' ? ownKeyFetch(io, fetchImpl) : fetchImpl
+        fetch:
+          credentialSource === 'profile' && profileName ? ownKeyFetch(io, fetchImpl, profileName) : fetchImpl
       }),
       baseUrl,
       apiKey,
@@ -525,14 +532,67 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
     return ctx;
   }
 
-  /** The fetch of a client carrying the profile's own key: a 401 answered to it is remembered for the runner. */
-  function ownKeyFetch(io: CliIo, base: typeof globalThis.fetch): typeof globalThis.fetch {
+  /**
+   * The fetch of a client carrying the profile's own key: its first request
+   * waits for the run's settle of the profile (`settleOwnKeyProfile`), and a
+   * 401 answered to it is remembered for the runner.
+   */
+  function ownKeyFetch(
+    io: CliIo,
+    base: typeof globalThis.fetch,
+    profileName: string
+  ): typeof globalThis.fetch {
     return async (input, init) => {
+      let settled = ownKeySettles.get(io);
+      if (!settled) {
+        settled = settleOwnKeyProfile(io, profileName, base);
+        ownKeySettles.set(io, settled);
+      }
+      await settled;
       const res = await base(input, init);
       const run = runs.get(io);
       if (res.status === 401 && run) run.ownKeyRefused = true;
       return res;
     };
+  }
+
+  /**
+   * What cli-core does before every sign-in it runs, done for a command that
+   * serves the profile's OWN key, which never reaches cli-core (verifier round
+   * 3, F2): once per run, before its first request, the stale keys of the
+   * profile's plan (cli-core `planSignIn`, through `planFor`, from the two
+   * files: the judgment of what is stale is cli-core's, « unknown is not gone »
+   * included) are revoked on the profile's own site with the base fetch (never
+   * the one that watches the own key's 401), no lock held; the keys the site
+   * answered for (revoked, or 401: already dead) are then forgotten,
+   * compare-and-remove, and a key it did not answer for stays for the next
+   * command. Nothing of it ever fails the command.
+   */
+  async function settleOwnKeyProfile(
+    io: CliIo,
+    profileName: string,
+    base: typeof globalThis.fetch
+  ): Promise<void> {
+    try {
+      const profile = loadConfig(io.env).profiles[profileName];
+      if (!profile) return;
+      const site = normalizeUrl(profileUrl(profile));
+      const { stale } = planFor(identity, io.env, profileName, profile, site);
+      if (stale.length === 0) return;
+      const auth = new CliAuthClient({ baseUrl: site, fetch: base });
+      const dead: string[] = [];
+      for (const key of stale) {
+        try {
+          await auth.revoke(key.apiKey);
+          dead.push(key.apiKey);
+        } catch (e) {
+          if (e instanceof CliAuthError && e.status === 401) dead.push(key.apiKey);
+        }
+      }
+      forgetKeys(io.env, identity.tool, profileName, dead);
+    } catch {
+      // A settle that cannot be made waits for the next command; this one goes on.
+    }
   }
 
   const NO_KEY_MESSAGE =

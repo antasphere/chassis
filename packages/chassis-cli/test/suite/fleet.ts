@@ -40,8 +40,8 @@ export interface FleetSite {
   trusts: string | null;
   /** The CLI version its discovery announces (`cli.version`). */
   cli?: string;
-  /** Nothing answers there. */
-  down?: boolean;
+  /** Nothing answers there; `revoke`: nothing answers its revoke (`DELETE /cli/auth/key`) alone. */
+  down?: boolean | 'revoke';
   /**
    * A site that holds the connection open and never answers: every request
    * (`all`), or `/me` alone while its discovery answers (`me`). Such a request
@@ -180,7 +180,17 @@ export function fleet(sites: FleetSite[] = SITES, hubs: string[] = [HUB_A, HUB_B
     );
   }
   for (const site of sites) {
-    if (site.down) {
+    if (site.down === 'revoke') {
+      // Matched before the site's own revoke: it fails the way fetch fails when nothing answers.
+      routes.push({
+        method: 'DELETE',
+        origin: site.origin,
+        path: /\/api\/v1\/cli\/auth\/key$/,
+        reply: () => {
+          throw new TypeError('fetch failed');
+        }
+      });
+    } else if (site.down) {
       for (const method of ['GET', 'POST', 'DELETE']) {
         routes.push({
           method,
