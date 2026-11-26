@@ -474,10 +474,11 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
     );
     const asked = scripted(h, ['123456']);
     expect(await run(['login', '--api-url', 'http://tool', '--email', 'ada@x.co'], h.io)).toBe(1);
+    // No profile of that site is on disk: the way out names the site, which makes it (--profile would refuse).
     expect(h.err()).toBe(
       'Error: http://tool names no Antasphere hub (it runs a version from before sites named theirs), and ' +
         'profile "tool" has never signed in there. This machine holds no Antasphere login. Pick the hub this ' +
-        `site trusts: ${bin} --profile tool login --hub <hub>.\n`
+        `site trusts: ${bin} --api-url http://tool login --hub <hub>.\n`
     );
     expect(asked).toEqual([]);
     expect(trace(h)).toEqual(['GET http://tool/api/v1/instance -']);

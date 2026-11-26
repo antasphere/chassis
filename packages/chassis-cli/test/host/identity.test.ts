@@ -126,10 +126,11 @@ describe('the `things` identity, by its observable bytes', () => {
       env
     );
     expect(await run(['files', 'list', '--api-url', 'http://tool'], h.io)).toBe(1);
+    // No profile of that site is on disk yet: the way out names the site, which makes it.
     expect(h.err()).toBe(
       'Error: http://tool names no Antasphere hub (it runs a version from before sites named theirs), and ' +
         'profile "tool" has never signed in there. This machine holds no Antasphere login. Pick the hub this ' +
-        'site trusts: things --profile tool login --hub <hub>.\n'
+        'site trusts: things --api-url http://tool login --hub <hub>.\n'
     );
   });
 
