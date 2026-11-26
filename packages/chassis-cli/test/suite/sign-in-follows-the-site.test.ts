@@ -1,9 +1,26 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { HUB_TOOL, loadConfig as loadCoreConfig } from '@antasphere/cli-core';
-import { tempConfigEnv } from '@antasphere/chassis-cli/testing';
+import {
+  HUB_TOOL,
+  loadConfig as loadCoreConfig,
+  updateConfig as updateCoreConfig
+} from '@antasphere/cli-core';
+import { DEFAULT_HUB_URL, tempConfigEnv } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
 import { fresh, kept, seedHub, seedTool } from './signin-fixtures.js';
-import { ADA, BEA, CY, fleet, HUB_A, HUB_B, OLD, SITE_A, SITE_B, trace } from './fleet.js';
+import {
+  ADA,
+  BEA,
+  CY,
+  fleet,
+  HUB_A,
+  HUB_B,
+  OLD,
+  SITE_A,
+  SITE_B,
+  SITES,
+  trace,
+  type Harness
+} from './fleet.js';
 
 /**
  * The sign-in follows the site (R2, PRDCT-3521, PRDCT-5192), and the two
@@ -282,6 +299,104 @@ describe('login --email replaces the login at its hub only (ruling 3)', () => {
     expect(hubConfig.profiles.a).toMatchObject({ baseUrl: HUB_A, email: CY });
     expect(hubConfig.profiles.b).toEqual({ apiKey: keyB, baseUrl: HUB_B, email: BEA });
     expect(loadConfig(env).profiles.a?.hubKeys?.map((k) => [k.hub, k.email])).toEqual([[HUB_A, CY]]);
+  });
+});
+
+describe('a new hub key is filed under the hub its email code ran at, even when its entry left the hub file meanwhile (F1)', () => {
+  /** A site whose discovery names the default hub, and a second site that names hub-a. */
+  const CLOUD_SITE = 'https://cloud-site.example.com';
+  const SITE_C = 'https://site-c.example.com';
+
+  beforeEach(() => {
+    f = fleet(
+      [
+        ...SITES,
+        { origin: CLOUD_SITE, names: DEFAULT_HUB_URL, trusts: DEFAULT_HUB_URL },
+        { origin: SITE_C, names: HUB_A, trusts: HUB_A }
+      ],
+      [HUB_A, HUB_B, DEFAULT_HUB_URL]
+    );
+  });
+
+  /** The code's prompt: while the person reads the mail, another command signs the login "a" out. */
+  function signedOutDuringTheCode(h: Harness, env: Record<string, string>, email = ''): void {
+    h.io.prompt = async (question) => {
+      if (/mail/i.test(question)) return email;
+      updateCoreConfig(env, HUB_TOOL, (config) => {
+        delete config.profiles.a;
+      });
+      return '123456';
+    };
+  }
+
+  /** The requests of some harnesses that carried a key, `METHOD origin+path` each. */
+  const carrying = (key: string, ...hs: Harness[]) =>
+    hs.flatMap((h) =>
+      h.wire.filter((c) => c.auth === `Bearer ${key}`).map((c) => `${c.method} ${c.origin}${c.path}`)
+    );
+
+  /**
+   * The entry "a" holds the new hub key, at hub-a; the next command on a site that names hub-a sends it
+   * to hub-a and nowhere else, and one on a site that names the default hub sends it nowhere.
+   */
+  async function filedAtHubA(env: Record<string, string>, login: Harness, email: string): Promise<void> {
+    const entry = loadCoreConfig(env, HUB_TOOL).profiles.a;
+    expect(entry).toMatchObject({ baseUrl: HUB_A, email });
+    const minted = entry?.apiKey ?? '';
+    expect(f.keys()).toContain(minted);
+
+    const next = f.harness(env);
+    expect(await run(['--api-url', SITE_C, 'verify'], next.io)).toBe(0);
+    expect(next.out()).toBe(`ok — ${email} (owner) @ ${SITE_C}\n`);
+    expect(carrying(minted, next)).toEqual([`POST ${HUB_A}/api/v1/sso/tool-token`]);
+
+    const cloud = f.harness(env);
+    expect(await run(['--api-url', CLOUD_SITE, 'verify'], cloud.io)).toBe(1);
+    expect(cloud.err()).toBe(
+      `Error: ${CLOUD_SITE} signs in through the Antasphere hub ${DEFAULT_HUB_URL}, and this machine holds no ` +
+        `Antasphere login there. Run ${bin} --api-url ${CLOUD_SITE} login to sign in.\n`
+    );
+    expect(carrying(minted, cloud)).toEqual([]);
+    // Every request that carried it, the login's own included, went to hub-a.
+    expect(
+      new Set(carrying(minted, login, next, cloud).map((c) => new URL(c.split(' ')[1]!).origin))
+    ).toEqual(new Set([HUB_A]));
+  }
+
+  it('login --email cy replaces ada at hub-a while another command signs ada out during the code: cy’s key is filed at hub-a, and sent nowhere else', async () => {
+    const env: Record<string, string> = await tempConfigEnv();
+    seedHub(env, {
+      activeProfile: 'a',
+      profiles: { a: { apiKey: f.hubKey(HUB_A, ADA), baseUrl: HUB_A, email: ADA } }
+    });
+    seedTool(env, {
+      activeProfile: 'a',
+      profiles: {
+        a: { baseUrl: SITE_A, site: fresh(HUB_A), hubKeys: [kept(HUB_A, ADA, f.toolKey(SITE_A, ADA))] }
+      }
+    });
+    const h = f.harness(env);
+    signedOutDuringTheCode(h, env);
+    expect(await run(['login', '--email', CY], h.io)).toBe(0);
+    expect(h.err()).toContain(`Replacing the Antasphere login ${ADA} with ${CY}.\n`);
+    expect(h.out()).toBe(`Signed in as Cy <${CY}> in Acme on ${SITE_A}.\n`);
+    await filedAtHubA(env, h, CY);
+  });
+
+  it('a stored hub key hub-a rejects, signed in again while another command signs that login out during the code: the new key is filed at hub-a, and sent nowhere else', async () => {
+    const env: Record<string, string> = await tempConfigEnv();
+    // A hub key hub-a no longer knows (revoked from its dashboard).
+    seedHub(env, {
+      activeProfile: 'a',
+      profiles: { a: { apiKey: 'ant_gone_secretsecretsecret', baseUrl: HUB_A, email: ADA } }
+    });
+    seedTool(env, { activeProfile: 'a', profiles: { a: { baseUrl: SITE_A, site: fresh(HUB_A) } } });
+    const h = f.harness(env);
+    signedOutDuringTheCode(h, env, ADA);
+    expect(await run(['login'], h.io)).toBe(0);
+    expect(h.err()).toContain('The stored Antasphere login was rejected: signing in again.\n');
+    expect(h.out()).toBe(`Signed in as Ada <${ADA}> in Acme on ${SITE_A}.\n`);
+    await filedAtHubA(env, h, ADA);
   });
 });
 

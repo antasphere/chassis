@@ -6,6 +6,12 @@ import type { CliIo } from '../context.js';
 import type { Cli } from '../kit.js';
 
 /**
+ * The Antasphere cloud hub as the kit knows it (a login with no `baseUrl` is
+ * there), so a test names that hub by this constant and never spells it.
+ */
+export { DEFAULT_HUB_URL } from '../identity.js';
+
+/**
  * The test harness of a CLI built on this package, shared by the chassis suite
  * and by the tool's own tests. `./testing` is a test-only entry: it is built
  * (the tool's tests read it from `dist`) and kept out of the packed artefact

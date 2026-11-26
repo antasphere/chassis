@@ -249,16 +249,22 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
    * Write a login on the hub file, in one `updateConfig`: the key's own
    * fields on the named entry (a replacement, a re-sign-in), or on the entry
    * `entryFor` picks (a new login); whatever else the entry holds stays. The
-   * hub file's active login is set only when it held no profile at all.
-   * Answers the entry's name.
+   * hub is the caller's, the one its email code ran at: never read from the
+   * entry as it stands at the write, which another command may have removed
+   * meanwhile (a key of one hub is never filed under another). The hub file's
+   * active login is set only when it held no profile at all. Answers the
+   * entry's name.
    */
-  function writeLogin(target: { name: string } | { hub: string }, completed: CliAuthCompleted): string {
+  function writeLogin(
+    target: { name: string; hub: string } | { hub: string },
+    completed: CliAuthCompleted
+  ): string {
     let written = '';
     updateCoreConfig(io.env, HUB_TOOL, (hubConfig) => {
       const first = Object.keys(hubConfig.profiles).length === 0;
-      const name = 'name' in target ? target.name : entryFor(hubConfig, target.hub);
+      const hub = target.hub;
+      const name = 'name' in target ? target.name : entryFor(hubConfig, hub);
       const entry = hubConfig.profiles[name];
-      const hub = 'hub' in target ? target.hub : (firstSet(entry?.baseUrl) ?? DEFAULT_HUB_URL);
       hubConfig.profiles[name] = {
         ...entry,
         apiKey: completed.key,
@@ -316,7 +322,7 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
             : `Signing in as ${wanted}: the stored Antasphere login carries no address.\n`
         );
         const completed = await hubEmailCode(hub, wanted, opts);
-        writeLogin({ name: old.name }, completed);
+        writeLogin({ name: old.name, hub }, completed);
         // The replaced account's hub key dies at its own hub (best effort:
         // a dead one answers 401), so nothing is left live for it.
         const oldKey = firstSet(old.profile.apiKey);
@@ -564,7 +570,7 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
           if (!(e instanceof CoreUsageError) || !/rejected/.test(e.message)) throw e;
           io.err.write('The stored Antasphere login was rejected: signing in again.\n');
           const completed = await hubEmailCode(hub, firstSet(opts.email), opts);
-          login = loginNamed(writeLogin({ name: login.name }, completed));
+          login = loginNamed(writeLogin({ name: login.name, hub }, completed));
           outcome = await exchange();
         }
         if (outcome.outcome === 'not_cloud') {
