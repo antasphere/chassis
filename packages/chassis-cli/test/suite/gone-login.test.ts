@@ -8,8 +8,8 @@ import {
 import type { ProfileEntry, ProfilesListing } from '@antasphere/chassis-cli';
 import { tempConfigEnv } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
-import { ADA, BEA, fleet, HUB_A, HUB_B, SITE_A, SITE_B, type Harness } from './fleet.js';
-import { seedHub, seedTool } from './signin-fixtures.js';
+import { ADA, BEA, fleet, HUB_A, HUB_B, OLD, SITE_A, SITE_B, trace, type Harness } from './fleet.js';
+import { fresh, seedHub, seedTool } from './signin-fixtures.js';
 
 /**
  * A login that leaves the machine and comes back (the coordinator's rulings
@@ -24,6 +24,12 @@ import { seedHub, seedTool } from './signin-fixtures.js';
  *   credential on the profile revokes it on the profile's OWN site and
  *   forgets it, then goes on (an error included); the listing counts it in
  *   `staleKeys` until then. A login that comes back mints a new key.
+ * - R2c: a profile remembers the origin of the hub of its last successful
+ *   exchange (`lastHub`). A site that names no hub signs in at `--hub`, else
+ *   `ANTASPHERE_URL`, else the hub of its newest kept key still in place,
+ *   else that remembered hub while a login is in place there, else the
+ *   pick-a-hub error, which then says the hub the profile last signed in
+ *   through. A site that names its hub ignores the field.
  */
 
 const { loadConfig } = cli;
@@ -147,5 +153,119 @@ describe('R2b · a kept key whose login is gone is revoked by the next command, 
 
     expect(await run(['--profile', 'b', 'verify'], f.harness(env).io)).toBe(1);
     expect((await entryOf(env, 'b')).signIn).toEqual(needsLogin(0));
+  });
+});
+
+describe('R2c · a site that names no hub signs in again at the hub its profile last signed in through', () => {
+  const PICK_HUB = { kind: 'pick_hub', argv: [bin, '--profile', 'old', 'login', '--hub'] };
+
+  it('old signed in once with login --hub hub-a; the login removed, a command revokes its kept key on old and the pick-a-hub error says it last signed in through hub-a; the login back, verify: exactly one exchange, at hub-a, no pick-a-hub error, the hub key at hub-a only', async () => {
+    // The hub file's active login is bea's at hub-b: it plays no part.
+    const { env, logins } = await twoLogins('b');
+    seedTool(env, { activeProfile: 'old', profiles: { old: { baseUrl: OLD } } });
+    expect(await run(['login', '--hub', HUB_A], f.harness(env).io)).toBe(0);
+    const keptOld = loadConfig(env).profiles.old?.hubKeys?.[0]?.apiKey ?? '';
+    expect(keptOf(env, 'old')).toEqual([[HUB_A, ADA]]);
+    expect(loadConfig(env).profiles.old?.lastHub).toBe(HUB_A);
+
+    signOut(env, 'a');
+    // From the files alone: no hub to sign in at, and the kept key counted for its revoke.
+    const needsHub = (staleKeys: number) => ({
+      state: 'needs_login',
+      via: null,
+      hub: null,
+      email: null,
+      staleKeys,
+      fix: PICK_HUB
+    });
+    expect((await entryOf(env, 'old')).signIn).toEqual(needsHub(1));
+
+    const h = f.harness(env);
+    expect(await run(['verify'], h.io)).toBe(1);
+    expect(h.err()).toBe(
+      `Error: ${OLD} names no Antasphere hub (it runs a version from before sites named theirs), and profile ` +
+        `"old" last signed in through ${HUB_A}, where this machine holds no login now. This machine holds 1 ` +
+        `Antasphere login: ${BEA} at ${HUB_B}. Pick the hub this site trusts: ${bin} --profile old login ` +
+        '--hub <hub>.\n'
+    );
+    expect(revokes(h)).toEqual([`${OLD}/api/v1/cli/auth/key`]);
+    expect(h.wire.find((c) => c.method === 'DELETE')?.auth).toBe(`Bearer ${keptOld}`);
+    expect(toolTokens(h)).toEqual([]);
+    expect(f.alive(keptOld)).toBe(false);
+    expect(keysOfProfile(loadConfig(env).profiles.old!)).toEqual([]);
+    // What the profile remembers of its last sign-in outlives the key.
+    expect(loadConfig(env).profiles.old?.lastHub).toBe(HUB_A);
+    expect((await entryOf(env, 'old')).signIn).toEqual(needsHub(0));
+
+    signBackIn(env, 'a', logins.a);
+    // A login is in place at the remembered hub again: the next command signs in there by itself.
+    expect((await entryOf(env, 'old')).signIn).toEqual({
+      state: 'will_sign_in',
+      via: 'login',
+      hub: HUB_A,
+      email: ADA,
+      staleKeys: 0,
+      fix: null
+    });
+
+    const exchanged = f.exchanges();
+    const back = f.harness(env);
+    expect(await run(['verify'], back.io)).toBe(0);
+    expect(back.out()).toBe(`ok — ${ADA} (owner) @ ${OLD}\n`);
+    expect(back.err()).toBe(`Connected to ${OLD} as ${ADA} via Antasphere.\n`);
+    expect(trace(back)).toEqual([
+      `GET ${OLD}/api/v1/instance`,
+      `POST ${HUB_A}/api/v1/sso/tool-token`,
+      `POST ${OLD}/api/v1/sso/cli-connect`,
+      `GET ${OLD}/api/v1/me`
+    ]);
+    expect(f.exchanges()).toBe(exchanged + 1);
+    // ada's hub key reaches hub-a's origin, and no other.
+    expect(back.wire.filter((c) => c.auth === `Bearer ${logins.a.apiKey}`).map((c) => c.origin)).toEqual([
+      HUB_A
+    ]);
+    expect(keptOf(env, 'old')).toEqual([[HUB_A, ADA]]);
+  });
+
+  it('a site that names hub-b ignores a lastHub of hub-a: the listing and the command sign in at hub-b, and nothing reaches hub-a', async () => {
+    const { env, logins } = await twoLogins('a');
+    seedTool(env, {
+      activeProfile: 'b',
+      profiles: { b: { baseUrl: SITE_B, site: fresh(HUB_B), lastHub: HUB_A } }
+    });
+    expect((await entryOf(env, 'b')).signIn).toEqual({
+      state: 'will_sign_in',
+      via: 'login',
+      hub: HUB_B,
+      email: BEA,
+      staleKeys: 0,
+      fix: null
+    });
+
+    const h = f.harness(env);
+    expect(await run(['verify'], h.io)).toBe(0);
+    expect(h.out()).toBe(`ok — ${BEA} (owner) @ ${SITE_B}\n`);
+    expect(trace(h)).toEqual([
+      `GET ${SITE_B}/api/v1/instance`,
+      `POST ${HUB_B}/api/v1/sso/tool-token`,
+      `POST ${SITE_B}/api/v1/sso/cli-connect`,
+      `GET ${SITE_B}/api/v1/me`
+    ]);
+    expect(toolTokens(h)).toEqual([[HUB_B, `Bearer ${logins.b.apiKey}`]]);
+    expect(h.wire.some((c) => c.auth === `Bearer ${logins.a.apiKey}`)).toBe(false);
+    // The exchange went through hub-b: that is the hub the profile remembers now.
+    expect(loadConfig(env).profiles.b?.lastHub).toBe(HUB_B);
+    expect(keptOf(env, 'b')).toEqual([[HUB_B, BEA]]);
+  });
+
+  it('the same, on a profile that never reached its site: its discovery names hub-b, and the command signs in there', async () => {
+    const { env, logins } = await twoLogins('a');
+    seedTool(env, { activeProfile: 'b', profiles: { b: { baseUrl: SITE_B, lastHub: HUB_A } } });
+    const h = f.harness(env);
+    expect(await run(['verify'], h.io)).toBe(0);
+    expect(h.out()).toBe(`ok — ${BEA} (owner) @ ${SITE_B}\n`);
+    expect(toolTokens(h)).toEqual([[HUB_B, `Bearer ${logins.b.apiKey}`]]);
+    expect(h.wire.some((c) => c.origin === HUB_A)).toBe(false);
+    expect(loadConfig(env).profiles.b?.lastHub).toBe(HUB_B);
   });
 });
