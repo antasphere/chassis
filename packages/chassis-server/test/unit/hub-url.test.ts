@@ -41,4 +41,17 @@ describe('hubUrlOf', () => {
     expect(hubUrlOf('http://hub.example.com:3300/')).toBe('http://hub.example.com:3300');
     expect(hubUrlOf('http://hub.example.com:3301')).not.toBe(hubUrlOf('http://hub.example.com:3300'));
   });
+
+  // A hub's address has one normal form everywhere: cli-core's normalizeUrl, the scheme, the host and
+  // the path with its trailing slashes removed (so the path is kept). Each value is written out.
+  it.each([
+    ['a trailing slash', 'https://hub.example.com/', 'https://hub.example.com'],
+    ['an upper-case host', 'https://HUB.Example.COM', 'https://hub.example.com'],
+    ['a default port', 'https://hub.example.com:443', 'https://hub.example.com'],
+    ['a default port of http', 'http://hub.example.com:80/', 'http://hub.example.com'],
+    ['a query', 'https://hub.example.com/?next=%2Fhome', 'https://hub.example.com'],
+    ['a path', 'https://hub.example.com/base/', 'https://hub.example.com/base']
+  ])('an issuer with %s: %s is named %s, the normal form', (_what, issuer, named) => {
+    expect(hubUrlOf(issuer)).toBe(named);
+  });
 });
