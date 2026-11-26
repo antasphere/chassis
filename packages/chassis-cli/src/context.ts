@@ -76,6 +76,13 @@ export interface CliIo extends CoreCliIo {
    * leaves it unset and the default is `os.hostname()`; tests pin it.
    */
   hostname?: () => string;
+  /**
+   * The limit of each request `profiles --check` and `profiles add` send (the
+   * discovery read, `--check`'s `/me`), in milliseconds: past it the request
+   * is aborted, and counts as no answer. The bin leaves it unset and the
+   * default is 10 000; tests shorten it. Nothing else in the kit reads it.
+   */
+  requestTimeoutMs?: number;
 }
 
 // ── Terminal-control sanitation ──────────────────────────────────────────────

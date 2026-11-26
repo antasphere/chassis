@@ -48,6 +48,9 @@ const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}$/;
 /** What a site answered to the self-revoke of one key: dead now (or already), refused, or no answer. */
 type Revoked = 'revoked' | 'refused' | 'silent';
 
+/** The limit of one request of `profiles --check` and `profiles add`, unless the io gives one (ms). */
+const REQUEST_TIMEOUT_MS = 10_000;
+
 /** `n key` / `n keys`. */
 const keys = (n: number): string => `${n} key${n === 1 ? '' : 's'}`;
 
@@ -61,6 +64,24 @@ export function registerProfileCommands<TClient extends ChassisClient<string>>(
   const { bin, cloudUrl } = identity;
 
   const fetchOf = (): typeof globalThis.fetch => io.fetch ?? globalThis.fetch.bind(globalThis);
+
+  /**
+   * The fetch of `--check` and `add`: each request is aborted past the limit
+   * (`CliIo.requestTimeoutMs`, else 10 s), as well as by any signal it already
+   * carries. A request the limit aborted is no answer: a site that holds the
+   * connection open costs these commands the limit, never the system's own
+   * connect timeout.
+   */
+  function limitedFetch(): typeof globalThis.fetch {
+    const base = fetchOf();
+    const given = io.requestTimeoutMs;
+    const ms = typeof given === 'number' && Number.isFinite(given) && given > 0 ? given : REQUEST_TIMEOUT_MS;
+    return (input, init) => {
+      const limit = AbortSignal.timeout(ms);
+      const carried = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+      return base(input, { ...init, signal: carried ? AbortSignal.any([carried, limit]) : limit });
+    };
+  }
 
   /** The listing of a file as it is, with what `--check` found. */
   function listingOf(config: CliConfig, checks?: ReadonlyMap<string, ProfileCheck>): ProfilesListing {
@@ -138,10 +159,12 @@ export function registerProfileCommands<TClient extends ChassisClient<string>>(
    * key, or the kept key the plan serves, an old slot read by name included).
    * Never an exchange, never a revoke, never a move of the old slots: the
    * site's facts are the one thing written. A site that does not answer as a
-   * site of this tool is never sent a key.
+   * site of this tool is never sent a key. Each request has its limit: one
+   * that outlasts it is no answer.
    */
   async function checkOne(row: ProfileRow): Promise<ProfileCheck> {
-    const probe = await probeToolInstance(row.site, fetchOf());
+    const fetchLimited = limitedFetch();
+    const probe = await probeToolInstance(row.site, fetchLimited);
     if (!probe) return { facts: null, checked: 'unreachable', person: null };
     const facts = factsOfProbe(probe, new Date().toISOString());
     if (row.saved) rememberSite(io.env, identity.tool, row.name, probe, { cloudUrl, force: true });
@@ -149,7 +172,7 @@ export function registerProfileCommands<TClient extends ChassisClient<string>>(
     const key = servedKey(planFor(identity, io.env, row.name, profile, row.site), profile);
     if (!key) return { facts, checked: 'no_key', person: null };
     try {
-      const me = await createClient({ baseUrl: row.site, apiKey: key, fetch: fetchOf() }).me();
+      const me = await createClient({ baseUrl: row.site, apiKey: key, fetch: fetchLimited }).me();
       return {
         facts,
         checked: 'ok',
@@ -216,8 +239,8 @@ export function registerProfileCommands<TClient extends ChassisClient<string>>(
       const site = siteAddress(url);
       const wanted = opts.name === undefined ? undefined : validName(opts.name);
       refuseTaken(loadConfig(io.env), site, wanted);
-      // Discovery once, with no lock held; the profile keeps what the site says of itself.
-      const probe = await probeToolInstance(site, fetchOf());
+      // Discovery once, with no lock held and within its limit; the profile keeps what the site says of itself.
+      const probe = await probeToolInstance(site, limitedFetch());
       let name = '';
       let first = false;
       updateConfig(io.env, (config) => {
