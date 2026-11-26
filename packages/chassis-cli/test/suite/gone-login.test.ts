@@ -414,6 +414,31 @@ describe('R2b · a profile that serves its own key revokes a gone login’s kept
     expect(keysOfProfile(loadConfig(env).profiles.a!).map((k) => k.apiKey)).toEqual([own, keptA]);
   });
 
+  it.each([
+    [429, 'turns it away for now'],
+    [404, 'has no such route']
+  ] as const)(
+    'the site answers the revoke %s (it %s), a 4xx that is neither 401 nor 403: no line, the key kept, alive, and the next command sends the revoke again (verifier round 5, note 4)',
+    async (status, _how) => {
+      f = fleet([{ origin: SITE_A, names: HUB_A, trusts: HUB_A, revokeAnswer: status }, ...SITES.slice(1)]);
+      const { env, own, keptA } = await ownKeyAndGoneLogin();
+      const h = f.harness(env);
+      expect(await run(['--profile', 'a', 'verify'], h.io)).toBe(0);
+      expect(h.out()).toBe(`ok — ${ADA} (owner) @ ${SITE_A}\n`);
+      expect(h.err()).toBe('');
+      expect(trace(h)).toEqual([`DELETE ${SITE_A}/api/v1/cli/auth/key`, `GET ${SITE_A}/api/v1/me`]);
+      expect(f.alive(keptA)).toBe(true);
+      expect(keysOfProfile(loadConfig(env).profiles.a!).map((k) => k.apiKey)).toEqual([own, keptA]);
+
+      const next = f.harness(env);
+      expect(await run(['--profile', 'a', 'verify'], next.io)).toBe(0);
+      expect(next.err()).toBe('');
+      expect(trace(next)).toEqual([`DELETE ${SITE_A}/api/v1/cli/auth/key`, `GET ${SITE_A}/api/v1/me`]);
+      expect(next.wire[0]?.auth).toBe(`Bearer ${keptA}`);
+      expect(keysOfProfile(loadConfig(env).profiles.a!).map((k) => k.apiKey)).toEqual([own, keptA]);
+    }
+  );
+
   it('a stale key the site answers 401 for (dead there already) is forgotten: the listing counts it before the command (1), and not after (0) (verifier round 4, finding 9: C2f)', async () => {
     const { env, keptA } = await ownKeyAndGoneLogin();
     f.kill(keptA);

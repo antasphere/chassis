@@ -17,8 +17,8 @@ import { cloudInstanceBody, INSTANCE_BASE, meBody, MINTED_META } from './signin-
  *   CLI version; each mints, serves and revokes its own keys. A site that is
  *   down fails every request the way `fetch` fails when nothing answers; a
  *   silent one holds the connection open, and its request fails only when
- *   the request's signal aborts; one may refuse its revoke (403) or fail it
- *   (500), revoking nothing.
+ *   the request's signal aborts; one may refuse its revoke (403), not know it
+ *   (404), turn it away for now (429) or fail it (500), revoking nothing.
  * - A key the test holds (`hold`) is never answered when its revoke comes, at
  *   its site or at its hub: that request, too, fails only when its signal
  *   aborts, and the key stays alive.
@@ -57,10 +57,19 @@ export interface FleetSite {
   /**
    * What its revoke (`DELETE /cli/auth/key`) answers instead of revoking, the
    * key staying alive: 403, a site that refuses the self-revoke (the key stays
-   * valid there); 500, one that fails.
+   * valid there); 404, one with no such route; 429, one that turns it away for
+   * now (its rate limit); 500, one that fails.
    */
-  revokeAnswer?: 403 | 500;
+  revokeAnswer?: 403 | 404 | 429 | 500;
 }
+
+/** The error a site's revoke answers in place of revoking (`FleetSite.revokeAnswer`), by status. */
+const REVOKE_ANSWERS: Record<NonNullable<FleetSite['revokeAnswer']>, { code: string; message: string }> = {
+  403: { code: 'forbidden', message: 'This key may not revoke itself' },
+  404: { code: 'not_found', message: 'No such route' },
+  429: { code: 'rate_limited', message: 'Too many requests' },
+  500: { code: 'internal_error', message: 'Something went wrong' }
+};
 
 /** What a silent site never answers, by kind: the methods, and the path they are sent to. */
 const SILENT: Record<NonNullable<FleetSite['silent']>, { methods: string[]; path: RegExp }> = {
@@ -234,15 +243,13 @@ export function fleet(sites: FleetSite[] = SITES, hubs: string[] = [HUB_A, HUB_B
     }
     if (site.revokeAnswer) {
       const status = site.revokeAnswer;
+      const { code, message } = REVOKE_ANSWERS[status];
       // Matched before the site's own revoke: the status, and nothing revoked.
       routes.push({
         method: 'DELETE',
         origin: site.origin,
         path: /\/api\/v1\/cli\/auth\/key$/,
-        reply: () =>
-          status === 403
-            ? deny(403, 'forbidden', 'This key may not revoke itself')
-            : deny(500, 'internal_error', 'Something went wrong')
+        reply: () => deny(status, code, message)
       });
     }
     routes.push(
