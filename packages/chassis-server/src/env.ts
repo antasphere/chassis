@@ -480,6 +480,18 @@ function defaultHintCookieDomain(issuerUrl: string): string {
   return parent || host;
 }
 
+/**
+ * The comparable form of the hub issuer, the one discovery names as
+ * `auth.hub`: the scheme, the host (case-folded, port kept) and the path
+ * without its trailing slashes; query and fragment dropped. It is what a CLI
+ * compares with the `baseUrl` of the logins it holds, so it is the same
+ * normal form cli-core's `normalizeUrl` gives.
+ */
+export function hubUrlOf(issuerUrl: string): string {
+  const u = new URL(issuerUrl);
+  return `${u.protocol}//${u.host}${u.pathname}`.replace(/\/+$/, '');
+}
+
 export function hubConfig(env: Env): HubConfig | null {
   if (env.EDITION !== 'cloud') return null;
   // parseEnv already refused a cloud env missing any of these.

@@ -1,33 +1,37 @@
 import { describe, expect, it } from 'vitest';
-import { HUB_TOOL, loadConfig as loadCoreConfig, saveConfig as saveCoreConfig } from '@antasphere/cli-core';
-import { redactKey } from '@antasphere/chassis-cli';
-import { routedHarness, tempConfigEnv, type Route } from '@antasphere/chassis-cli/testing';
+import { HUB_TOOL, loadConfig as loadCoreConfig } from '@antasphere/cli-core';
+import { DEFAULT_HUB_URL, routedHarness, tempConfigEnv, type Route } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
 import {
   cloudInstanceRoute,
   exchangeRoutes,
   HUB,
   HUB_KEY,
+  kept,
   key,
   meBody,
   meRoute,
+  namingInstanceRoute,
   ORG,
   ossInstanceRoute,
   otpRoutes,
+  seedHub,
   seedHubLogin,
+  seedTool,
   TOOL_ACCESS_DENIED,
   wsRow
 } from './signin-fixtures.js';
 
 /**
- * ONE `login` that ends in the tool (PRDCT-2947): a pasted key, the
- * instance's email code (self-hosted), or the Antasphere sign-in then the
- * exchange (cloud). The profile it signs in on is the instance's, and it
- * becomes the active one.
+ * ONE `login` that ends in the tool (PRDCT-2947): a pasted key, the site's
+ * own email code (a site that signs in by itself), or the Antasphere login
+ * at the hub the SITE names then the exchange (R2). The profile it signs in
+ * on is the site's, and a login never moves the default profile nor the hub
+ * file's active login, except for the first of a machine (R3).
  */
 
-const { configPath, loadConfig, saveConfig } = cli;
-const { envPrefix: P, keyPrefix: K, displayName, cloudUrl } = cli.identity;
+const { configPath, loadConfig } = cli;
+const { bin, envPrefix: P, keyPrefix: K, displayName, cloudUrl } = cli.identity;
 
 /** A scripted prompt: answers in order, questions recorded. */
 function scripted(h: ReturnType<typeof routedHarness>, answers: string[]): string[] {
@@ -55,8 +59,21 @@ function answeringAs(email: string, routes: Route[]): Route[] {
   }));
 }
 
+const revokeOk: Route = {
+  method: 'DELETE',
+  path: /\/api\/v1\/cli\/auth\/key$/,
+  reply: () => ({ body: { revoked: true, id: 'k' } })
+};
+
+const trace = (h: ReturnType<typeof routedHarness>) =>
+  h.wire.map((c) => `${c.method} ${c.origin}${c.path} ${c.auth ?? '-'}`);
+
+/** The line a login says when its profile is not the default (R3). */
+const stays = (p: string, d: string) =>
+  `Signed in on profile "${p}". The default profile stays "${d}" (${bin} use ${p} makes "${p}" the default).\n`;
+
 describe('login with a pasted key', () => {
-  it('verifies the key with /me, saves it on the instance profile and makes it active', async () => {
+  it('verifies the key with /me, saves it on the instance profile, the default of a machine with no profile', async () => {
     const env = await tempConfigEnv();
     const pasted = key('paste');
     const h = routedHarness([meRoute()], env);
@@ -77,12 +94,14 @@ describe('login with a pasted key', () => {
     const env = await tempConfigEnv();
     const inShell = key('envkey');
     const minted = key('minted');
+    // The exported key is paired with its site (R2): <PREFIX>_URL names it.
     const h = routedHarness([ossInstanceRoute, ...otpRoutes(minted), meRoute()], {
       ...env,
+      [`${P}_URL`]: 'http://inst',
       [`${P}_API_KEY`]: inShell
     });
     scripted(h, ['123456']);
-    expect(await run(['login', '--api-url', 'http://inst', '--email', 'ada@x.co'], h.io)).toBe(0);
+    expect(await run(['login', '--email', 'ada@x.co'], h.io)).toBe(0);
     expect(h.wire.map((c) => `${c.method} ${c.path} ${c.auth ?? '-'}`)).toEqual([
       'GET /api/v1/instance -',
       'POST /api/v1/cli/auth/request -',
@@ -104,10 +123,11 @@ describe('login with a pasted key', () => {
     const minted = key('tool');
     const h = routedHarness([cloudInstanceRoute, ...exchangeRoutes([minted]), meRoute()], {
       ...env,
+      [`${P}_URL`]: 'http://tool',
       [`${P}_API_KEY`]: inShell
     });
-    expect(await run(['login', '--api-url', 'http://tool', '--email', 'ada@x.co'], h.io)).toBe(0);
-    expect(h.wire.map((c) => `${c.method} ${c.origin}${c.path} ${c.auth ?? '-'}`)).toEqual([
+    expect(await run(['login', '--email', 'ada@x.co'], h.io)).toBe(0);
+    expect(trace(h)).toEqual([
       'GET http://tool/api/v1/instance -',
       'GET http://tool/api/v1/instance -',
       `POST ${HUB}/api/v1/sso/tool-token Bearer ${HUB_KEY}`,
@@ -116,7 +136,9 @@ describe('login with a pasted key', () => {
     ]);
     const tool = loadConfig(env).profiles.tool;
     expect(tool?.apiKey).toBeUndefined();
-    expect(tool?.connectKeys?.default?.apiKey).toBe(minted);
+    expect(tool?.hubKeys).toEqual([
+      { hub: HUB, email: 'ada@x.co', apiKey: minted, mintedAt: expect.any(String) }
+    ]);
     expect(JSON.stringify(loadConfig(env))).not.toContain(inShell);
   });
 
@@ -165,7 +187,7 @@ describe('login with a pasted key', () => {
     expect(loadConfig(env)).toEqual({ profiles: {} });
   });
 
-  it('--json: the profile, the URL, how, who, where, and the file', async () => {
+  it('--json: the profile, the site, how, who, where, whether it became the default, and the file', async () => {
     const env = await tempConfigEnv();
     const pasted = key('paste');
     const me = meBody();
@@ -173,29 +195,84 @@ describe('login with a pasted key', () => {
     expect(await run(['login', '--json', '--api-key', pasted, '--api-url', 'http://inst'], h.io)).toBe(0);
     expect(JSON.parse(h.out())).toEqual({
       profile: 'inst',
-      baseUrl: 'http://inst',
+      site: 'http://inst',
       via: 'key',
+      login: null,
       user: me.user,
       workspace: me.workspace,
+      madeDefault: true,
       configPath: configPath(env)
     });
     expect(h.out()).not.toContain(pasted);
   });
 
-  it('--profile names the profile the key is saved on', async () => {
+  it('--profile names the profile the key is saved on, and the default does not move to it', async () => {
     const env = await tempConfigEnv();
-    saveConfig(env, { profiles: { work: { baseUrl: 'http://inst' } } });
+    seedTool(env, { profiles: { work: { baseUrl: 'http://inst' } } });
     const h = routedHarness([meRoute()], env);
     expect(await run(['login', '--api-key', key('paste'), '--profile', 'work'], h.io)).toBe(0);
     expect(loadConfig(env)).toEqual({
-      activeProfile: 'work',
       profiles: { work: { apiKey: key('paste'), baseUrl: 'http://inst', email: 'ada@x.co' } }
     });
+    // With no default chosen, a command typed by hand runs on the cloud's profile: that stays.
+    expect(h.err()).toBe(stays('work', 'cloud'));
+  });
+
+  it('a pasted key replacing the profile’s own key revokes the old one on the profile’s site, and there only', async () => {
+    const env = await tempConfigEnv();
+    const old = key('old');
+    const pasted = key('paste');
+    seedTool(env, {
+      activeProfile: 'inst',
+      profiles: {
+        inst: { apiKey: old, baseUrl: 'http://inst' },
+        other: { apiKey: key('other'), baseUrl: 'http://o' }
+      }
+    });
+    const h = routedHarness([meRoute(), revokeOk], env);
+    expect(await run(['login', '--api-key', pasted], h.io)).toBe(0);
+    expect(trace(h)).toEqual([
+      `GET http://inst/api/v1/me Bearer ${pasted}`,
+      `DELETE http://inst/api/v1/cli/auth/key Bearer ${old}`
+    ]);
+    expect(h.err()).toBe('');
+    expect(loadConfig(env).profiles.inst).toEqual({
+      apiKey: pasted,
+      baseUrl: 'http://inst',
+      email: 'ada@x.co'
+    });
+    expect(JSON.stringify(loadConfig(env))).not.toContain(old);
+
+    // The same key pasted again replaces nothing: nothing is revoked.
+    const again = routedHarness([meRoute(), revokeOk], env);
+    expect(await run(['login', '--api-key', pasted], again.io)).toBe(0);
+    expect(again.wire.map((c) => c.method)).toEqual(['GET']);
+  });
+
+  it('a site that does not revoke the replaced key says it stays valid there; the new key is saved all the same', async () => {
+    const env = await tempConfigEnv();
+    const old = key('old');
+    seedTool(env, { activeProfile: 'inst', profiles: { inst: { apiKey: old, baseUrl: 'http://inst' } } });
+    const nothing: Route = {
+      method: 'DELETE',
+      path: /\/api\/v1\/cli\/auth\/key$/,
+      reply: () => {
+        throw new TypeError('fetch failed');
+      }
+    };
+    const h = routedHarness([meRoute(), nothing], env);
+    expect(await run(['login', '--api-key', key('paste')], h.io)).toBe(0);
+    expect(h.err()).toBe(
+      'Could not reach http://inst to revoke the replaced key: it stays valid there until revoked from its ' +
+        'dashboard.\n'
+    );
+    expect(loadConfig(env).profiles.inst?.apiKey).toBe(key('paste'));
+    expect(h.err()).not.toContain(old.slice(0, 13));
   });
 });
 
 describe('login on a self-hosted instance: the email code', () => {
-  it('asks the email and the code, mints the key, saves it on the instance profile', async () => {
+  it('asks the email and the code, mints the key, saves it on the instance profile, named and never shown', async () => {
     const env = await tempConfigEnv();
     const minted = key('minted');
     const h = routedHarness([ossInstanceRoute, ...otpRoutes(minted), meRoute()], env);
@@ -221,14 +298,41 @@ describe('login on a self-hosted instance: the email code', () => {
       { method: 'GET', origin: 'http://inst', path: '/api/v1/me', auth: `Bearer ${minted}` }
     ]);
     expect(h.err()).toBe('A sign-in code was sent to ada@x.co (if that account exists on http://inst).\n');
+    // The key is named by the name the site gave it; no part of it is printed.
     expect(h.out()).toBe(
       'Signed in as Ada <ada@x.co> in Acme on http://inst.\n' +
-        `API key "CLI login" (${redactKey(minted)}) saved to profile "inst" (${configPath(env)}).\n`
+        `API key "CLI login" saved to profile "inst" (${configPath(env)}).\n`
     );
-    expect(h.out()).not.toContain(minted);
+    expect(h.out()).not.toContain(minted.slice(0, 12));
+    expect(h.out()).not.toContain(minted.slice(-4));
     const config = loadConfig(env);
     expect(config.activeProfile).toBe('inst');
     expect(config.profiles.inst).toEqual({ apiKey: minted, baseUrl: 'http://inst', email: 'ada@x.co' });
+  });
+
+  it('a re-login revokes the key it replaces on the profile’s site, once the new one is saved', async () => {
+    const env = await tempConfigEnv();
+    const old = key('old');
+    const minted = key('minted');
+    seedTool(env, { activeProfile: 'inst', profiles: { inst: { apiKey: old, baseUrl: 'http://inst' } } });
+    const h = routedHarness([ossInstanceRoute, ...otpRoutes(minted), meRoute(), revokeOk], env);
+    scripted(h, ['123456']);
+    expect(await run(['login', '--email', 'ada@x.co'], h.io)).toBe(0);
+    expect(trace(h)).toEqual([
+      'GET http://inst/api/v1/instance -',
+      'POST http://inst/api/v1/cli/auth/request -',
+      'POST http://inst/api/v1/cli/auth/complete -',
+      `GET http://inst/api/v1/me Bearer ${minted}`,
+      `DELETE http://inst/api/v1/cli/auth/key Bearer ${old}`
+    ]);
+    expect(loadConfig(env).profiles.inst).toEqual({
+      apiKey: minted,
+      baseUrl: 'http://inst',
+      email: 'ada@x.co',
+      // What the site said of itself, remembered by the login on a profile already on disk.
+      site: expect.objectContaining({ federated: false })
+    });
+    expect(JSON.stringify(loadConfig(env))).not.toContain(old);
   });
 
   it('--email skips the first question; --key-name and --expires-in-days reach the mint', async () => {
@@ -269,11 +373,13 @@ describe('login on a self-hosted instance: the email code', () => {
     expect(await run(['login', '--json', '--api-url', 'http://inst', '--email', 'ada@x.co'], h.io)).toBe(0);
     expect(JSON.parse(h.out())).toEqual({
       profile: 'inst',
-      baseUrl: 'http://inst',
+      site: 'http://inst',
       via: 'otp',
+      login: null,
       user: me.user,
       workspace: me.workspace,
       keyName: 'CLI login',
+      madeDefault: true,
       configPath: configPath(env)
     });
     expect(h.out()).not.toContain(minted);
@@ -326,7 +432,7 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
     const asked = scripted(h, ['ada@x.co', '123456']);
     expect(await run(['login', '--api-url', 'http://tool'], h.io)).toBe(0);
     expect(asked).toEqual(['Antasphere email: ', 'Code: ']);
-    expect(h.wire.map((c) => `${c.method} ${c.origin}${c.path} ${c.auth ?? '-'}`)).toEqual([
+    expect(trace(h)).toEqual([
       'GET http://tool/api/v1/instance -',
       `POST ${HUB}/api/v1/cli/auth/request -`,
       `POST ${HUB}/api/v1/cli/auth/complete -`,
@@ -344,24 +450,51 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
         'Your workspaces: Acme, Beta. Pass --org <name> (or --workspace <name>) to work in another.\n'
     );
     // The hub profile: exactly what `antasphere login` writes, named the hub
-    // CLI's way (cli-core `selectProfile`: ANTASPHERE_URL=http://hub makes
-    // the profile of that host, `hub`).
+    // CLI's way (cli-core `freshProfileName`: the profile of the host, `hub`),
+    // and the hub file's active login, since it held none.
     expect(loadCoreConfig(env, HUB_TOOL)).toEqual({
       activeProfile: 'hub',
       profiles: { hub: { apiKey: HUB_KEY, baseUrl: HUB, email: 'ada@x.co', workspaceId: ORG } }
     });
-    // The tool's key is cached on the instance profile, which is the active one.
+    // The tool's key is kept on the instance profile, the default of a machine that had none.
     const config = loadConfig(env);
     expect(config.activeProfile).toBe('tool');
     expect(config.profiles.tool?.baseUrl).toBe('http://tool');
     expect(config.profiles.tool?.apiKey).toBeUndefined();
-    expect(config.profiles.tool?.connectKeys?.hub).toMatchObject({ apiKey: minted, email: 'ada@x.co' });
+    expect(config.profiles.tool?.hubKeys).toEqual([
+      { hub: HUB, email: 'ada@x.co', apiKey: minted, mintedAt: expect.any(String) }
+    ]);
   });
 
-  it('a clean machine: the hub profile `cloud` at account.antasphere.com', async () => {
+  it('a clean machine, a site that names no hub: the sentence that picks one, nothing asked, nothing sent but discovery', async () => {
     const env = await tempConfigEnv();
     const h = routedHarness(
       [cloudInstanceRoute, ...otpRoutes(HUB_KEY, ORG), ...exchangeRoutes([key('tool')]), meRoute()],
+      env
+    );
+    const asked = scripted(h, ['123456']);
+    expect(await run(['login', '--api-url', 'http://tool', '--email', 'ada@x.co'], h.io)).toBe(1);
+    // No profile of that site is on disk: the way out names the site, which makes it (--profile would refuse).
+    expect(h.err()).toBe(
+      'Error: http://tool names no Antasphere hub (it runs a version from before sites named theirs), and ' +
+        'profile "tool" has never signed in there. This machine holds no Antasphere login. Pick the hub this ' +
+        `site trusts: ${bin} --api-url http://tool login --hub <hub>.\n`
+    );
+    expect(asked).toEqual([]);
+    expect(trace(h)).toEqual(['GET http://tool/api/v1/instance -']);
+    expect(loadCoreConfig(env, HUB_TOOL)).toEqual({ profiles: {} });
+    expect(loadConfig(env)).toEqual({ profiles: {} });
+  });
+
+  it('a clean machine, a site that names the cloud hub: the login `cloud` at account.antasphere.com', async () => {
+    const env = await tempConfigEnv();
+    const h = routedHarness(
+      [
+        namingInstanceRoute(DEFAULT_HUB_URL),
+        ...otpRoutes(HUB_KEY, ORG),
+        ...exchangeRoutes([key('tool')]),
+        meRoute()
+      ],
       env
     );
     scripted(h, ['123456']);
@@ -381,12 +514,12 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
         }
       }
     });
-    expect(loadConfig(env).profiles.tool?.connectKeys?.cloud?.apiKey).toBe(key('tool'));
+    expect(loadConfig(env).profiles.tool?.hubKeys?.[0]?.apiKey).toBe(key('tool'));
   });
 
-  it('a stored hub login the hub rejects, with no ANTASPHERE_URL: re-signs in at the STORED hub URL, and the profile keeps its other fields', async () => {
+  it('a stored hub login the hub rejects: re-signs in at the hub the site names, and the login keeps its other fields', async () => {
     const env = await tempConfigEnv();
-    saveCoreConfig(env, HUB_TOOL, {
+    seedHub(env, {
       activeProfile: 'default',
       profiles: {
         default: {
@@ -403,7 +536,7 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
     const fresh = 'ant_freshkey_secretsecretsecret1234';
     const h = routedHarness(
       [
-        cloudInstanceRoute,
+        namingInstanceRoute(HUB),
         ...otpRoutes(fresh, ORG),
         ...exchangeRoutes([key('tool')], {
           toolToken: (n) =>
@@ -437,15 +570,15 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
         spare: { baseUrl: 'http://spare' }
       }
     });
-    expect(loadConfig(env).profiles.tool?.connectKeys?.default?.apiKey).toBe(key('tool'));
+    expect(loadConfig(env).profiles.tool?.hubKeys?.[0]?.apiKey).toBe(key('tool'));
   });
 
-  it('a login revokes and replaces a cached key the instance no longer accepts (verifier round 1, F3)', async () => {
+  it('a login revokes and replaces an old-shape key the instance no longer accepts (verifier round 1, F3)', async () => {
     const env = await hubEnv();
     seedHubLogin(env);
     const dead = key('dead');
     const minted = key('tool');
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'tool',
       profiles: { tool: { baseUrl: 'http://tool', connectKeys: { default: { apiKey: dead } } } }
     });
@@ -468,7 +601,7 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
       env
     );
     expect(await run(['login', '--api-url', 'http://tool'], h.io)).toBe(0);
-    expect(h.wire.map((c) => `${c.method} ${c.origin}${c.path} ${c.auth ?? '-'}`)).toEqual([
+    expect(trace(h)).toEqual([
       'GET http://tool/api/v1/instance -',
       `DELETE http://tool/api/v1/cli/auth/key Bearer ${dead}`,
       'GET http://tool/api/v1/instance -',
@@ -477,57 +610,49 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
       `GET http://tool/api/v1/me Bearer ${minted}`
     ]);
     const tool = loadConfig(env).profiles.tool;
-    expect(Object.keys(tool?.connectKeys ?? {})).toEqual(['default']);
-    expect(tool?.connectKeys?.default?.apiKey).toBe(minted);
+    expect(tool?.connectKeys).toBeUndefined();
+    expect(tool?.hubKeys).toEqual([
+      { hub: HUB, email: 'ada@x.co', apiKey: minted, mintedAt: expect.any(String) }
+    ]);
     expect(JSON.stringify(loadConfig(env))).not.toContain(dead);
   });
 
-  it('a login with a live cached key revokes it too, and ends with one new key on the profile', async () => {
+  it('a login with a live kept key revokes it too, and ends with one new key on the profile', async () => {
     const env = await hubEnv();
     seedHubLogin(env);
     const live = key('live');
     const minted = key('tool');
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'tool',
-      profiles: {
-        tool: { baseUrl: 'http://tool', connectKeys: { default: { apiKey: live, email: 'ada@x.co' } } }
-      }
+      profiles: { tool: { baseUrl: 'http://tool', hubKeys: [kept(HUB, 'ada@x.co', live)] } }
     });
-    const h = routedHarness(
-      [
-        cloudInstanceRoute,
-        { method: 'DELETE', path: /\/api\/v1\/cli\/auth\/key$/, reply: () => ({ body: { revoked: true } }) },
-        ...exchangeRoutes([minted]),
-        meRoute()
-      ],
-      env
-    );
+    const h = routedHarness([cloudInstanceRoute, revokeOk, ...exchangeRoutes([minted]), meRoute()], env);
     expect(await run(['login', '--api-url', 'http://tool'], h.io)).toBe(0);
     expect(h.wire.filter((c) => c.method === 'DELETE')).toEqual([
       { method: 'DELETE', origin: 'http://tool', path: '/api/v1/cli/auth/key', auth: `Bearer ${live}` }
     ]);
     expect(h.wire.filter((c) => c.path.endsWith('/sso/cli-connect'))).toHaveLength(1);
     expect(h.wire.at(-1)).toMatchObject({ path: '/api/v1/me', auth: `Bearer ${minted}` });
-    expect(loadConfig(env).profiles.tool?.connectKeys).toEqual({
-      default: expect.objectContaining({ apiKey: minted })
-    });
+    expect(loadConfig(env).profiles.tool?.hubKeys).toEqual([
+      { hub: HUB, email: 'ada@x.co', apiKey: minted, mintedAt: expect.any(String) }
+    ]);
   });
 
   it('F9: --profile naming another instance than --api-url is refused before any request, and nothing moves', async () => {
     const env = await hubEnv();
     seedHubLogin(env);
     const cached = key('cached');
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'work',
-      profiles: { work: { baseUrl: 'http://tool', connectKeys: { default: { apiKey: cached } } } }
+      profiles: { work: { baseUrl: 'http://tool', hubKeys: [kept(HUB, 'ada@x.co', cached)] } }
     });
     const before = JSON.stringify(loadConfig(env));
     const h = routedHarness([cloudInstanceRoute, ...exchangeRoutes([key('tool')]), meRoute()], env);
     expect(await run(['login', '--profile', 'work', '--api-url', 'http://other'], h.io)).toBe(1);
     expect(h.wire).toEqual([]);
     expect(h.err()).toBe(
-      'Error: Profile "work" is the instance http://tool, and this login targets http://other. ' +
-        'Drop --profile to sign in on the profile of http://other, or drop --api-url to sign in on "work".\n'
+      'Error: Profile "work" is the site http://tool, and this command targets http://other. ' +
+        'Drop --profile to run on the profile of http://other, or drop --api-url to run on "work".\n'
     );
     expect(JSON.stringify(loadConfig(env))).toBe(before);
   });
@@ -536,7 +661,7 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
     const env = await hubEnv();
     const own = `${K}_ownkey12_0123456789abcdefghij`;
     const pasted = `${K}_pasted12_0123456789abcdefghij`;
-    saveConfig(env, { activeProfile: 'work', profiles: { work: { baseUrl: 'http://tool', apiKey: own } } });
+    seedTool(env, { activeProfile: 'work', profiles: { work: { baseUrl: 'http://tool', apiKey: own } } });
     const h = routedHarness([meRoute()], env);
     expect(
       await run(['login', '--profile', 'work', '--api-url', 'http://other', '--api-key', pasted], h.io)
@@ -545,9 +670,9 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
     expect(loadConfig(env).profiles.work).toEqual({ baseUrl: 'http://tool', apiKey: own });
   });
 
-  it('the hub profile keeps the name the hub CLI made active', async () => {
+  it('a signed-out entry of the hub CLI at that hub takes the new login, under its name, and the active login stays', async () => {
     const env = await hubEnv();
-    saveCoreConfig(env, HUB_TOOL, { activeProfile: 'work', profiles: { work: { baseUrl: HUB } } });
+    seedHub(env, { activeProfile: 'work', profiles: { work: { baseUrl: HUB } } });
     const h = routedHarness(
       [cloudInstanceRoute, ...otpRoutes(HUB_KEY, ORG), ...exchangeRoutes([key('tool')]), meRoute()],
       env
@@ -558,7 +683,7 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
       activeProfile: 'work',
       profiles: { work: { apiKey: HUB_KEY, baseUrl: HUB, email: 'ada@x.co', workspaceId: ORG } }
     });
-    expect(loadConfig(env).profiles.tool?.connectKeys?.work?.apiKey).toBe(key('tool'));
+    expect(loadConfig(env).profiles.tool?.hubKeys?.[0]?.apiKey).toBe(key('tool'));
   });
 
   it('with no URL at all, signs in on the implicit cloud profile at the cloud URL', async () => {
@@ -579,8 +704,10 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
     expect(config.activeProfile).toBe('cloud');
     expect(Object.keys(config.profiles)).toEqual(['cloud']);
     expect(config.profiles.cloud?.baseUrl).toBe(origin);
-    expect(config.profiles.cloud?.connectKeys?.default?.apiKey).toBe(minted);
+    expect(config.profiles.cloud?.hubKeys?.[0]?.apiKey).toBe(minted);
     expect(h.out()).toBe(`Signed in as Ada <ada@x.co> in Acme on ${origin}.\n`);
+    // The first profile of the machine is its default: no line about the default.
+    expect(h.err()).toBe(`Connected to ${origin} as ada@x.co via Antasphere.\n`);
   });
 
   it('with an Antasphere login stored: no question, the exchange alone', async () => {
@@ -620,7 +747,7 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
     scripted(h, ['123456']);
     expect(await run(['login', '--api-url', 'http://tool', '--email', 'ada@x.co'], h.io)).toBe(0);
     expect(h.err()).toContain('The stored Antasphere login was rejected: signing in again.\n');
-    expect(h.wire.map((c) => `${c.method} ${c.origin}${c.path} ${c.auth ?? '-'}`)).toEqual([
+    expect(trace(h)).toEqual([
       'GET http://tool/api/v1/instance -',
       'GET http://tool/api/v1/instance -',
       `POST ${HUB}/api/v1/sso/tool-token Bearer ${HUB_KEY}`,
@@ -634,12 +761,12 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
     expect(loadCoreConfig(env, HUB_TOOL).profiles.default?.apiKey).toBe(fresh);
   });
 
-  it('--email naming ANOTHER account than the stored login signs that account in afresh, and the cached key of the old one is revoked and replaced (PRDCT-3032)', async () => {
+  it('--email naming ANOTHER account than the login at that hub REPLACES it: the line, the old hub key revoked at its hub, the old account’s key revoked on the site (PRDCT-3032, ruling 3)', async () => {
     const env = await hubEnv();
     seedHubLogin(env);
     const old = key('adakey');
     const minted = key('bobkey');
-    saveConfig(env, {
+    seedTool(env, {
       activeProfile: 'tool',
       profiles: {
         tool: { baseUrl: 'http://tool', connectKeys: { default: { apiKey: old, email: 'ada@x.co' } } }
@@ -648,7 +775,7 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
     const h = routedHarness(
       [
         cloudInstanceRoute,
-        { method: 'DELETE', path: /\/api\/v1\/cli\/auth\/key$/, reply: () => ({ body: { revoked: true } }) },
+        revokeOk,
         ...answeringAs('bob@x.co', [...otpRoutes(BOB_HUB_KEY, ORG), ...exchangeRoutes([minted])]),
         meRoute()
       ],
@@ -658,10 +785,11 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
     expect(await run(['login', '--email', 'bob@x.co', '--api-url', 'http://tool'], h.io)).toBe(0);
     expect(asked).toEqual(['Code: ']);
     expect(h.err()).toContain('Replacing the Antasphere login ada@x.co with bob@x.co.\n');
-    expect(h.wire.map((c) => `${c.method} ${c.origin}${c.path} ${c.auth ?? '-'}`)).toEqual([
+    expect(trace(h)).toEqual([
       'GET http://tool/api/v1/instance -',
       `POST ${HUB}/api/v1/cli/auth/request -`,
       `POST ${HUB}/api/v1/cli/auth/complete -`,
+      `DELETE ${HUB}/api/v1/cli/auth/key Bearer ${HUB_KEY}`,
       `DELETE http://tool/api/v1/cli/auth/key Bearer ${old}`,
       'GET http://tool/api/v1/instance -',
       `POST ${HUB}/api/v1/sso/tool-token Bearer ${BOB_HUB_KEY}`,
@@ -669,15 +797,16 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
       `GET http://tool/api/v1/me Bearer ${minted}`
     ]);
     expect(h.wire[1]?.body).toEqual({ email: 'bob@x.co' });
-    expect(loadCoreConfig(env, HUB_TOOL).profiles.default).toEqual({
-      apiKey: BOB_HUB_KEY,
-      baseUrl: HUB,
-      email: 'bob@x.co',
-      workspaceId: ORG
+    // The same entry, the new key and address: never a second login beside the first.
+    expect(loadCoreConfig(env, HUB_TOOL)).toEqual({
+      activeProfile: 'default',
+      profiles: { default: { apiKey: BOB_HUB_KEY, baseUrl: HUB, email: 'bob@x.co', workspaceId: ORG } }
     });
     const tool = loadConfig(env).profiles.tool;
-    expect(Object.keys(tool?.connectKeys ?? {})).toEqual(['default']);
-    expect(tool?.connectKeys?.default).toMatchObject({ apiKey: minted, email: 'bob@x.co' });
+    expect(tool?.connectKeys).toBeUndefined();
+    expect(tool?.hubKeys).toEqual([
+      { hub: HUB, email: 'bob@x.co', apiKey: minted, mintedAt: expect.any(String) }
+    ]);
     expect(JSON.stringify(loadConfig(env))).not.toContain(old);
     expect(JSON.stringify(loadCoreConfig(env, HUB_TOOL))).not.toContain(HUB_KEY);
   });
@@ -693,7 +822,7 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
     expect(await run(['login', '--email', 'ADA@X.co', '--api-url', 'http://tool'], h.io)).toBe(0);
     expect(asked).toEqual([]);
     expect(h.err()).not.toContain('Replacing');
-    expect(h.wire.map((c) => `${c.method} ${c.origin}${c.path} ${c.auth ?? '-'}`)).toEqual([
+    expect(trace(h)).toEqual([
       'GET http://tool/api/v1/instance -',
       'GET http://tool/api/v1/instance -',
       `POST ${HUB}/api/v1/sso/tool-token Bearer ${HUB_KEY}`,
@@ -703,7 +832,7 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
     expect(loadCoreConfig(env, HUB_TOOL).profiles.default?.apiKey).toBe(HUB_KEY);
   });
 
-  it('--json: via antasphere, the hub profile, the workspaces', async () => {
+  it('--json: via login, the login, the workspaces, whether it became the default', async () => {
     const env = await hubEnv();
     seedHubLogin(env);
     const me = meBody({ workspaces: ORG_ROWS });
@@ -711,12 +840,13 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
     expect(await run(['login', '--json', '--api-url', 'http://tool'], h.io)).toBe(0);
     expect(JSON.parse(h.out())).toEqual({
       profile: 'tool',
-      baseUrl: 'http://tool',
-      via: 'antasphere',
-      hubProfile: 'default',
+      site: 'http://tool',
+      via: 'login',
+      login: { hub: HUB, email: 'ada@x.co' },
       user: me.user,
       workspace: me.workspace,
       workspaces: me.workspaces,
+      madeDefault: true,
       configPath: configPath(env)
     });
     expect(h.out()).not.toContain(key('tool'));
@@ -732,6 +862,236 @@ describe('login on the cloud: the Antasphere sign-in, then the exchange', () => 
     expect(await run(['login', '--api-url', 'http://tool'], h.io)).toBe(3);
     expect(h.err()).toBe(`Error: This account has no access to ${displayName} in any of its organizations\n`);
     expect(loadConfig(env).profiles.tool).toBeUndefined();
+  });
+});
+
+describe('a login never moves a default (R3)', () => {
+  const HOME_KEY = key('home');
+
+  /** A machine whose default is `home`, at another site than the one the login signs in on. */
+  async function homeEnv(): Promise<Record<string, string>> {
+    const env = { ...(await tempConfigEnv()), ANTASPHERE_URL: HUB };
+    seedTool(env, {
+      activeProfile: 'home',
+      profiles: { home: { baseUrl: 'http://home', apiKey: HOME_KEY } }
+    });
+    return env;
+  }
+
+  it('through the hub: the default stays, the line says so, and the profile is written beside it', async () => {
+    const env = await homeEnv();
+    seedHubLogin(env);
+    const h = routedHarness([cloudInstanceRoute, ...exchangeRoutes([key('tool')]), meRoute()], env);
+    expect(await run(['login', '--api-url', 'http://tool'], h.io)).toBe(0);
+    expect(h.err()).toBe('Connected to http://tool as ada@x.co via Antasphere.\n' + stays('tool', 'home'));
+    const config = loadConfig(env);
+    expect(config.activeProfile).toBe('home');
+    expect(Object.keys(config.profiles)).toEqual(['home', 'tool']);
+    expect(config.profiles.home).toEqual({ baseUrl: 'http://home', apiKey: HOME_KEY });
+  });
+
+  it('--json says madeDefault: false', async () => {
+    const env = await homeEnv();
+    seedHubLogin(env);
+    const h = routedHarness([cloudInstanceRoute, ...exchangeRoutes([key('tool')]), meRoute()], env);
+    expect(await run(['login', '--json', '--api-url', 'http://tool'], h.io)).toBe(0);
+    expect(JSON.parse(h.out())).toMatchObject({ profile: 'tool', via: 'login', madeDefault: false });
+    expect(loadConfig(env).activeProfile).toBe('home');
+  });
+
+  it('with the site’s own email code, and with a pasted key: the default stays, the line says so', async () => {
+    const env = await homeEnv();
+    const otp = routedHarness([ossInstanceRoute, ...otpRoutes(key('minted')), meRoute()], env);
+    scripted(otp, ['123456']);
+    expect(await run(['login', '--api-url', 'http://inst', '--email', 'ada@x.co'], otp.io)).toBe(0);
+    expect(otp.err()).toBe(
+      'A sign-in code was sent to ada@x.co (if that account exists on http://inst).\n' + stays('inst', 'home')
+    );
+
+    const paste = routedHarness([meRoute()], env);
+    expect(await run(['login', '--api-key', key('paste'), '--api-url', 'http://other'], paste.io)).toBe(0);
+    expect(paste.err()).toBe(stays('other', 'home'));
+    expect(loadConfig(env).activeProfile).toBe('home');
+  });
+
+  it('on the default profile itself: no line', async () => {
+    const env = await homeEnv();
+    const h = routedHarness([meRoute(), revokeOk], env);
+    expect(await run(['login', '--api-key', key('paste')], h.io)).toBe(0);
+    expect(h.err()).toBe('');
+    expect(loadConfig(env).profiles.home?.apiKey).toBe(key('paste'));
+    // The key it replaced is revoked on the profile's site.
+    expect(h.wire.filter((c) => c.method === 'DELETE')).toEqual([
+      { method: 'DELETE', origin: 'http://home', path: '/api/v1/cli/auth/key', auth: `Bearer ${HOME_KEY}` }
+    ]);
+  });
+
+  it('the hub file’s active login never moves: a login at another hub than the active one is used, and a new one is written beside it', async () => {
+    const env = await tempConfigEnv();
+    const CLOUD_HUB_KEY = 'ant_cloudk12_secretsecretsecret1234';
+    seedHub(env, {
+      activeProfile: 'cloud',
+      profiles: {
+        cloud: { apiKey: CLOUD_HUB_KEY, baseUrl: DEFAULT_HUB_URL, email: 'ada@x.co' }
+      }
+    });
+    const h = routedHarness(
+      [namingInstanceRoute(HUB), ...otpRoutes(HUB_KEY, ORG), ...exchangeRoutes([key('tool')]), meRoute()],
+      env
+    );
+    scripted(h, ['123456']);
+    expect(await run(['login', '--api-url', 'http://tool', '--email', 'ada@x.co'], h.io)).toBe(0);
+    expect(h.wire.filter((c) => c.path === '/api/v1/cli/auth/request').map((c) => c.origin)).toEqual([HUB]);
+    expect(h.wire.some((c) => c.auth === `Bearer ${CLOUD_HUB_KEY}`)).toBe(false);
+    const hubConfig = loadCoreConfig(env, HUB_TOOL);
+    expect(hubConfig.activeProfile).toBe('cloud');
+    expect(Object.keys(hubConfig.profiles)).toEqual(['cloud', 'hub']);
+    expect(hubConfig.profiles.hub).toEqual({
+      apiKey: HUB_KEY,
+      baseUrl: HUB,
+      email: 'ada@x.co',
+      workspaceId: ORG
+    });
+  });
+
+  it('one profile per site: a login at a site that has a profile signs in on it, under its own name', async () => {
+    const env = { ...(await tempConfigEnv()), ANTASPHERE_URL: HUB };
+    seedHubLogin(env);
+    seedTool(env, { activeProfile: 'mine', profiles: { mine: { baseUrl: 'http://tool/' } } });
+    const h = routedHarness([cloudInstanceRoute, ...exchangeRoutes([key('tool')]), meRoute()], env);
+    expect(await run(['login', '--api-url', 'HTTP://TOOL'], h.io)).toBe(0);
+    const config = loadConfig(env);
+    expect(Object.keys(config.profiles)).toEqual(['mine']);
+    expect(config.profiles.mine?.hubKeys?.[0]?.apiKey).toBe(key('tool'));
+    expect(h.err()).toBe('Connected to http://tool as ada@x.co via Antasphere.\n');
+  });
+
+  it('a hub login on a profile holding a stale key of its own revokes and forgets it, and the next whoami answers through the login (PRDCT-3522)', async () => {
+    const env = { ...(await tempConfigEnv()), ANTASPHERE_URL: HUB };
+    seedHubLogin(env);
+    const stale = key('stale');
+    const minted = key('tool');
+    seedTool(env, {
+      activeProfile: 'tool',
+      profiles: { tool: { baseUrl: 'http://tool', apiKey: stale, email: 'ada@x.co' } }
+    });
+    const unknown = {
+      status: 401,
+      body: { error: { code: 'invalid_api_key', message: 'API key not recognized' } }
+    };
+    const bearer = (headers: Headers) => headers.get('authorization')?.replace(/^Bearer\s+/, '');
+    const routes: Route[] = [
+      cloudInstanceRoute,
+      { method: 'DELETE', path: /\/api\/v1\/cli\/auth\/key$/, reply: () => unknown },
+      ...exchangeRoutes([minted]),
+      {
+        method: 'GET',
+        path: /\/api\/v1\/me$/,
+        reply: ({ headers }) => (bearer(headers) === minted ? { body: meBody() } : unknown)
+      }
+    ];
+    const h = routedHarness(routes, env);
+    expect(await run(['login'], h.io)).toBe(0);
+    // The own key goes once the exchange succeeded, never before it.
+    expect(trace(h)).toEqual([
+      'GET http://tool/api/v1/instance -',
+      'GET http://tool/api/v1/instance -',
+      `POST ${HUB}/api/v1/sso/tool-token Bearer ${HUB_KEY}`,
+      'POST http://tool/api/v1/sso/cli-connect -',
+      `DELETE http://tool/api/v1/cli/auth/key Bearer ${stale}`,
+      `GET http://tool/api/v1/me Bearer ${minted}`
+    ]);
+    const tool = loadConfig(env).profiles.tool;
+    expect(tool?.apiKey).toBeUndefined();
+    expect(tool?.email).toBeUndefined();
+    expect(JSON.stringify(loadConfig(env))).not.toContain(stale);
+
+    const next = routedHarness(routes, env);
+    expect(await run(['whoami'], next.io)).toBe(0);
+    expect(trace(next)).toEqual([`GET http://tool/api/v1/me Bearer ${minted}`]);
+    expect(next.out()).toContain(`  signed in with: the Antasphere login ada@x.co at ${HUB} (kept key)\n`);
+  });
+
+  it('an exchange the hub refuses leaves the own key on the profile, alive on its site; a successful one revokes it there, then forgets it (lane review of part 1)', async () => {
+    const env = { ...(await tempConfigEnv()), ANTASPHERE_URL: HUB };
+    seedHubLogin(env);
+    const own = key('own');
+    const minted = key('tool');
+    seedTool(env, {
+      activeProfile: 'tool',
+      profiles: { tool: { baseUrl: 'http://tool', apiKey: own, email: 'ada@x.co' } }
+    });
+    const dead = new Set<string>();
+    const bearer = (headers: Headers) => headers.get('authorization')?.replace(/^Bearer\s+/, '') ?? '';
+    const revokeOnTool: Route = {
+      method: 'DELETE',
+      path: /\/api\/v1\/cli\/auth\/key$/,
+      reply: ({ headers }) => {
+        dead.add(bearer(headers));
+        return { body: { revoked: true, id: 'k' } };
+      }
+    };
+
+    const refused = routedHarness(
+      [
+        cloudInstanceRoute,
+        revokeOnTool,
+        ...exchangeRoutes([minted], { toolToken: () => TOOL_ACCESS_DENIED }),
+        meRoute()
+      ],
+      env
+    );
+    expect(await run(['login'], refused.io)).toBe(3);
+    expect(refused.wire.some((c) => c.method === 'DELETE')).toBe(false);
+    expect(dead.has(own)).toBe(false);
+    expect(loadConfig(env).profiles.tool).toMatchObject({ apiKey: own, email: 'ada@x.co' });
+
+    const ok = routedHarness([cloudInstanceRoute, revokeOnTool, ...exchangeRoutes([minted]), meRoute()], env);
+    expect(await run(['login'], ok.io)).toBe(0);
+    expect(ok.wire.filter((c) => c.method === 'DELETE')).toEqual([
+      { method: 'DELETE', origin: 'http://tool', path: '/api/v1/cli/auth/key', auth: `Bearer ${own}` }
+    ]);
+    expect(trace(ok).indexOf(`DELETE http://tool/api/v1/cli/auth/key Bearer ${own}`)).toBeGreaterThan(
+      trace(ok).indexOf('POST http://tool/api/v1/sso/cli-connect -')
+    );
+    expect(dead.has(own)).toBe(true);
+    const tool = loadConfig(env).profiles.tool;
+    expect(tool?.apiKey).toBeUndefined();
+    expect(tool?.email).toBeUndefined();
+    expect(tool?.hubKeys?.map((k) => k.apiKey)).toEqual([minted]);
+  });
+
+  it('no output of a login carries any part of a key', async () => {
+    const env = { ...(await tempConfigEnv()), ANTASPHERE_URL: HUB };
+    const minted = key('tool');
+    const otpKey = key('otpkey');
+    const pasted = key('paste');
+    const outputs: string[] = [];
+    const record = (h: ReturnType<typeof routedHarness>) => outputs.push(h.out(), h.err());
+    for (const json of [[], ['--json']]) {
+      const hub = routedHarness(
+        [cloudInstanceRoute, ...otpRoutes(HUB_KEY, ORG), ...exchangeRoutes([minted]), meRoute()],
+        env
+      );
+      scripted(hub, ['ada@x.co', '123456']);
+      expect(await run(['login', ...json, '--api-url', 'http://tool'], hub.io)).toBe(0);
+      record(hub);
+      const self = routedHarness([ossInstanceRoute, ...otpRoutes(otpKey), meRoute()], env);
+      scripted(self, ['ada@x.co', '123456']);
+      expect(await run(['login', ...json, '--api-url', 'http://inst'], self.io)).toBe(0);
+      record(self);
+      const paste = routedHarness([meRoute()], env);
+      expect(await run(['login', ...json, '--api-url', 'http://own', '--api-key', pasted], paste.io)).toBe(0);
+      record(paste);
+    }
+    const all = outputs.join('\n');
+    for (const secret of [minted, otpKey, pasted, HUB_KEY]) {
+      // Neither the key nor its redaction (its first 13 characters, its last 4).
+      expect(all).not.toContain(secret.slice(0, 13));
+      expect(all).not.toContain(secret.slice(-8));
+    }
+    // Every seed above is on disk, so the scan looked at real runs.
+    expect(Object.keys(loadConfig(env).profiles).sort()).toEqual(['inst', 'own', 'tool']);
   });
 });
 

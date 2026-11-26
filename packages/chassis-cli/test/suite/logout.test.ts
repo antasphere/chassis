@@ -1,21 +1,27 @@
 import { describe, expect, it } from 'vitest';
-import { HUB_TOOL, loadConfig as loadCoreConfig } from '@antasphere/cli-core';
+import {
+  HUB_TOOL,
+  loadConfig as loadCoreConfig,
+  updateConfig as updateCoreConfig
+} from '@antasphere/cli-core';
 import { routedHarness, tempConfigEnv, type Route } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
-import { HUB, HUB_KEY, key, seedHubLogin } from './signin-fixtures.js';
+import { HUB, HUB_KEY, kept, key, seedHubLogin, seedTool } from './signin-fixtures.js';
 
 /**
  * `logout` revokes what it forgets (PRDCT-2947): every key the selected
- * profile holds, the tool's own and the ones the hub exchange cached, is
- * self-revoked on the PROFILE's instance, never anywhere else; then the
- * profile keeps its instance and loses its credentials.
+ * profile holds (cli-core `keysOfProfile`: its own key, its kept keys, its
+ * old slots) is self-revoked on the PROFILE's site, never anywhere else, with
+ * no lock held; then they are forgotten, compare-and-remove, and the profile
+ * keeps its site. `--all` also ends the logins its kept keys came from, each
+ * revoked at its own hub.
  */
 
-const { loadConfig, saveConfig } = cli;
-const { envPrefix: P, displayName, bin } = cli.identity;
+const { loadConfig } = cli;
+const { envPrefix: P, displayName } = cli.identity;
 
-/** What a plain logout adds when an Antasphere login is stored (PRDCT-3032). */
-const STAYS = ` The Antasphere login ada@x.co stays for the whole tool family (\`${bin} logout --all\` ends it too).`;
+/** What a plain logout adds when the profile's kept key came from the login at `HUB`. */
+const STAYS = ` The Antasphere login ada@x.co at ${HUB} stays for the whole tool family.`;
 
 const OWN = key('own');
 const CONN_A = key('conna');
@@ -38,29 +44,38 @@ const refusal = (status: number, code: string) => ({ status, body: { error: { co
 async function seeded(profile: Record<string, unknown>, extra: Record<string, string> = {}) {
   const env = await tempConfigEnv();
   seedHubLogin(env);
-  saveConfig(env, {
+  seedTool(env, {
     activeProfile: 'work',
     profiles: { work: profile, other: { apiKey: key('other'), baseUrl: 'http://other' } }
   });
   return { ...env, ...extra };
 }
 
+/** Every kind of key: its own, one kept for the login at `HUB`, one old slot of no login in place. */
 const FULL = {
   apiKey: OWN,
   baseUrl: 'http://inst',
   email: 'ada@x.co',
-  connectKeys: { default: { apiKey: CONN_A }, personal: { apiKey: CONN_B } }
+  hubKeys: [kept(HUB, 'ada@x.co', CONN_A)],
+  connectKeys: { personal: { apiKey: CONN_B } }
 };
 
+const DELETE = (origin: string, apiKey: string) => ({
+  method: 'DELETE',
+  origin,
+  path: '/api/v1/cli/auth/key',
+  auth: `Bearer ${apiKey}`
+});
+
 describe('logout', () => {
-  it('revokes the cached hub keys, then the profile key, on the profile instance; keeps the profile', async () => {
+  it('revokes its own key, its kept key and its old slot on the profile’s site; keeps the profile', async () => {
     const env = await seeded(FULL);
     const h = routedHarness([revokeRoute()], env);
     expect(await run(['logout'], h.io)).toBe(0);
     expect(h.wire).toEqual([
-      { method: 'DELETE', origin: 'http://inst', path: '/api/v1/cli/auth/key', auth: `Bearer ${CONN_A}` },
-      { method: 'DELETE', origin: 'http://inst', path: '/api/v1/cli/auth/key', auth: `Bearer ${CONN_B}` },
-      { method: 'DELETE', origin: 'http://inst', path: '/api/v1/cli/auth/key', auth: `Bearer ${OWN}` }
+      DELETE('http://inst', OWN),
+      DELETE('http://inst', CONN_A),
+      DELETE('http://inst', CONN_B)
     ]);
     expect(h.out()).toBe(
       `Logged out of profile "work" on http://inst (3 keys revoked server-side).${STAYS}\n`
@@ -74,38 +89,34 @@ describe('logout', () => {
     expect(loadCoreConfig(env, HUB_TOOL).profiles.default?.apiKey).toBe(HUB_KEY);
   });
 
-  it('one key: "1 key"', async () => {
+  it('one key of its own: "1 key", and no login is named (none signed this profile in)', async () => {
     const env = await seeded({ apiKey: OWN, baseUrl: 'http://inst' });
     const h = routedHarness([revokeRoute()], env);
     expect(await run(['logout'], h.io)).toBe(0);
-    expect(h.out()).toBe(
-      `Logged out of profile "work" on http://inst (1 key revoked server-side).${STAYS}\n`
-    );
+    expect(h.out()).toBe('Logged out of profile "work" on http://inst (1 key revoked server-side).\n');
   });
 
-  it(`never sends a key to the URL of --api-url's instance when --profile names the profile, nor to ${P}_URL`, async () => {
-    const env = await seeded(FULL, { [`${P}_URL`]: 'http://elsewhere' });
-    const h = routedHarness([revokeRoute()], env);
-    expect(await run(['logout', '--profile', 'work', '--api-url', 'http://flagged'], h.io)).toBe(0);
-    expect(new Set(h.wire.map((c) => c.origin))).toEqual(new Set(['http://inst']));
-    expect(h.wire).toHaveLength(3);
+  it(`--profile with a URL of another site (--api-url or ${P}_URL) is refused before any request, and nothing is forgotten`, async () => {
+    for (const [args, extra] of [
+      [['--api-url', 'http://flagged'], {}],
+      [[], { [`${P}_URL`]: 'http://elsewhere' }]
+    ] as const) {
+      const env = await seeded(FULL, extra);
+      const before = JSON.stringify(loadConfig(env));
+      const h = routedHarness([revokeRoute()], env);
+      expect(await run(['logout', '--profile', 'work', ...args], h.io)).toBe(1);
+      expect(h.err()).toMatch(/^Error: Profile "work" is the site http:\/\/inst, and this command targets /);
+      expect(h.wire).toEqual([]);
+      expect(JSON.stringify(loadConfig(env))).toBe(before);
+    }
   });
 
   it('--api-url selects the profile of that instance', async () => {
     const env = await seeded(FULL);
     const h = routedHarness([revokeRoute()], env);
     expect(await run(['logout', '--api-url', 'http://other/'], h.io)).toBe(0);
-    expect(h.wire).toEqual([
-      {
-        method: 'DELETE',
-        origin: 'http://other',
-        path: '/api/v1/cli/auth/key',
-        auth: `Bearer ${key('other')}`
-      }
-    ]);
-    expect(h.out()).toBe(
-      `Logged out of profile "other" on http://other (1 key revoked server-side).${STAYS}\n`
-    );
+    expect(h.wire).toEqual([DELETE('http://other', key('other'))]);
+    expect(h.out()).toBe('Logged out of profile "other" on http://other (1 key revoked server-side).\n');
     expect(loadConfig(env).profiles.work?.apiKey).toBe(OWN);
   });
 
@@ -121,7 +132,7 @@ describe('logout', () => {
     const env = await seeded({ baseUrl: 'http://inst' });
     const h = routedHarness([revokeRoute()], env);
     expect(await run(['logout'], h.io)).toBe(0);
-    expect(h.out()).toBe(`Profile "work" held no key.${STAYS}\n`);
+    expect(h.out()).toBe('Profile "work" held no key.\n');
     expect(h.wire).toEqual([]);
   });
 
@@ -138,8 +149,8 @@ describe('logout', () => {
     );
     expect(await run(['logout'], h.io)).toBe(0);
     expect(h.err()).toBe(
-      'the key of the Antasphere login "default" was already unusable; forgetting it.\n' +
-        'the profile key was already unusable; forgetting it.\n'
+      'the profile key was already unusable; forgetting it.\n' +
+        `the key kept for ada@x.co at ${HUB} was already unusable; forgetting it.\n`
     );
     expect(h.out()).toBe(
       `Logged out of profile "work" on http://inst (1 key revoked server-side).${STAYS}\n`
@@ -156,12 +167,12 @@ describe('logout', () => {
         'revoke it from the dashboard. Forgetting the local copy.\n'
     );
     expect(h.out()).toBe(
-      `Logged out of profile "work" on http://inst — 1 key could NOT be revoked and stay valid.${STAYS}\n`
+      'Logged out of profile "work" on http://inst — 1 key could NOT be revoked and stay valid.\n'
     );
     expect(loadConfig(env).profiles.work).toEqual({ baseUrl: 'http://inst' });
   });
 
-  it('--json: the counts, the hub logins, forgotten', async () => {
+  it('--json: the counts, forgotten; with --all, the logins it ended', async () => {
     const env = await seeded(FULL);
     const h = routedHarness([revokeRoute({ [CONN_B]: refusal(403, 'endpoint_not_allowed') })], env);
     expect(await run(['logout', '--json'], h.io)).toBe(0);
@@ -170,52 +181,45 @@ describe('logout', () => {
       baseUrl: 'http://inst',
       revoked: 2,
       refused: 1,
-      hubProfiles: ['default', 'personal'],
       forgotten: true
+    });
+
+    const all = await seeded(FULL);
+    const ended = routedHarness([revokeRoute()], all);
+    expect(await run(['logout', '--all', '--json'], ended.io)).toBe(0);
+    expect(JSON.parse(ended.out())).toEqual({
+      profile: 'work',
+      baseUrl: 'http://inst',
+      revoked: 3,
+      refused: 0,
+      forgotten: true,
+      logins: [{ hub: HUB, email: 'ada@x.co', revoked: true }]
     });
   });
 
-  it('no profile of the tool, an Antasphere login stored: names the two commands that end it, exit 1, nothing sent (PRDCT-3032)', async () => {
-    const env = await tempConfigEnv();
-    seedHubLogin(env);
-    const h = routedHarness([revokeRoute()], env);
-    expect(await run(['logout'], h.io)).toBe(1);
-    expect(h.err()).toBe(
-      `Error: Nothing of ${displayName}'s to sign out of on this machine. The Antasphere login ada@x.co ` +
-        `stays for the whole tool family: \`${bin} logout --all\` or \`antasphere logout\` ends it.\n`
-    );
-    expect(h.wire).toEqual([]);
-    expect(loadCoreConfig(env, HUB_TOOL).profiles.default?.apiKey).toBe(HUB_KEY);
+  it('no profile of the tool, an Antasphere login stored: names the command that ends it, exit 1, nothing sent (PRDCT-3032)', async () => {
+    for (const args of [[], ['--all']]) {
+      const env = await tempConfigEnv();
+      seedHubLogin(env);
+      const h = routedHarness([revokeRoute()], env);
+      expect(await run(['logout', ...args], h.io)).toBe(1);
+      expect(h.err()).toBe(
+        `Error: Nothing of ${displayName}'s to sign out of on this machine. The Antasphere login ada@x.co at ` +
+          `${HUB} stays for the whole tool family: \`antasphere logout\` ends it.\n`
+      );
+      expect(h.wire).toEqual([]);
+      expect(loadCoreConfig(env, HUB_TOOL).profiles.default?.apiKey).toBe(HUB_KEY);
+    }
   });
 
-  it('no profile of the tool, --all: the hub key revoked on the hub, the hub profile cleared (PRDCT-3032)', async () => {
-    const env = await tempConfigEnv();
-    seedHubLogin(env);
+  it("--all on a profile with a kept key: the tool's key revoked on the instance, then the hub key at its hub; both cleared (PRDCT-3032)", async () => {
+    const env = await seeded({ baseUrl: 'http://inst', hubKeys: [kept(HUB, 'ada@x.co', CONN_A)] });
     const h = routedHarness([revokeRoute()], env);
     expect(await run(['logout', '--all'], h.io)).toBe(0);
-    expect(h.wire).toEqual([
-      { method: 'DELETE', origin: HUB, path: '/api/v1/cli/auth/key', auth: `Bearer ${HUB_KEY}` }
-    ]);
-    expect(h.out()).toBe(
-      `Nothing of ${displayName}'s to sign out of on this machine. ` +
-        'The Antasphere login ada@x.co is revoked and forgotten.\n'
-    );
-    const hub = loadCoreConfig(env, HUB_TOOL);
-    expect(hub.profiles).toEqual({});
-    expect(hub.activeProfile).toBeUndefined();
-  });
-
-  it("--all on a profile with a cached key: the tool's key revoked on the instance, then the hub key on the hub; both cleared (PRDCT-3032)", async () => {
-    const env = await seeded({ baseUrl: 'http://inst', connectKeys: { default: { apiKey: CONN_A } } });
-    const h = routedHarness([revokeRoute()], env);
-    expect(await run(['logout', '--all'], h.io)).toBe(0);
-    expect(h.wire).toEqual([
-      { method: 'DELETE', origin: 'http://inst', path: '/api/v1/cli/auth/key', auth: `Bearer ${CONN_A}` },
-      { method: 'DELETE', origin: HUB, path: '/api/v1/cli/auth/key', auth: `Bearer ${HUB_KEY}` }
-    ]);
+    expect(h.wire).toEqual([DELETE('http://inst', CONN_A), DELETE(HUB, HUB_KEY)]);
     expect(h.out()).toBe(
       'Logged out of profile "work" on http://inst (1 key revoked server-side). ' +
-        'The Antasphere login ada@x.co is revoked and forgotten.\n'
+        `The Antasphere login ada@x.co at ${HUB} is revoked and forgotten.\n`
     );
     expect(loadConfig(env).profiles.work).toEqual({ baseUrl: 'http://inst' });
     const hub = loadCoreConfig(env, HUB_TOOL);
@@ -223,23 +227,58 @@ describe('logout', () => {
     expect(hub.activeProfile).toBeUndefined();
   });
 
+  it('--all while another command signs in again on the same login entry: the entry goes only while it still holds the key revoked, so the new login stays', async () => {
+    const env = await seeded({ baseUrl: 'http://inst', hubKeys: [kept(HUB, 'ada@x.co', CONN_A)] });
+    const NEW_HUB_KEY = 'ant_newkey12_secretsecretsecret1234';
+    const hubRevoke: Route = {
+      method: 'DELETE',
+      origin: HUB,
+      path: /\/api\/v1\/cli\/auth\/key$/,
+      reply: () => {
+        // Another command signs in again at the hub, on the same entry, while this one revokes the old key.
+        updateCoreConfig(env, HUB_TOOL, (config) => {
+          config.profiles.default = { apiKey: NEW_HUB_KEY, baseUrl: HUB, email: 'ada@x.co' };
+        });
+        return { body: { revoked: true, id: 'k2' } };
+      }
+    };
+    const h = routedHarness([hubRevoke, revokeRoute()], env);
+    expect(await run(['logout', '--all'], h.io)).toBe(0);
+    expect(h.wire).toEqual([DELETE('http://inst', CONN_A), DELETE(HUB, HUB_KEY)]);
+    const hub = loadCoreConfig(env, HUB_TOOL);
+    expect(hub.profiles.default).toEqual({ apiKey: NEW_HUB_KEY, baseUrl: HUB, email: 'ada@x.co' });
+    expect(hub.activeProfile).toBe('default');
+  });
+
+  it('--all on a profile whose keys came from no login in place: no login is ended, and that is said', async () => {
+    const env = await seeded({
+      apiKey: OWN,
+      baseUrl: 'http://inst',
+      hubKeys: [kept(HUB, 'bea@x.co', CONN_A)]
+    });
+    const h = routedHarness([revokeRoute()], env);
+    expect(await run(['logout', '--all'], h.io)).toBe(0);
+    expect(h.wire).toEqual([DELETE('http://inst', OWN), DELETE('http://inst', CONN_A)]);
+    expect(h.out()).toBe(
+      'Logged out of profile "work" on http://inst (2 keys revoked server-side). No Antasphere login to end.\n'
+    );
+    expect(loadCoreConfig(env, HUB_TOOL).profiles.default?.apiKey).toBe(HUB_KEY);
+  });
+
   it('the same profile, a plain logout: the tool key alone is revoked, the Antasphere login stays and is named (PRDCT-3032)', async () => {
-    const env = await seeded({ baseUrl: 'http://inst', connectKeys: { default: { apiKey: CONN_A } } });
+    const env = await seeded({ baseUrl: 'http://inst', hubKeys: [kept(HUB, 'ada@x.co', CONN_A)] });
     const h = routedHarness([revokeRoute()], env);
     expect(await run(['logout'], h.io)).toBe(0);
-    expect(h.wire).toEqual([
-      { method: 'DELETE', origin: 'http://inst', path: '/api/v1/cli/auth/key', auth: `Bearer ${CONN_A}` }
-    ]);
+    expect(h.wire).toEqual([DELETE('http://inst', CONN_A)]);
     expect(h.out()).toBe(
-      'Logged out of profile "work" on http://inst (1 key revoked server-side). ' +
-        `The Antasphere login ada@x.co stays for the whole tool family (\`${bin} logout --all\` ends it too).\n`
+      `Logged out of profile "work" on http://inst (1 key revoked server-side).${STAYS}\n`
     );
     expect(loadCoreConfig(env, HUB_TOOL).profiles.default?.apiKey).toBe(HUB_KEY);
   });
 
   it('a profile with no instance of its own revokes on the cloud URL', async () => {
     const env = await tempConfigEnv();
-    saveConfig(env, { activeProfile: 'mine', profiles: { mine: { apiKey: OWN } } });
+    seedTool(env, { activeProfile: 'mine', profiles: { mine: { apiKey: OWN } } });
     const h = routedHarness([revokeRoute()], env);
     expect(await run(['logout'], h.io)).toBe(0);
     expect(h.wire.map((c) => c.origin)).toEqual([new URL(cli.identity.cloudUrl).origin]);

@@ -6,6 +6,12 @@ import type { CliIo } from '../context.js';
 import type { Cli } from '../kit.js';
 
 /**
+ * The Antasphere cloud hub as the kit knows it (a login with no `baseUrl` is
+ * there), so a test names that hub by this constant and never spells it.
+ */
+export { DEFAULT_HUB_URL } from '../identity.js';
+
+/**
  * The test harness of a CLI built on this package, shared by the chassis suite
  * and by the tool's own tests. `./testing` is a test-only entry: it is built
  * (the tool's tests read it from `dist`) and kept out of the packed artefact
@@ -42,10 +48,28 @@ export interface WireCall {
 export interface Route {
   method: string;
   path: RegExp;
-  reply: (call: { path: string; body?: unknown; form?: FormData; headers: Headers }) => {
+  /**
+   * The origin the route serves (`https://hub-a.example.com`): a route with
+   * one matches only requests to that origin, so one harness can play two
+   * hubs and two sites. Without one, a route matches any origin.
+   */
+  origin?: string;
+  /**
+   * The answer. `signal` is the one the request carries, when it carries
+   * one; `raw` may be a promise, awaited as the request's answer, so a route
+   * can play a site that never answers (it settles when that signal aborts,
+   * the way fetch then fails).
+   */
+  reply: (call: {
+    path: string;
+    body?: unknown;
+    form?: FormData;
+    headers: Headers;
+    signal?: AbortSignal;
+  }) => {
     status?: number;
     body?: unknown;
-    raw?: Response;
+    raw?: Response | Promise<Response>;
   };
 }
 
@@ -82,7 +106,12 @@ export function routedHarness(routes: Route[], env: Record<string, string | unde
       ...(workspace !== undefined ? { workspace } : {}),
       ...(body !== undefined ? { body } : {})
     });
-    const route = routes.find((r) => r.method === method && r.path.test(url.pathname));
+    const route = routes.find(
+      (r) =>
+        r.method === method &&
+        r.path.test(url.pathname) &&
+        (r.origin === undefined || new URL(r.origin).origin === url.origin)
+    );
     if (!route) {
       return new Response(
         JSON.stringify({ error: { code: 'not_found', message: `no fake route ${method} ${path}` } }),
@@ -92,8 +121,15 @@ export function routedHarness(routes: Route[], env: Record<string, string | unde
         }
       );
     }
-    const result = route.reply({ path, body, headers, ...(form ? { form } : {}) });
-    if (result.raw) return result.raw;
+    const signal = init?.signal ?? undefined;
+    const result = route.reply({
+      path,
+      body,
+      headers,
+      ...(form ? { form } : {}),
+      ...(signal ? { signal } : {})
+    });
+    if (result.raw) return await result.raw;
     return new Response(JSON.stringify(result.body ?? {}), {
       status: result.status ?? 200,
       headers: { 'content-type': 'application/json' }

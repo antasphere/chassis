@@ -1,10 +1,11 @@
 import { Command, CommanderError } from 'commander';
 import { CliAuthError, CliConnectError } from '@antasphere/cli-core';
 import { PlatformApiError, type ChassisClient } from '@antasphere/chassis-sdk';
-import { CliApiRefusal, CliUsageError, setStdinApiKey, ttySafeIo, type CliIo } from './context.js';
+import { beginRun, CliApiRefusal, CliUsageError, setStdinApiKey, type CliIo } from './context.js';
 import type { Cli, CliDefinition, CliKit, RegisterTool } from './kit.js';
 import { readSecretFromStdin } from './stdin.js';
-import { registerAuthCommands } from './commands/auth.js';
+import { registerAuthCommands, registerConfigCommands } from './commands/auth.js';
+import { registerProfileCommands } from './commands/profiles.js';
 import { registerWorkspaceCommands } from './commands/workspaces.js';
 import { registerProjectCommands } from './commands/projects.js';
 import { registerTeamCommands } from './commands/teams.js';
@@ -28,7 +29,8 @@ export function createProgram<TClient extends ChassisClient<string>>(
   kit: CliKit<TClient>,
   definition: Pick<CliDefinition<TClient>, 'description' | 'errorHint'>
 ): Pick<Cli<TClient>, 'buildProgram' | 'run'> {
-  const { identity, explainWorkspaceRefusal, workspaceNotFoundHint } = kit;
+  const { identity, explainStaleKey, explainUnreachable, explainWorkspaceRefusal, workspaceNotFoundHint } =
+    kit;
   const { description, errorHint } = definition;
 
   function buildProgram(io: CliIo, registerTool: RegisterTool, version: string): Command {
@@ -59,9 +61,12 @@ export function createProgram<TClient extends ChassisClient<string>>(
       )
       .option('--json', 'machine-readable JSON output', false);
 
-    // Identity + profiles: login, logout, whoami, verify, use, profiles,
-    // config show/clear.
+    // Identity + profiles: login, logout, whoami, verify, use; profiles
+    // (add, rename, remove, --check: it says this CLI's version); config
+    // show/clear.
     registerAuthCommands(kit, program, io);
+    registerProfileCommands(kit, program, io, version);
+    registerConfigCommands(kit, program, io);
     // Which workspace the commands run in: workspaces, workspace default.
     registerWorkspaceCommands(kit, program, io);
     // The subgroups of the workspace: projects *, projects members *.
@@ -93,8 +98,10 @@ export function createProgram<TClient extends ChassisClient<string>>(
     // Every human sink is wrapped ONCE, here: resource titles, annotation bodies,
     // stored filenames and server error messages are all somebody else's text
     // heading for a terminal (context.ts `sanitizeForTty`). `--json` keeps the
-    // raw sink through `printJson`.
-    const io = ttySafeIo(rawIo);
+    // raw sink through `printJson`. The run's fetch remembers the requests
+    // that could not connect, so a site that does not answer is named with
+    // its profile (`beginRun`).
+    const io = beginRun(rawIo);
 
     // `--api-key-stdin` is resolved BEFORE commander parses: `resolveContext`
     // is synchronous, so the key must already be parked against this io by
@@ -132,8 +139,10 @@ export function createProgram<TClient extends ChassisClient<string>>(
       }
       if (e instanceof PlatformApiError || e instanceof CliAuthError) {
         // A refusal the workspace SELECTION caused reads as a bad key (401) or
-        // a forbidden one (403) on the wire; say what it really was.
-        const explained = await explainWorkspaceRefusal(io, e);
+        // a forbidden one (403) on the wire; say what it really was. Else a
+        // 401 answered to the profile's OWN key: it is stale, and `login` on
+        // that profile is the fix (PRDCT-3522).
+        const explained = (await explainWorkspaceRefusal(io, e)) ?? explainStaleKey(io, e);
         if (explained) {
           io.err.write(`Error: ${explained}\n`);
           return 1;
@@ -180,7 +189,11 @@ export function createProgram<TClient extends ChassisClient<string>>(
         io.err.write(`Error: ${e.message}${hint}\n`);
         return e.exitCode;
       }
-      io.err.write(`Error: ${e instanceof Error ? e.message : String(e)}\n`);
+      // A request to the profile's site that could not connect: the profile
+      // is named, with the removal offered only for a loopback or private
+      // address (PRDCT-3060).
+      const unreachable = explainUnreachable(io, e);
+      io.err.write(`Error: ${unreachable ?? (e instanceof Error ? e.message : String(e))}\n`);
       return 1;
     }
   }

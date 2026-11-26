@@ -15,8 +15,8 @@ import { createWorkspace } from './workspace.js';
  */
 
 export { cliIdentity, type CliIdentity } from './identity.js';
-export { redactKey, type CliConfigStore } from './config.js';
-export type { CliConfig, CliConnectKey, CliEnv, CliProfile } from './config.js';
+export { redactKey, type CliConfigStore, type CliConfigUpdate } from './config.js';
+export type { CliConfig, CliConnectKey, CliEnv, CliHubKey, CliProfile, CliSiteFacts } from './config.js';
 export {
   CliUsageError,
   fmtBytes,
@@ -29,6 +29,8 @@ export {
   type CliContext,
   type CliContextKit,
   type CliIo,
+  type CliSignedInLogin,
+  type CliSignInChoice,
   type CredentialSource
 } from './context.js';
 export {
@@ -58,6 +60,25 @@ export { explainProjectRefusal, roleNamedBy, memberRef, type ProjectLookup } fro
 export { explainWebhookRefusal, type WebhookLookup } from './commands/webhooks.js';
 export { explainConnectionRefusal, type ConnectionLookup } from './commands/connections.js';
 export { CliApiRefusal, drainPages } from './context.js';
+export {
+  describeProfiles,
+  renderProfiles,
+  undecidedLoginsOf,
+  type DescribeProfilesInput,
+  type ProfileCheck,
+  type ProfileCheckedPerson,
+  type ProfileCheckVerdict,
+  type ProfileEntry,
+  type ProfileEnvironmentEffect,
+  type ProfileFix,
+  type ProfileFixKind,
+  type ProfileSignIn,
+  type ProfileSignInState,
+  type ProfileSite,
+  type ProfilesListing,
+  type ProfilesLogin,
+  type RenderProfilesExtra
+} from './listing.js';
 export type { Cli, CliDefinition, CliKit, RegisterTool } from './kit.js';
 
 export function defineCli<TClient extends ChassisClient<string>>(

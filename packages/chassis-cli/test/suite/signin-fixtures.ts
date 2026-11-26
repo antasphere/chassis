@@ -1,6 +1,11 @@
-import { HUB_TOOL, saveConfig as saveCoreConfig } from '@antasphere/cli-core';
-import type { Route } from '@antasphere/chassis-cli/testing';
-import { cli } from '@chassis-cli-test/host';
+import {
+  HUB_TOOL,
+  updateConfig as updateCoreConfig,
+  type CliConfig,
+  type CliSiteFacts
+} from '@antasphere/cli-core';
+import { routedHarness, type Route } from '@antasphere/chassis-cli/testing';
+import { cli, run } from '@chassis-cli-test/host';
 
 /**
  * The shared fixtures of the sign-in suites (PRDCT-2947): `login`, `logout`,
@@ -28,22 +33,37 @@ export const INSTANCE_BASE = {
   features: { mcp: true, oauth: true, files: true }
 };
 
+/** The discovery of a site that signs in through a hub; `hub` is the hub it names (`auth.hub`, R1). */
+export function cloudInstanceBody(hub?: string): Record<string, unknown> {
+  return {
+    ...INSTANCE_BASE,
+    edition: 'cloud',
+    auth: {
+      methods: ['antasphere', 'api-key', 'oauth'],
+      passwordReset: false,
+      emailChange: false,
+      twoFactor: false,
+      ...(hub ? { hub } : {})
+    }
+  };
+}
+
+/** A site from before sites named their hub: it signs in through one, and names none. */
 export const cloudInstanceRoute: Route = {
   method: 'GET',
   path: /\/api\/v1\/instance$/,
-  reply: () => ({
-    body: {
-      ...INSTANCE_BASE,
-      edition: 'cloud',
-      auth: {
-        methods: ['antasphere', 'api-key', 'oauth'],
-        passwordReset: false,
-        emailChange: false,
-        twoFactor: false
-      }
-    }
-  })
+  reply: () => ({ body: cloudInstanceBody() })
 };
+
+/** A site that names the hub it trusts (R1), on any origin unless one is given. */
+export function namingInstanceRoute(hub: string, origin?: string): Route {
+  return {
+    method: 'GET',
+    path: /\/api\/v1\/instance$/,
+    ...(origin ? { origin } : {}),
+    reply: () => ({ body: cloudInstanceBody(hub) })
+  };
+}
 
 export const ossInstanceRoute: Route = {
   method: 'GET',
@@ -78,12 +98,12 @@ export function wsRow(id: string, name: string, over: Record<string, unknown> = 
 
 /** `/me` as the server answers it, for a person in the given workspaces (the first is active). */
 export function meBody(
-  opts: { name?: string; workspaces?: ReturnType<typeof wsRow>[]; via?: string } = {}
+  opts: { name?: string; email?: string; workspaces?: ReturnType<typeof wsRow>[]; via?: string } = {}
 ): Record<string, unknown> {
   const workspaces = opts.workspaces ?? [wsRow('w1', 'Acme', { default: true })];
   const active = workspaces[0]!;
   return {
-    user: { id: 'u1', name: opts.name ?? 'Ada', email: 'ada@x.co' },
+    user: { id: 'u1', name: opts.name ?? 'Ada', email: opts.email ?? 'ada@x.co' },
     workspace: { id: active.id, name: active.name, hubOrigin: active.hubOrigin, look: active.look },
     role: 'owner',
     origin: 'local',
@@ -195,10 +215,40 @@ export const TOOL_ACCESS_DENIED = {
   }
 };
 
-/** What `antasphere login` leaves behind: the hub profile, active. */
-export function seedHubLogin(env: Record<string, string>, name = 'default'): void {
-  saveCoreConfig(env, HUB_TOOL, {
+/** Write the tool's file as given (through the one writer, cli-core `updateConfig`). */
+export function seedTool(env: Record<string, string | undefined>, config: CliConfig): string {
+  return cli.updateConfig(env, () => config).path;
+}
+
+/** Write the hub's file (`config.json`) as given. */
+export function seedHub(env: Record<string, string | undefined>, config: CliConfig): void {
+  updateCoreConfig(env, HUB_TOOL, () => config);
+}
+
+/** What `antasphere login` leaves behind: the login at `HUB`, active. */
+export function seedHubLogin(env: Record<string, string | undefined>, name = 'default'): void {
+  seedHub(env, {
     activeProfile: name,
     profiles: { [name]: { apiKey: HUB_KEY, baseUrl: HUB, email: 'ada@x.co' } }
   });
+}
+
+/** What a site said of itself, remembered just now: a kept key is then served with no request. */
+export function fresh(hub: string | null, federated = true): CliSiteFacts {
+  return { hub, federated, name: 'Inst', cliVersion: '1.0.0', seenAt: new Date().toISOString() };
+}
+
+/** The version of the CLI under test, as its own `--version` prints it (each host's own). */
+export async function cliVersionOf(): Promise<string> {
+  const h = routedHarness([]);
+  await run(['--version'], h.io);
+  return h.out().trim();
+}
+
+/** A version newer than `version` (its major, plus one). */
+export const newerThan = (version: string): string => `${Number(version.split('.')[0]) + 1}.0.0`;
+
+/** A kept key of a profile, filed by hub and account (cli-core 0.7.0 `hubKeys`). */
+export function kept(hub: string, email: string, apiKey: string) {
+  return { hub, email, apiKey, mintedAt: '2026-11-01T00:00:00.000Z' };
 }

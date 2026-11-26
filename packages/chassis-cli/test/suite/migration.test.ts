@@ -6,7 +6,7 @@ import { routedHarness, tempConfigEnv, type Route } from '@antasphere/chassis-cl
 import { cli, run } from '@chassis-cli-test/host';
 
 // The kit's config store, and the literals that spell the tool (its identity).
-const { configPath, loadConfig, saveConfig } = cli;
+const { configPath, loadConfig, updateConfig } = cli;
 const { tool, legacyConfigDir, keyPrefix: K } = cli.identity;
 
 /**
@@ -82,12 +82,9 @@ describe('legacy config migration', () => {
     expect(h.out()).toContain('http://legacy-inst');
 
     // A later login under a new name does NOT get clobbered by a re-import.
-    saveConfig(env, {
-      activeProfile: 'new',
-      profiles: {
-        ...loadConfig(env).profiles,
-        new: { apiKey: `${K}_new_key_1234567890`, baseUrl: 'http://new' }
-      }
+    updateConfig(env, (config) => {
+      config.activeProfile = 'new';
+      config.profiles.new = { apiKey: `${K}_new_key_1234567890`, baseUrl: 'http://new' };
     });
     const h2 = routedHarness([], env);
     expect(await run(['profiles'], h2.io)).toBe(0);
@@ -96,10 +93,10 @@ describe('legacy config migration', () => {
 
   it(`the legacy file is ignored once the shared home has ${tool} profiles`, async () => {
     const env = await tempConfigEnv();
-    saveConfig(env, {
+    updateConfig(env, () => ({
       activeProfile: 'current',
       profiles: { current: { apiKey: `${K}_current_key_12345`, baseUrl: 'http://current' } }
-    });
+    }));
     await writeLegacy(env, LEGACY);
     const h = routedHarness([meRoute], env);
     expect(await run(['whoami'], h.io)).toBe(0);
