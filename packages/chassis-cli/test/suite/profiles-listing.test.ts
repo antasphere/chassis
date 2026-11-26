@@ -417,7 +417,7 @@ describe('the truth, as it changes (PRDCT-5190, PRDCT-3522, PRDCT-3060)', () => 
     return env;
   }
 
-  it('two sites trusting two hubs, a login at each: both signed in, each through its own hub; the login of one hub removed, that one line turns needs_login with hub_login and the other stays', async () => {
+  it('two sites trusting two hubs, a login at each: both signed in, each through its own hub; the login of one hub removed, that one line turns needs_login with hub_login, its kept key counted stale, and the other stays', async () => {
     const env = await twoSites();
     for (const name of ['a', 'b'])
       expect(await run(['verify', '--profile', name], f.harness(env).io)).toBe(0);
@@ -444,7 +444,8 @@ describe('the truth, as it changes (PRDCT-5190, PRDCT-3522, PRDCT-3060)', () => 
     expect(text.out()).toContain(`signed in: ${ADA} at ${HUB_A}`);
     expect(text.out()).toContain(`signed in: ${BEA} at ${HUB_B}`);
 
-    // The login at hub-b ends on this machine.
+    // The login at hub-b ends on this machine. The key b keeps from it is no longer dormant (R2b): the
+    // next command on b revokes it on site-b, so the listing counts it.
     updateCoreConfig(env, HUB_TOOL, (config) => {
       delete config.profiles.b;
     });
@@ -454,7 +455,7 @@ describe('the truth, as it changes (PRDCT-5190, PRDCT-3522, PRDCT-3060)', () => 
       via: null,
       hub: HUB_B,
       email: null,
-      staleKeys: 0,
+      staleKeys: 1,
       fix: loginFix('hub_login', 'b')
     });
     expect(after.a).toEqual(before.a);
