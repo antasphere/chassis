@@ -488,6 +488,37 @@ describe('profiles, use, config show', () => {
       }
     }
   });
+
+  it('config show names the default the way the listing marks it: the active profile, else the one at the cloud URL, else the implicit cloud row', async () => {
+    /** The default config show names, and the rows profiles --json marks default, on one machine. */
+    async function defaults(env: Record<string, string>) {
+      const show = routedHarness([], env);
+      expect(await run(['config', 'show', '--json'], show.io)).toBe(0);
+      const listed = routedHarness([], env);
+      expect(await run(['profiles', '--json'], listed.io)).toBe(0);
+      const rows = (JSON.parse(listed.out()) as { profiles: Array<{ name: string; default: boolean }> })
+        .profiles;
+      return {
+        shown: (JSON.parse(show.out()) as { defaultProfile: string | null }).defaultProfile,
+        marked: rows.filter((row) => row.default).map((row) => row.name)
+      };
+    }
+    const env = await tempConfigEnv();
+    seedTool(env, { profiles: { a: { baseUrl: 'http://a' } } });
+    expect(await defaults(env)).toEqual({ shown: 'cloud', marked: ['cloud'] });
+    seedTool(env, { profiles: { a: { baseUrl: 'http://a' }, home: { baseUrl: `${CLOUD}/` } } });
+    expect(await defaults(env)).toEqual({ shown: 'home', marked: ['home'] });
+    seedTool(env, { activeProfile: 'a', profiles: { a: { baseUrl: 'http://a' }, home: { baseUrl: CLOUD } } });
+    expect(await defaults(env)).toEqual({ shown: 'a', marked: ['a'] });
+  });
+
+  it('the help of logout and use says the default profile and the site', () => {
+    const program = cli.buildProgram(routedHarness([]).io, () => undefined, '0.0.0');
+    const help = (name: string) => program.commands.find((c) => c.name() === name)!.description();
+    expect(help('logout')).toMatch(/^Sign out of the default \(or named\) profile: /);
+    expect(help('use')).toBe('Switch the default profile (the site the commands run against)');
+    for (const name of ['logout', 'use']) expect(help(name)).not.toMatch(/active profile|instance/);
+  });
 });
 
 describe('the profiles commands never resolve a command’s context', () => {

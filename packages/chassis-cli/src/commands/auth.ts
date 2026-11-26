@@ -754,7 +754,7 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
   program
     .command('logout')
     .description(
-      'Sign out of the active (or named) profile: revokes every key it holds on its own site, then forgets ' +
+      'Sign out of the default (or named) profile: revokes every key it holds on its own site, then forgets ' +
         'them; with --all, also ends the Antasphere logins its kept keys came from'
     )
     .option(
@@ -905,7 +905,7 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
 
   program
     .command('use <profile>')
-    .description('Switch the active profile (the instance the commands run against)')
+    .description('Switch the default profile (the site the commands run against)')
     .action(async (name: string, _opts, cmd: Command) => {
       const globals = cmd.optsWithGlobals() as AuthGlobals;
       let chosen = name;
@@ -945,7 +945,7 @@ export function registerConfigCommands<TClient extends ChassisClient<string>>(
   program: Command,
   io: CliIo
 ): void {
-  const { clearConfig, configPath, loadConfig, profileUrl } = kit;
+  const { clearConfig, configPath, identity, loadConfig, profileUrl } = kit;
 
   const config = program.command('config').description('Inspect or reset the CLI config file');
 
@@ -957,10 +957,12 @@ export function registerConfigCommands<TClient extends ChassisClient<string>>(
       const cfg = loadConfig(io.env);
       const path = configPath(io.env);
       // No key material, redacted or not (decision 4): what each profile is
-      // (its site) and what it holds, by kind.
+      // (its site) and what it holds, by kind. The default is the listing's
+      // (the active profile, else the one at the cloud URL, else the implicit
+      // cloud row), so the two never disagree.
       const shown = {
         path,
-        defaultProfile: cfg.activeProfile ?? null,
+        defaultProfile: selectProfile({ config: cfg, cloudUrl: identity.cloudUrl }).name ?? null,
         profiles: Object.fromEntries(
           Object.entries(cfg.profiles).map(([n, p]) => {
             const keys = keysOfProfile(p);
