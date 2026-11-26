@@ -17,7 +17,8 @@ import { cloudInstanceBody, INSTANCE_BASE, meBody, MINTED_META } from './signin-
  *   CLI version; each mints, serves and revokes its own keys. A site that is
  *   down fails every request the way `fetch` fails when nothing answers; a
  *   silent one holds the connection open, and its request fails only when
- *   the request's signal aborts.
+ *   the request's signal aborts; one may refuse its revoke (403) or fail it
+ *   (500), revoking nothing.
  */
 
 const { keyPrefix: K } = cli.identity;
@@ -50,6 +51,12 @@ export interface FleetSite {
    * fails.
    */
   silent?: 'all' | 'me' | 'revoke';
+  /**
+   * What its revoke (`DELETE /cli/auth/key`) answers instead of revoking, the
+   * key staying alive: 403, a site that refuses the self-revoke (the key stays
+   * valid there); 500, one that fails.
+   */
+  revokeAnswer?: 403 | 500;
 }
 
 /** What a silent site never answers, by kind: the methods, and the path they are sent to. */
@@ -218,6 +225,19 @@ export function fleet(sites: FleetSite[] = SITES, hubs: string[] = [HUB_A, HUB_B
       for (const method of methods) {
         routes.push({ method, origin: site.origin, path, reply: ({ signal }) => never(signal) });
       }
+    }
+    if (site.revokeAnswer) {
+      const status = site.revokeAnswer;
+      // Matched before the site's own revoke: the status, and nothing revoked.
+      routes.push({
+        method: 'DELETE',
+        origin: site.origin,
+        path: /\/api\/v1\/cli\/auth\/key$/,
+        reply: () =>
+          status === 403
+            ? deny(403, 'forbidden', 'This key may not revoke itself')
+            : deny(500, 'internal_error', 'Something went wrong')
+      });
     }
     routes.push(
       {

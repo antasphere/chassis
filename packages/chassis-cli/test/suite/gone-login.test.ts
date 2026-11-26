@@ -239,6 +239,57 @@ describe('R2b · a profile that serves its own key revokes a gone login’s kept
     expect(f.alive(keptA)).toBe(true);
     expect(loadConfig(env).profiles.a?.hubKeys?.map((k) => k.apiKey)).toEqual([keptA]);
   }, 10_000);
+
+  /** The two lines of a revoke the site answered without revoking, in the kit's own words (`revokeOnSite`). */
+  const ALREADY_UNUSABLE = 'A stale key this profile kept was already unusable; forgetting it.\n';
+  const REFUSED =
+    'The instance refused to revoke a stale key this profile kept (forbidden): it STAYS VALID server-side; ' +
+    'revoke it from the dashboard. Forgetting the local copy.\n';
+
+  it('the site answers the revoke 401 (the kept key already dead there): its one line, once, and the key forgotten (verifier round 4, note 14)', async () => {
+    const { env, own, keptA } = await ownKeyAndGoneLogin();
+    f.kill(keptA);
+    const h = f.harness(env);
+    expect(await run(['--profile', 'a', 'verify'], h.io)).toBe(0);
+    expect(h.out()).toBe(`ok — ${ADA} (owner) @ ${SITE_A}\n`);
+    expect(h.err()).toBe(ALREADY_UNUSABLE);
+    expect(trace(h)).toEqual([`DELETE ${SITE_A}/api/v1/cli/auth/key`, `GET ${SITE_A}/api/v1/me`]);
+    expect(keysOfProfile(loadConfig(env).profiles.a!)).toEqual([{ apiKey: own, kind: 'own' }]);
+  });
+
+  it('the site refuses the revoke (403): its one line, once, saying the key stays valid there; the key forgotten here, and the next command sends no revoke (verifier round 4, note 14)', async () => {
+    f = fleet([{ origin: SITE_A, names: HUB_A, trusts: HUB_A, revokeAnswer: 403 }, ...SITES.slice(1)]);
+    const { env, own, keptA } = await ownKeyAndGoneLogin();
+    const h = f.harness(env);
+    expect(await run(['--profile', 'a', 'verify'], h.io)).toBe(0);
+    expect(h.out()).toBe(`ok — ${ADA} (owner) @ ${SITE_A}\n`);
+    expect(h.err()).toBe(REFUSED);
+    expect(trace(h)).toEqual([`DELETE ${SITE_A}/api/v1/cli/auth/key`, `GET ${SITE_A}/api/v1/me`]);
+    expect(f.alive(keptA)).toBe(true);
+    expect(keysOfProfile(loadConfig(env).profiles.a!)).toEqual([{ apiKey: own, kind: 'own' }]);
+
+    const next = f.harness(env);
+    expect(await run(['--profile', 'a', 'verify'], next.io)).toBe(0);
+    expect(next.err()).toBe('');
+    expect(trace(next)).toEqual([`GET ${SITE_A}/api/v1/me`]);
+  });
+
+  it('the site fails the revoke (500): no line, the key kept, and the next command sends the revoke again (verifier round 4, note 14)', async () => {
+    f = fleet([{ origin: SITE_A, names: HUB_A, trusts: HUB_A, revokeAnswer: 500 }, ...SITES.slice(1)]);
+    const { env, own, keptA } = await ownKeyAndGoneLogin();
+    const h = f.harness(env);
+    expect(await run(['--profile', 'a', 'verify'], h.io)).toBe(0);
+    expect(h.out()).toBe(`ok — ${ADA} (owner) @ ${SITE_A}\n`);
+    expect(h.err()).toBe('');
+    expect(keysOfProfile(loadConfig(env).profiles.a!).map((k) => k.apiKey)).toEqual([own, keptA]);
+
+    const next = f.harness(env);
+    expect(await run(['--profile', 'a', 'verify'], next.io)).toBe(0);
+    expect(next.err()).toBe('');
+    expect(trace(next)).toEqual([`DELETE ${SITE_A}/api/v1/cli/auth/key`, `GET ${SITE_A}/api/v1/me`]);
+    expect(next.wire[0]?.auth).toBe(`Bearer ${keptA}`);
+    expect(keysOfProfile(loadConfig(env).profiles.a!).map((k) => k.apiKey)).toEqual([own, keptA]);
+  });
 });
 
 describe('R2c · a site that names no hub signs in again at the hub its profile last signed in through', () => {

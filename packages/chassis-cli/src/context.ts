@@ -623,11 +623,13 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
    * included) are revoked on the profile's own site with the base fetch (never
    * the one that watches the own key's 401), each revoke held to the io's
    * limit (`limitedFetchOf`, the limit `--check` uses), no lock held; the keys
-   * the site answered for (revoked, or 401: already dead) are then forgotten,
-   * compare-and-remove, and a key it did not answer for (the limit included)
-   * stays for the next command. A key another profile on disk still holds is
-   * not revoked: it is forgotten on this profile only, and said
-   * (`keysHeldElsewhere`). Nothing of it ever fails the command.
+   * the site answered for (revoked; a 401: already dead; a 403: the site
+   * refused to revoke it, and it stays valid there) are then forgotten,
+   * compare-and-remove, the 401 and the 403 each said in the kit's own words
+   * (`revokeOnSite`); a key it did not answer for (a 5xx, no answer, the
+   * limit) stays for the next command, with no line. A key another profile on
+   * disk still holds is not revoked: it is forgotten on this profile only, and
+   * said (`keysHeldElsewhere`). Nothing of it ever fails the command.
    */
   async function settleOwnKeyProfile(
     io: CliIo,
@@ -655,7 +657,17 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
           await auth.revoke(key.apiKey);
           forget.push(key.apiKey);
         } catch (e) {
-          if (e instanceof CliAuthError && e.status === 401) forget.push(key.apiKey);
+          // A 401 or a 403 forgets the key and says so; a 5xx, no answer or the limit keeps it, silently.
+          if (e instanceof CliAuthError && e.status === 401) {
+            io.err.write('A stale key this profile kept was already unusable; forgetting it.\n');
+            forget.push(key.apiKey);
+          } else if (e instanceof CliAuthError && e.status === 403) {
+            io.err.write(
+              `The instance refused to revoke a stale key this profile kept (${e.code}): it STAYS VALID ` +
+                'server-side; revoke it from the dashboard. Forgetting the local copy.\n'
+            );
+            forget.push(key.apiKey);
+          }
         }
       }
       forgetKeys(io.env, identity.tool, profileName, forget);
