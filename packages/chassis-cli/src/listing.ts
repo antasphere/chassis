@@ -567,13 +567,17 @@ function signInWords(entry: ProfileEntry, all: ProfileEntry[]): string {
   const carried = (s.state === 'needs_login' && loginFix) || (s.state === 'unknown' && unknownFix);
   if (fix && !carried) {
     const twin = all.some((e) => e !== entry && e.saved && sameInstance(e.site.origin, entry.site.origin));
+    // A check of a profile whose count is not told and that this run did not check: never checked yet.
+    // One this run checked and that got no answer is asked again.
     const lead =
       fix.kind === 'remove_profile'
         ? twin
           ? 'a second profile at this site, forget it'
           : 'forget it'
         : fix.kind === 'check'
-          ? 'try again'
+          ? s.staleKeys === null && s.checked === undefined
+            ? 'not checked yet'
+            : 'try again'
           : 'fix it';
     parts.push(`${lead}: ${commandLine(fix)}`);
   }

@@ -280,11 +280,17 @@ describe('profiles, use, config show', () => {
         '',
         'hubbed',
         'http://hubbed',
-        `signed in: ada@x.co at ${HUB}; try again: ${bin} profiles --check`,
+        `signed in: ada@x.co at ${HUB}; not checked yet: ${bin} profiles --check`,
         '-'
       ],
-      ['', 'old', 'http://old', `signed in: ada@x.co at ${HUB}; try again: ${bin} profiles --check`, '-'],
-      ['', 'stray', 'http://stray', `needs a sign-in; try again: ${bin} profiles --check`, '-'],
+      [
+        '',
+        'old',
+        'http://old',
+        `signed in: ada@x.co at ${HUB}; not checked yet: ${bin} profiles --check`,
+        '-'
+      ],
+      ['', 'stray', 'http://stray', `needs a sign-in; not checked yet: ${bin} profiles --check`, '-'],
       ['', 'bare', 'http://bare', `not reached yet: ${bin} profiles --check`, '-']
     ]);
     expect(h.out().split('\n\n')[1]).toBe(

@@ -558,7 +558,7 @@ describe('the truth, as it changes (PRDCT-5190, PRDCT-3522, PRDCT-3060)', () => 
     });
     const text = onMachine(env);
     expect(await run(['profiles'], text.io)).toBe(0);
-    expect(text.out()).toContain(`signed in: ${ADA} at ${HUB_A}; try again: ${bin} profiles --check`);
+    expect(text.out()).toContain(`signed in: ${ADA} at ${HUB_A}; not checked yet: ${bin} profiles --check`);
 
     // Its site asked: it names hub-b, so the key kept through hub-a is the one the next sign-in revokes.
     expect(byName(await listing(env, '--check')).b!.signIn).toMatchObject({
@@ -587,6 +587,36 @@ describe('the truth, as it changes (PRDCT-5190, PRDCT-3522, PRDCT-3060)', () => 
     ]);
     expect(f.alive(keptOld)).toBe(false);
     expect(byName(await listing(env)).b!.signIn.staleKeys).toBe(0);
+  });
+
+  it('the same profile at a site that does not answer: « not checked yet » until --check asks; asked, and nothing answering, « checked: no answer; try again », the count still not told (verifier round 4, open point 13)', async () => {
+    f = fleet([{ origin: REMOTE, names: HUB_A, trusts: HUB_A, down: true }]);
+    const env: Record<string, string> = await tempConfigEnv();
+    seedHub(env, { profiles: { a: { apiKey: f.hubKey(HUB_A, ADA), baseUrl: HUB_A, email: ADA } } });
+    seedTool(env, {
+      activeProfile: 'remote',
+      profiles: { remote: { baseUrl: REMOTE, hubKeys: [kept(HUB_A, ADA, f.toolKey(REMOTE, ADA))] } }
+    });
+    const row = (out: string) => out.split('\n').find((l) => l.split(/\s{2,}/)[1] === 'remote');
+
+    // Never checked: the count not told, and the words say it was never asked.
+    const text = onMachine(env);
+    expect(await run(['profiles'], text.io)).toBe(0);
+    expect(row(text.out())).toContain(
+      `signed in: ${ADA} at ${HUB_A}; not checked yet: ${bin} profiles --check`
+    );
+
+    // Asked, and nothing answered: the count is still not told, and the words say to ask again.
+    const checked = onMachine(env);
+    expect(await run(['profiles', '--check'], checked.io)).toBe(0);
+    expect(row(checked.out())).toContain(
+      `signed in: ${ADA} at ${HUB_A}; checked: no answer; try again: ${bin} profiles --check`
+    );
+    expect(byName(await listing(env, '--check')).remote!.signIn).toMatchObject({
+      checked: 'unreachable',
+      staleKeys: null,
+      fix: CHECK
+    });
   });
 
   it('a profile whose site was never read and that holds no kept key keeps a number: 0, with its own key or with nothing', async () => {
@@ -767,7 +797,7 @@ describe('the text listing (one look)', () => {
       ['', 'new', NEW, `needs a sign-in: ${bin} --profile new login`, '-'],
       ['', 'c', SITE_C, `needs a sign-in: ${bin} --profile c login --email <address>`, '-'],
       ['', 'never', NEVER, `not reached yet: ${bin} profiles --check`, '-'],
-      ['', 'older', SITE_D, `signed in: ${ADA} at ${HUB_A}; try again: ${bin} profiles --check`, '-']
+      ['', 'older', SITE_D, `signed in: ${ADA} at ${HUB_A}; not checked yet: ${bin} profiles --check`, '-']
     ]);
     expect(footer).toBe(
       `This CLI ${VERSION} on ${MACHINE}.\n` +
