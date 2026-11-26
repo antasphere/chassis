@@ -8,6 +8,7 @@ import {
   connectOnDemand,
   firstSet,
   forgetKeys,
+  keysOfProfile,
   normalizeUrl,
   printJson as corePrintJson,
   refreshConnectKey,
@@ -257,6 +258,38 @@ export function isLocalSite(url: string): boolean {
   const [a, b, c, d] = ip.slice(1).map(Number) as [number, number, number, number];
   if ([a, b, c, d].some((n) => n > 255)) return false;
   return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+// ── A key another profile holds ──────────────────────────────────────────────
+
+/**
+ * The keys every OTHER profile on disk holds (verifier round 3, F4): cli-core's
+ * `keysOfProfile` over the file's other profiles, trimmed, each with the first
+ * profile that holds it; a key matches only exactly. Every revoke of a tool
+ * key on a site in the kit asks it first: a key in it is never revoked, it is
+ * forgotten on this profile only (`sayKept` says so), so following a twin's
+ * `remove_profile` never kills the key of the profile that stays.
+ */
+export function keysHeldElsewhere(config: CliConfig, profileName: string): Map<string, string> {
+  const held = new Map<string, string>();
+  for (const [name, profile] of Object.entries(config.profiles)) {
+    if (name === profileName) continue;
+    for (const key of keysOfProfile(profile)) if (!held.has(key.apiKey)) held.set(key.apiKey, name);
+  }
+  return held;
+}
+
+/** The lines a run already said of the keys it kept (one sentence per command, whatever the keys). */
+const keptLines = new WeakMap<CliIo, Set<string>>();
+
+/** The line of a key not revoked on `site` because profile `other` still holds it, said once per run. */
+export function sayKept(io: CliIo, site: string, other: string): void {
+  const line = `Kept on ${normalizeUrl(site)}: profile "${other}" still holds that key.\n`;
+  const said = keptLines.get(io) ?? new Set<string>();
+  if (said.has(line)) return;
+  said.add(line);
+  keptLines.set(io, said);
+  io.err.write(line);
 }
 
 // ── The context ──────────────────────────────────────────────────────────────
@@ -566,7 +599,9 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
    * the one that watches the own key's 401), no lock held; the keys the site
    * answered for (revoked, or 401: already dead) are then forgotten,
    * compare-and-remove, and a key it did not answer for stays for the next
-   * command. Nothing of it ever fails the command.
+   * command. A key another profile on disk still holds is not revoked: it is
+   * forgotten on this profile only, and said (`keysHeldElsewhere`). Nothing
+   * of it ever fails the command.
    */
   async function settleOwnKeyProfile(
     io: CliIo,
@@ -574,22 +609,30 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
     base: typeof globalThis.fetch
   ): Promise<void> {
     try {
-      const profile = loadConfig(io.env).profiles[profileName];
+      const config = loadConfig(io.env);
+      const profile = config.profiles[profileName];
       if (!profile) return;
       const site = normalizeUrl(profileUrl(profile));
       const { stale } = planFor(identity, io.env, profileName, profile, site);
       if (stale.length === 0) return;
+      const elsewhere = keysHeldElsewhere(config, profileName);
       const auth = new CliAuthClient({ baseUrl: site, fetch: base });
-      const dead: string[] = [];
+      const forget: string[] = [];
       for (const key of stale) {
+        const other = elsewhere.get(key.apiKey.trim());
+        if (other) {
+          sayKept(io, site, other);
+          forget.push(key.apiKey);
+          continue;
+        }
         try {
           await auth.revoke(key.apiKey);
-          dead.push(key.apiKey);
+          forget.push(key.apiKey);
         } catch (e) {
-          if (e instanceof CliAuthError && e.status === 401) dead.push(key.apiKey);
+          if (e instanceof CliAuthError && e.status === 401) forget.push(key.apiKey);
         }
       }
-      forgetKeys(io.env, identity.tool, profileName, dead);
+      forgetKeys(io.env, identity.tool, profileName, forget);
     } catch {
       // A settle that cannot be made waits for the next command; this one goes on.
     }

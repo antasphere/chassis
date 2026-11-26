@@ -15,7 +15,7 @@ import {
   type CliProfile
 } from '@antasphere/cli-core';
 import { PlatformApiError, type ChassisClient } from '@antasphere/chassis-sdk';
-import { CliUsageError, isLocalSite, printJson, type CliIo } from '../context.js';
+import { CliUsageError, isLocalSite, keysHeldElsewhere, printJson, sayKept, type CliIo } from '../context.js';
 import type { CliKit } from '../kit.js';
 import {
   describeProfiles,
@@ -330,12 +330,19 @@ export function registerProfileCommands<TClient extends ChassisClient<string>>(
       const site = siteOf(profile);
       const wasDefault = defaultOf(before).name === name;
       // Revoked on the profile's own site, with no lock held; once the site gives no answer the rest is
-      // not tried. The profile is forgotten whatever the site said.
+      // not tried. A key another profile on disk still holds is not revoked: it goes with this profile
+      // only, and that is said. The profile is forgotten whatever the site said.
       const held = keysOfProfile(profile);
+      const elsewhere = keysHeldElsewhere(before, name);
       let revoked = 0;
       let refused = 0;
       let silent = 0;
       for (const key of held) {
+        const other = elsewhere.get(key.apiKey);
+        if (other) {
+          sayKept(io, site, other);
+          continue;
+        }
         const answer = silent > 0 ? 'silent' : await revokeAt(site, key.apiKey);
         if (answer === 'revoked') revoked += 1;
         else if (answer === 'refused') refused += 1;

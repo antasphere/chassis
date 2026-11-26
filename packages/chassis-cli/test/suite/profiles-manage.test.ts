@@ -1,8 +1,9 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import type { ProfilesListing } from '@antasphere/chassis-cli';
 import { routedHarness, tempConfigEnv, type Route } from '@antasphere/chassis-cli/testing';
 import { cli, run } from '@chassis-cli-test/host';
-import { ADA, BEA, fleet, HUB_A, HUB_B, SITE_A, SITE_B, trace } from './fleet.js';
-import { cliVersionOf, kept, key, seedHub, seedTool } from './signin-fixtures.js';
+import { ADA, BEA, fleet, HUB_A, HUB_B, SITE_A, SITE_B, trace, type Harness } from './fleet.js';
+import { cliVersionOf, fresh, kept, key, seedHub, seedTool } from './signin-fixtures.js';
 
 /**
  * A profile is a site, and it can be managed (R3, PRDCT-5190): `profiles add`
@@ -365,6 +366,137 @@ describe('profiles remove', () => {
       expect(h.wire).toEqual([]);
     }
     expect(Object.keys(loadConfig(env).profiles)).toEqual(['a']);
+  });
+});
+
+describe('a key another profile on disk still holds is never revoked on its site (F4)', () => {
+  /** A file from before one profile per site: profile a and its twin a-twin at site-a; ada's login at hub-a by default. */
+  async function twins(
+    a: Record<string, unknown>,
+    twin: Record<string, unknown>,
+    logins: Record<string, Record<string, string>> = {
+      a: { apiKey: f.hubKey(HUB_A, ADA), baseUrl: HUB_A, email: ADA }
+    }
+  ) {
+    const env: Record<string, string> = await tempConfigEnv();
+    seedHub(env, { profiles: logins });
+    seedTool(env, {
+      activeProfile: 'a',
+      profiles: {
+        a: { baseUrl: SITE_A, site: fresh(HUB_A), ...a },
+        'a-twin': { baseUrl: `${SITE_A}/`, site: fresh(HUB_A), ...twin }
+      }
+    });
+    return env;
+  }
+
+  const KEPT = (other: string) => `Kept on ${SITE_A}: profile "${other}" still holds that key.\n`;
+  const CONNECTED = `Connected to ${SITE_A} as ${ADA} via Antasphere.\n`;
+  /** The requests of a harness that carried a key. */
+  const carrying = (h: Harness, k: string) => h.wire.filter((c) => c.auth === `Bearer ${k}`);
+
+  it('profiles remove of the twin the listing names: the key both hold is not revoked, the line says so, the twin goes, and a still answers', async () => {
+    const shared = f.toolKey(SITE_A, ADA, 'own');
+    const theirs = f.toolKey(SITE_A, ADA);
+    const env = await twins({ apiKey: shared }, { apiKey: shared, hubKeys: [kept(HUB_A, ADA, theirs)] });
+    const listed = f.harness(env);
+    expect(await run(['profiles', '--json'], listed.io)).toBe(0);
+    const fix = (JSON.parse(listed.out()) as ProfilesListing).profiles.find((p) => p.name === 'a-twin')!
+      .signIn.fix;
+    expect(fix).toEqual({ kind: 'remove_profile', argv: [bin, 'profiles', 'remove', 'a-twin'] });
+
+    const rm = f.harness(env);
+    expect(await run(fix!.argv.slice(1), rm.io)).toBe(0);
+    // The twin's own kept key is revoked; the key a holds too is not.
+    expect(trace(rm)).toEqual([`DELETE ${SITE_A}/api/v1/cli/auth/key`]);
+    expect(carrying(rm, shared)).toEqual([]);
+    expect(rm.err()).toBe(KEPT('a'));
+    expect(rm.out()).toBe(`Profile "a-twin" removed (${SITE_A}): 1 key revoked there.\n`);
+    expect([f.alive(shared), f.alive(theirs)]).toEqual([true, false]);
+    expect(Object.keys(loadConfig(env).profiles)).toEqual(['a']);
+
+    const v = f.harness(env);
+    expect(await run(['--profile', 'a', 'verify'], v.io)).toBe(0);
+    expect(v.out()).toBe(`ok — ${ADA} (owner) @ ${SITE_A}\n`);
+  });
+
+  it('logout on a profile whose own key its twin holds: no revoke, the line, the key forgotten on that profile only, and the twin still answers', async () => {
+    const shared = f.toolKey(SITE_A, ADA, 'own');
+    const env = await twins({ apiKey: shared, email: ADA }, { apiKey: shared });
+    const h = f.harness(env);
+    expect(await run(['logout'], h.io)).toBe(0);
+    expect(h.wire).toEqual([]);
+    expect(h.err()).toBe(KEPT('a-twin'));
+    expect(h.out()).toBe(`Logged out of profile "a" on ${SITE_A}.\n`);
+    expect(f.alive(shared)).toBe(true);
+    const config = loadConfig(env);
+    expect(config.profiles.a).toEqual({ baseUrl: SITE_A, site: expect.any(Object) });
+    expect(config.profiles['a-twin']?.apiKey).toBe(shared);
+    expect(await run(['--profile', 'a-twin', 'verify'], f.harness(env).io)).toBe(0);
+  });
+
+  it('a key pasted on a profile whose own key its twin holds: the key it replaces is not revoked, and the line says so', async () => {
+    const shared = f.toolKey(SITE_A, ADA, 'own');
+    const pasted = f.toolKey(SITE_A, ADA, 'paste');
+    const env = await twins({ apiKey: shared }, { apiKey: shared });
+    const h = f.harness(env);
+    expect(await run(['--profile', 'a', 'login', '--api-key', pasted], h.io)).toBe(0);
+    expect(trace(h)).toEqual([`GET ${SITE_A}/api/v1/me`]);
+    expect(h.err()).toBe(KEPT('a-twin'));
+    expect(loadConfig(env).profiles.a?.apiKey).toBe(pasted);
+    expect(f.alive(shared)).toBe(true);
+    expect(await run(['--profile', 'a-twin', 'verify'], f.harness(env).io)).toBe(0);
+  });
+
+  it('a hub login on a profile whose own key its twin holds: once the exchange succeeded that key is forgotten here, not revoked, and the line says so', async () => {
+    const shared = f.toolKey(SITE_A, ADA, 'own');
+    const env = await twins({ apiKey: shared }, { apiKey: shared });
+    const h = f.harness(env);
+    expect(await run(['--profile', 'a', 'login'], h.io)).toBe(0);
+    expect(h.wire.filter((c) => c.method === 'DELETE')).toEqual([]);
+    expect(carrying(h, shared)).toEqual([]);
+    expect(h.err()).toBe(`${CONNECTED}${KEPT('a-twin')}`);
+    expect(loadConfig(env).profiles.a?.apiKey).toBeUndefined();
+    expect(loadConfig(env).profiles.a?.hubKeys?.map((k) => [k.hub, k.email])).toEqual([[HUB_A, ADA]]);
+    expect(f.alive(shared)).toBe(true);
+    expect(await run(['--profile', 'a-twin', 'verify'], f.harness(env).io)).toBe(0);
+  });
+
+  it('a hub login on a profile whose kept key and own key its twin holds too: neither is revoked, one line for the command, and the twin still answers', async () => {
+    const shared = f.toolKey(SITE_A, ADA, 'own');
+    const keptBoth = f.toolKey(SITE_A, ADA);
+    const both = { apiKey: shared, hubKeys: [kept(HUB_A, ADA, keptBoth)] };
+    const env = await twins(both, both);
+    const h = f.harness(env);
+    expect(await run(['--profile', 'a', 'login'], h.io)).toBe(0);
+    expect(h.wire.filter((c) => c.method === 'DELETE')).toEqual([]);
+    expect([carrying(h, shared), carrying(h, keptBoth)]).toEqual([[], []]);
+    // Before the exchange the kept key, after it the own key: the same sentence, said once.
+    expect(h.err()).toBe(`${KEPT('a-twin')}${CONNECTED}`);
+    const a = loadConfig(env).profiles.a;
+    expect(a?.apiKey).toBeUndefined();
+    expect(a?.hubKeys?.map((k) => k.apiKey)).not.toContain(keptBoth);
+    expect(a?.hubKeys).toHaveLength(1);
+    expect([f.alive(shared), f.alive(keptBoth)]).toEqual([true, true]);
+    expect(await run(['--profile', 'a-twin', 'verify'], f.harness(env).io)).toBe(0);
+  });
+
+  it('a profile serving its own key whose stale kept key its twin holds too: the settle before its first request does not revoke it, forgets it here, and says so', async () => {
+    const own = f.toolKey(SITE_A, ADA, 'own');
+    const keptBoth = f.toolKey(SITE_A, ADA);
+    // ada's login is gone: only bea's at hub-b is in place, so the kept key is stale on both.
+    const env = await twins(
+      { apiKey: own, hubKeys: [kept(HUB_A, ADA, keptBoth)] },
+      { hubKeys: [kept(HUB_A, ADA, keptBoth)] },
+      { b: { apiKey: f.hubKey(HUB_B, BEA), baseUrl: HUB_B, email: BEA } }
+    );
+    const h = f.harness(env);
+    expect(await run(['--profile', 'a', 'verify'], h.io)).toBe(0);
+    expect(trace(h)).toEqual([`GET ${SITE_A}/api/v1/me`]);
+    expect(h.err()).toBe(KEPT('a-twin'));
+    expect(loadConfig(env).profiles.a?.hubKeys).toBeUndefined();
+    expect(loadConfig(env).profiles['a-twin']?.hubKeys?.map((k) => k.apiKey)).toEqual([keptBoth]);
+    expect(f.alive(keptBoth)).toBe(true);
   });
 });
 

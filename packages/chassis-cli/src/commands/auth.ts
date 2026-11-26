@@ -28,7 +28,15 @@ import {
 } from '@antasphere/cli-core';
 import type { ChassisClient } from '@antasphere/chassis-sdk';
 import { DEFAULT_HUB_URL } from '../identity.js';
-import { CliUsageError, printJson, stdinApiKey, type CliContext, type CliIo } from '../context.js';
+import {
+  CliUsageError,
+  keysHeldElsewhere,
+  printJson,
+  sayKept,
+  stdinApiKey,
+  type CliContext,
+  type CliIo
+} from '../context.js';
 import type { CliKit } from '../kit.js';
 import type { MeResponse } from '../workspace.js';
 
@@ -180,10 +188,21 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
    * The own key a new one replaced (a self-hosted re-login, a pasted key),
    * revoked on the profile's own site once the new key is saved, with no lock
    * held: nothing is left live behind it. A site that refuses the revoke, or
-   * does not answer, is said; the key stays valid there.
+   * does not answer, is said; the key stays valid there. A key another
+   * profile on disk still holds is not revoked (the save already took it off
+   * this one), and that is said.
    */
-  async function retireReplaced(site: string, replaced: string | undefined): Promise<void> {
+  async function retireReplaced(
+    profileName: string,
+    site: string,
+    replaced: string | undefined
+  ): Promise<void> {
     if (!replaced) return;
+    const other = keysHeldElsewhere(loadConfig(io.env), profileName).get(replaced.trim());
+    if (other) {
+      sayKept(io, site, other);
+      return;
+    }
     try {
       await revokeOnSite(site, replaced, 'the replaced key', true);
     } catch (e) {
@@ -387,8 +406,9 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
    * login's slot (a login is an explicit re-sign-in; cli-core would still
    * serve it) and the replaced account's are revoked on the profile's own
    * site with no lock held, then forgotten (compare-and-remove). A key the
-   * site did not answer for stays. The profile's own key is NOT among them:
-   * it goes only once the exchange succeeded (`retireOwnKey`).
+   * site did not answer for stays; one another profile on disk still holds is
+   * not revoked, only forgotten here, and said. The profile's own key is NOT
+   * among them: it goes only once the exchange succeeded (`retireOwnKey`).
    */
   async function retireBeforeExchange(
     profileName: string,
@@ -397,7 +417,8 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
     login: CliLogin,
     replaced: CliLogin | undefined
   ): Promise<void> {
-    const profile = loadConfig(io.env).profiles[profileName];
+    const config = loadConfig(io.env);
+    const profile = config.profiles[profileName];
     if (!profile || !sameInstance(profileUrl(profile), site)) return;
     const accounts = [login.email, replaced?.email];
     const slots = new Set([login.name, replaced?.name].filter((n): n is string => n !== undefined));
@@ -415,8 +436,15 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
         (k.kind === 'old' && oldOfLogin.has(k.apiKey))
     );
     if (doomed.length === 0) return;
+    const elsewhere = keysHeldElsewhere(config, profileName);
     const forget: string[] = [];
     for (const key of doomed) {
+      const other = elsewhere.get(key.apiKey);
+      if (other) {
+        sayKept(io, profileUrl(profile), other);
+        forget.push(key.apiKey);
+        continue;
+      }
       try {
         await revokeOnSite(profileUrl(profile), key.apiKey, describeKey(key), true);
         forget.push(key.apiKey);
@@ -440,14 +468,20 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
    * replaces it, PRDCT-3522) is revoked on the profile's own site with no
    * lock held, then forgotten compare-and-remove, with the address stored
    * beside it. An exchange that fails leaves it on the profile, alive; a key
-   * the site did not answer for stays.
+   * the site did not answer for stays. A key another profile on disk still
+   * holds is not revoked: it is forgotten here only, and said.
    */
   async function retireOwnKey(profileName: string, site: string, own: string | undefined): Promise<void> {
     if (!own) return;
-    try {
-      await revokeOnSite(site, own, 'the profile key', true);
-    } catch {
-      return;
+    const other = keysHeldElsewhere(loadConfig(io.env), profileName).get(own.trim());
+    if (other) {
+      sayKept(io, site, other);
+    } else {
+      try {
+        await revokeOnSite(site, own, 'the profile key', true);
+      } catch {
+        return;
+      }
     }
     forgetKeys(io.env, identity.tool, profileName, [own]);
     dropOwnEmail(profileName);
@@ -510,7 +544,7 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
         }
         const me = await createClient({ baseUrl, apiKey: pasted, fetch: fetchOf() }).me();
         const { path, madeDefault, replaced } = saveOwnKey(profileName, baseUrl, pasted, me.user.email);
-        await retireReplaced(site, replaced);
+        await retireReplaced(profileName, site, replaced);
         if (globals.json) {
           printJson(io, {
             profile: profileName,
@@ -603,7 +637,7 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
       const minted = await instanceLogin(baseUrl, opts);
       const me = await createClient({ baseUrl, apiKey: minted.key, fetch: fetchOf() }).me();
       const { path, madeDefault, replaced } = saveOwnKey(profileName, baseUrl, minted.key, minted.email);
-      await retireReplaced(site, replaced);
+      await retireReplaced(profileName, site, replaced);
       if (globals.json) {
         printJson(io, {
           profile: profileName,
@@ -724,18 +758,26 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
       // URL: a key must not travel to a different site, not even to die (a
       // foreign host would see the key AND the real one would survive while
       // we report it gone). The lock is never held across the network: the
-      // keys are read, revoked, then forgotten compare-and-remove.
+      // keys are read, revoked, then forgotten compare-and-remove. A key
+      // another profile on disk still holds is not revoked: it is forgotten
+      // on this profile only, and said.
       const baseUrl = profileUrl(profile);
       const keys = keysOfProfile(profile);
+      const elsewhere = keysHeldElsewhere(ctx.config, profileName);
       const behind = loginsBehind(profile, loginsNow());
       let revoked = 0;
       let refused = 0;
       const done: string[] = [];
       try {
         for (const key of keys) {
-          const answer = await revokeOnSite(baseUrl, key.apiKey, describeKey(key));
-          if (answer === 'revoked') revoked += 1;
-          if (answer === 'refused') refused += 1;
+          const other = elsewhere.get(key.apiKey);
+          if (other) {
+            sayKept(io, baseUrl, other);
+          } else {
+            const answer = await revokeOnSite(baseUrl, key.apiKey, describeKey(key));
+            if (answer === 'revoked') revoked += 1;
+            if (answer === 'refused') refused += 1;
+          }
           done.push(key.apiKey);
         }
       } finally {
