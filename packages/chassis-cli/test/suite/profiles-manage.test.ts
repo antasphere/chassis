@@ -524,6 +524,49 @@ describe('a key another profile on disk still holds is never revoked on its site
     expect(loadConfig(env).profiles['a-twin']?.hubKeys?.map((k) => k.apiKey)).toEqual([keptBoth]);
     expect(f.alive(keptBoth)).toBe(true);
   });
+
+  it('a profile at ANOTHER site holding the same key (a file an older CLI or a hand wrote) is no holder: profiles remove a revokes that key at site-a, once, with no « Kept on » line (verifier round 4, finding 3)', async () => {
+    const shared = f.toolKey(SITE_A, ADA, 'own');
+    const env: Record<string, string> = await tempConfigEnv();
+    seedHub(env, { profiles: { a: { apiKey: f.hubKey(HUB_A, ADA), baseUrl: HUB_A, email: ADA } } });
+    seedTool(env, {
+      activeProfile: 'b',
+      profiles: {
+        a: { baseUrl: SITE_A, site: fresh(HUB_A), apiKey: shared },
+        b: { baseUrl: SITE_B, site: fresh(HUB_B), apiKey: shared }
+      }
+    });
+    const h = f.harness(env);
+    expect(await run(['profiles', 'remove', 'a'], h.io)).toBe(0);
+    expect(h.wire.map((c) => `${c.method} ${c.origin}${c.path} ${c.auth}`)).toEqual([
+      `DELETE ${SITE_A}/api/v1/cli/auth/key Bearer ${shared}`
+    ]);
+    expect(h.err()).toBe('');
+    expect(h.out()).toBe(`Profile "a" removed (${SITE_A}): 1 key revoked there.\n`);
+    expect(f.alive(shared)).toBe(false);
+    expect(Object.keys(loadConfig(env).profiles)).toEqual(['b']);
+  });
+
+  it.each([
+    ['the profile with no baseUrl', 'cloud', 'twin'],
+    ['its twin that names the cloud URL', 'twin', 'cloud']
+  ])(
+    'a profile with no baseUrl is at the cloud URL, and so is a twin that names it: removing %s keeps the key both hold, and says so (verifier round 4, finding 3)',
+    async (_which, removed, holder) => {
+      const shared = f.toolKey(CLOUD, ADA, 'own');
+      const env: Record<string, string> = await tempConfigEnv();
+      seedTool(env, {
+        activeProfile: holder,
+        profiles: { cloud: { apiKey: shared }, twin: { baseUrl: `${CLOUD}/`, apiKey: shared } }
+      });
+      const h = f.harness(env);
+      expect(await run(['profiles', 'remove', removed], h.io)).toBe(0);
+      expect(h.wire).toEqual([]);
+      expect(h.err()).toBe(`Kept on ${CLOUD}: profile "${holder}" still holds that key.\n`);
+      expect(loadConfig(env).profiles[holder]?.apiKey).toBe(shared);
+      expect(Object.keys(loadConfig(env).profiles)).toEqual([holder]);
+    }
+  );
 });
 
 describe('profiles, its subcommands and its options', () => {

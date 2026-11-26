@@ -198,7 +198,7 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
     replaced: string | undefined
   ): Promise<void> {
     if (!replaced) return;
-    const other = keysHeldElsewhere(loadConfig(io.env), profileName).get(replaced.trim());
+    const other = keysHeldElsewhere(loadConfig(io.env), profileName, identity.cloudUrl).get(replaced.trim());
     if (other) {
       sayKept(io, site, other);
       return;
@@ -467,7 +467,7 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
         (k.kind === 'old' && oldOfLogin.has(k.apiKey))
     );
     if (doomed.length === 0) return;
-    const elsewhere = keysHeldElsewhere(config, profileName);
+    const elsewhere = keysHeldElsewhere(config, profileName, identity.cloudUrl);
     const forget: string[] = [];
     for (const key of doomed) {
       const other = elsewhere.get(key.apiKey);
@@ -504,7 +504,7 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
    */
   async function retireOwnKey(profileName: string, site: string, own: string | undefined): Promise<void> {
     if (!own) return;
-    const other = keysHeldElsewhere(loadConfig(io.env), profileName).get(own.trim());
+    const other = keysHeldElsewhere(loadConfig(io.env), profileName, identity.cloudUrl).get(own.trim());
     if (other) {
       sayKept(io, site, other);
     } else {
@@ -794,7 +794,7 @@ export function registerAuthCommands<TClient extends ChassisClient<string>>(
       // on this profile only, and said.
       const baseUrl = profileUrl(profile);
       const keys = keysOfProfile(profile);
-      const elsewhere = keysHeldElsewhere(ctx.config, profileName);
+      const elsewhere = keysHeldElsewhere(ctx.config, profileName, identity.cloudUrl);
       const behind = loginsBehind(profile, loginsNow());
       let revoked = 0;
       let refused = 0;

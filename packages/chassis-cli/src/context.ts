@@ -8,9 +8,10 @@ import {
   connectOnDemand,
   firstSet,
   forgetKeys,
-  keysOfProfile,
+  keysHeldElsewhere as coreKeysHeldElsewhere,
   normalizeUrl,
   printJson as corePrintJson,
+  profileUrl as coreProfileUrl,
   refreshConnectKey,
   resolveBaseUrl,
   sameInstance,
@@ -288,20 +289,26 @@ export function limitedFetchOf(base: typeof globalThis.fetch, io: CliIo): typeof
 // ── A key another profile holds ──────────────────────────────────────────────
 
 /**
- * The keys every OTHER profile on disk holds (verifier round 3, F4): cli-core's
- * `keysOfProfile` over the file's other profiles, trimmed, each with the first
- * profile that holds it; a key matches only exactly. Every revoke of a tool
- * key on a site in the kit asks it first: a key in it is never revoked, it is
- * forgotten on this profile only (`sayKept` says so), so following a twin's
- * `remove_profile` never kills the key of the profile that stays.
+ * The keys every OTHER profile at the same site holds (verifier round 3, F4;
+ * round 4, finding 3): cli-core's rule (`keysHeldElsewhere`, R2's one rule),
+ * asked for the site of `profileName` (cli-core `profileUrl`: its `baseUrl`,
+ * else the tool's cloud URL). Each key, trimmed, maps to the first profile at
+ * that site that holds it; a key matches only exactly; a profile at another
+ * site never counts, since it can never use the key. A profile with no site
+ * gets an empty map. Every revoke of a tool key on a site in the kit asks it
+ * first: a key in it is never revoked, it is forgotten on this profile only
+ * (`sayKept` says so), so following a twin's `remove_profile` never kills the
+ * key of the profile that stays.
  */
-export function keysHeldElsewhere(config: CliConfig, profileName: string): Map<string, string> {
-  const held = new Map<string, string>();
-  for (const [name, profile] of Object.entries(config.profiles)) {
-    if (name === profileName) continue;
-    for (const key of keysOfProfile(profile)) if (!held.has(key.apiKey)) held.set(key.apiKey, name);
-  }
-  return held;
+export function keysHeldElsewhere(
+  config: CliConfig,
+  profileName: string,
+  cloudUrl: string
+): Map<string, string> {
+  const profile = config.profiles[profileName];
+  const site = profile ? coreProfileUrl(profile, cloudUrl) : undefined;
+  if (!site) return new Map();
+  return coreKeysHeldElsewhere(config, profileName, site, cloudUrl);
 }
 
 /** The lines a run already said of the keys it kept (one sentence per command, whatever the keys). */
@@ -643,7 +650,7 @@ export function createContext<TClient extends ChassisClient<string>>(input: {
       const site = normalizeUrl(profileUrl(profile));
       const { stale } = planFor(identity, io.env, profileName, profile, site);
       if (stale.length === 0) return;
-      const elsewhere = keysHeldElsewhere(config, profileName);
+      const elsewhere = keysHeldElsewhere(config, profileName, identity.cloudUrl);
       const auth = new CliAuthClient({ baseUrl: site, fetch: limitedFetchOf(base, io) });
       const forget: string[] = [];
       for (const key of stale) {

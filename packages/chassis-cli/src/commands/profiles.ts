@@ -331,7 +331,7 @@ export function registerProfileCommands<TClient extends ChassisClient<string>>(
       // not tried. A key another profile on disk still holds is not revoked: it goes with this profile
       // only, and that is said. The profile is forgotten whatever the site said.
       const held = keysOfProfile(profile);
-      const elsewhere = keysHeldElsewhere(before, name);
+      const elsewhere = keysHeldElsewhere(before, name, cloudUrl);
       let revoked = 0;
       let refused = 0;
       let silent = 0;
