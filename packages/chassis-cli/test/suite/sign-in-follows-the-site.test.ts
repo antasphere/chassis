@@ -388,7 +388,7 @@ describe('login --email replaces the login at its hub only (ruling 3)', () => {
   });
 });
 
-describe('a new hub key is filed under the hub its email code ran at, even when its entry left the hub file meanwhile (F1)', () => {
+describe('a new hub key is filed under the hub its email code ran at, even when its entry left the hub file, or was written anew at another hub, meanwhile (F1)', () => {
   /** A site whose discovery names the default hub, and a second site that names hub-a. */
   const CLOUD_SITE = 'https://cloud-site.example.com';
   const SITE_C = 'https://site-c.example.com';
@@ -483,6 +483,88 @@ describe('a new hub key is filed under the hub its email code ran at, even when 
     expect(h.err()).toContain('The stored Antasphere login was rejected: signing in again.\n');
     expect(h.out()).toBe(`Signed in as Ada <${ADA}> in Acme on ${SITE_A}.\n`);
     await filedAtHubA(env, h, ADA);
+  });
+
+  /**
+   * The code's prompt: while the person reads the mail, another command writes the login "a" anew at
+   * hub-b, as bea. Answers the hub key it wrote there.
+   */
+  function rewrittenAtHubBDuringTheCode(h: Harness, env: Record<string, string>, email = ''): () => string {
+    let written = '';
+    h.io.prompt = async (question) => {
+      if (/mail/i.test(question)) return email;
+      written = f.hubKey(HUB_B, BEA);
+      updateCoreConfig(env, HUB_TOOL, (config) => {
+        config.profiles.a = { apiKey: written, baseUrl: HUB_B, email: BEA };
+      });
+      return '123456';
+    };
+    return () => written;
+  }
+
+  /**
+   * The key the code minted is filed on the entry "a" at hub-a, and it reaches `POST hub-a/…/sso/tool-token`
+   * only: the login's own exchange, then the next command on a site that names hub-a; nothing of it at a
+   * site that names the default hub, nor at one that names hub-b.
+   */
+  async function filedAtHubAOnly(
+    env: Record<string, string>,
+    login: Harness,
+    before: string[],
+    other: string,
+    email: string
+  ): Promise<void> {
+    const entry = loadCoreConfig(env, HUB_TOOL).profiles.a;
+    const minted = entry?.apiKey ?? '';
+    expect(entry).toMatchObject({ baseUrl: HUB_A, email });
+    expect(minted).not.toBe(other);
+    expect(before).not.toContain(minted);
+    expect(f.keys()).toContain(minted);
+    const next: Harness[] = [];
+    for (const site of [SITE_C, CLOUD_SITE, SITE_B]) {
+      const h = f.harness(env);
+      await run(['--api-url', site, 'verify'], h.io);
+      next.push(h);
+    }
+    expect(carrying(minted, login, ...next)).toEqual([
+      `POST ${HUB_A}/api/v1/sso/tool-token`,
+      `POST ${HUB_A}/api/v1/sso/tool-token`
+    ]);
+  }
+
+  it('login --email cy replaces ada at hub-a while another command writes the login "a" anew at hub-b during the code: cy’s key is filed at a@hub-a, and reaches hub-a’s tool-token only (verifier round 4, finding 8)', async () => {
+    const env: Record<string, string> = await tempConfigEnv();
+    seedHub(env, {
+      activeProfile: 'a',
+      profiles: { a: { apiKey: f.hubKey(HUB_A, ADA), baseUrl: HUB_A, email: ADA } }
+    });
+    seedTool(env, {
+      activeProfile: 'a',
+      profiles: {
+        a: { baseUrl: SITE_A, site: fresh(HUB_A), hubKeys: [kept(HUB_A, ADA, f.toolKey(SITE_A, ADA))] }
+      }
+    });
+    const before = f.keys();
+    const h = f.harness(env);
+    const other = rewrittenAtHubBDuringTheCode(h, env);
+    const code = await run(['login', '--email', CY], h.io);
+    await filedAtHubAOnly(env, h, before, other(), CY);
+    expect(code).toBe(0);
+  });
+
+  it('a stored hub key hub-a rejects, signed in again while another command writes the login "a" anew at hub-b during the code: the new key is filed at a@hub-a, and reaches hub-a’s tool-token only (verifier round 4, finding 8)', async () => {
+    const env: Record<string, string> = await tempConfigEnv();
+    seedHub(env, {
+      activeProfile: 'a',
+      profiles: { a: { apiKey: 'ant_gone_secretsecretsecret', baseUrl: HUB_A, email: ADA } }
+    });
+    seedTool(env, { activeProfile: 'a', profiles: { a: { baseUrl: SITE_A, site: fresh(HUB_A) } } });
+    const before = f.keys();
+    const h = f.harness(env);
+    const other = rewrittenAtHubBDuringTheCode(h, env, ADA);
+    const code = await run(['login'], h.io);
+    await filedAtHubAOnly(env, h, before, other(), ADA);
+    expect(code).toBe(0);
   });
 });
 
