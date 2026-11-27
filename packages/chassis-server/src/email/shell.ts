@@ -152,6 +152,8 @@ export interface ShellParts {
   title: string;
   /** The blocks. */
   body: string;
+  /** The mail's language (BCP 47), written on <html lang>; English when absent. */
+  lang?: string;
 }
 
 export function makeShell(brand: MailBrand): (parts: ShellParts) => string {
@@ -164,7 +166,7 @@ export function makeShell(brand: MailBrand): (parts: ShellParts) => string {
       : '';
 
     return `<!doctype html>
-<html lang="en">
+<html lang="${esc(parts.lang ?? 'en')}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
